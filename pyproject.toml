@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "numpy>=2.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ochre"
+version = "0.0.1"
+description = "A Linux-native, layered raster image editor"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "GPL-3.0-or-later" }
+
+# The engine is numpy + Pillow + stdlib. Qt is deliberately NOT here: the
+# engine installs, imports and passes its whole test suite without Qt, which
+# is what makes headless batch use and CI possible.
+dependencies = [
+    "numpy>=2.0",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6-Essentials>=6.6"]
+
+[project.scripts]
+ochre = "ochre.ui:main"
+
+[tool.setuptools.packages.find]
+include = ["ochre*"]
+
+[tool.setuptools.package-data]
+ochre = ["../data/*.ini"]
