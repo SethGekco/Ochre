@@ -365,17 +365,24 @@ Things a from-scratch implementation gets wrong, established by surveying the Op
 The plan describes Paint.NET's full tool set. What exists is the subset the
 phases actually reached:
 
-**Built** — pencil, paintbrush, eraser, paint bucket, colour picker, and four
-selection tools (rectangle, ellipse, lasso, magic wand). Adjustments:
-brightness/contrast, levels, hue/saturation, invert, posterize, black &
-white, sepia. Effects: gaussian blur, sharpen, add noise.
+**Built** — 14 tools: pencil, paintbrush, eraser, paint bucket, colour
+picker; four selection tools (rectangle, ellipse, lasso, magic wand); four
+shape tools (line, rectangle, ellipse, freeform); and a gradient with five
+types. Adjustments: brightness/contrast, levels, hue/saturation, invert,
+posterize, black & white, sepia. Effects: gaussian blur, sharpen, add noise.
 
-**Not built** — text, gradient, shapes (line, rectangle, ellipse, freeform),
-clone stamp, move-selection and move-pixels, zoom and pan tools. None is
-blocked by the architecture; each is a `Tool` subclass registered in
-`data/tools.ini`, and the stroke session's `restore()` already provides the
-rubber-band preview the shape tools need. The text tool is the only one with
-a design question attached — see open question 5.
+**Not built** — text, clone stamp, move-selection and move-pixels, zoom and
+pan tools. None is blocked by the architecture; each is a `Tool` subclass
+registered in `data/tools.ini`. The text tool is the only one with a design
+question attached — see open question 5.
+
+The shape tools did confirm the prediction this document makes in the history
+section: because they redraw from scratch on every motion event via
+`StrokeSession.restore()`, and that buffer is the same one that becomes the
+undo entry, the rubber-band preview came for free and cannot disagree with
+what is committed. Their outlines are also composed from the *selection*
+rasterisers — `coverage(grown)` minus `coverage(shrunk)` — so they inherited
+the supersampling symmetry fix rather than needing their own.
 
 ## Open questions
 
