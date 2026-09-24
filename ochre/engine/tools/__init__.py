@@ -13,6 +13,8 @@ from .base import (MOD_ALT, MOD_CTRL, MOD_NONE, MOD_SHIFT, Tool, ToolContext,
                    ToolEvent, constrain_angle, constrain_square, drag_rect)
 from .paint import (BrushTool, BucketFillTool, EraserTool, EyedropperTool,
                     PencilTool)
+from .movetools import (CloneStampTool, MovePixelsTool,
+                        MoveSelectionTool)
 from .select import (EllipseSelectTool, LassoTool, MagicWandTool,
                      RectSelectTool)
 from .shapetools import (EllipseTool, FreeformTool, GradientTool, LineTool,
@@ -23,7 +25,7 @@ BUILTIN = {
         PencilTool, BrushTool, EraserTool, BucketFillTool, EyedropperTool,
         RectSelectTool, EllipseSelectTool, LassoTool, MagicWandTool,
         LineTool, RectangleTool, EllipseTool, FreeformTool, GradientTool,
-        TextTool,
+        TextTool, CloneStampTool, MovePixelsTool, MoveSelectionTool,
     )
 }
 
@@ -113,6 +115,7 @@ __all__ = [
     "PencilTool", "BrushTool", "EraserTool", "BucketFillTool",
     "EyedropperTool", "RectSelectTool", "EllipseSelectTool", "LassoTool",
     "MagicWandTool", "LineTool", "RectangleTool", "EllipseTool",
-    "FreeformTool", "GradientTool", "TextTool", "constrain_angle", "constrain_square", "drag_rect",
+    "FreeformTool", "GradientTool", "TextTool", "CloneStampTool", "MovePixelsTool",
+    "MoveSelectionTool", "constrain_angle", "constrain_square", "drag_rect",
     "MOD_NONE", "MOD_SHIFT", "MOD_CTRL", "MOD_ALT",
 ]

@@ -365,15 +365,25 @@ Things a from-scratch implementation gets wrong, established by surveying the Op
 The plan describes Paint.NET's full tool set. What exists is the subset the
 phases actually reached:
 
-**Built** — 15 tools: pencil, paintbrush, eraser, paint bucket, colour
-picker; four selection tools (rectangle, ellipse, lasso, magic wand); four
-shape tools (line, rectangle, ellipse, freeform); a gradient with five
-types; and text. Adjustments: brightness/contrast, levels, hue/saturation, invert,
+**Built** — 18 tools: pencil, paintbrush, eraser, paint bucket, colour
+picker, clone stamp; four selection tools (rectangle, ellipse, lasso, magic
+wand); four shape tools (line, rectangle, ellipse, freeform); a gradient with
+five types; text; and the two move tools. Adjustments: brightness/contrast, levels, hue/saturation, invert,
 posterize, black & white, sepia. Effects: gaussian blur, sharpen, add noise.
 
-**Not built** — clone stamp, move-selection and move-pixels, zoom and pan
-tools. None is blocked by the architecture; each is a `Tool` subclass
-registered in `data/tools.ini`.
+**Not built** — zoom and pan as TOOLS. Both functions exist (the canvas
+handles wheel-zoom and middle-drag pan directly), so what is missing is only
+the toolbar affordance for people who expect one.
+
+Moving pixels turned out to be the one interaction that does not fit the
+"mark dirty and redraw" pattern, because it is a LIFT rather than a paint.
+The float-and-stamp model rides on the stroke session like everything else,
+but with one non-obvious requirement: the erase has to be RE-APPLIED after
+every restore. `restore()` puts back pre-stroke pixels, which includes the
+content the lift just removed — so restoring in order to redraw the float at
+a new position also silently undoes the lift, and the move quietly becomes a
+copy. The test that caught this asserts the source region is actually
+cleared.
 
 The text tool's IN-CANVAS EDITOR is also still missing, and that distinction
 matters. The engine side is complete: text rasterises, places, clips, undoes
