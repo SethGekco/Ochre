@@ -19,6 +19,7 @@ from .effects import (Adjustment, CancelToken, Cancelled, Effect,
 from . import fileio
 from .frame import COLD, Frame, UNLOADED, WARM
 from .geometry import DirtyRegion, Rect
+from .gradient import Gradient
 from .history import HistoryEntry, HistoryStack
 from .ini import IniDB
 from .layer import Layer, LayerGroup, LayerNode
@@ -28,6 +29,7 @@ from .quantize import (convert_layer_to_indexed, palette_usage,
 from .props import (BoolProperty, ChoiceProperty, ColorProperty,
                     FloatProperty, IntProperty, PropertyCollection)
 from .selection import Selection
+from . import shapes
 from .settings import DEFAULTS, Settings
 from .stroke import StrokeSession
 from .tools import Tool, ToolContext, ToolEvent, ToolRegistry
@@ -41,7 +43,7 @@ __all__ = [
     "quantize", "convert_layer_to_indexed", "quantization_error",
     "palette_usage", "PropertyCollection", "IntProperty", "FloatProperty", "BoolProperty",
     "ChoiceProperty", "ColorProperty",
-    "fileio", "StrokeSession", "Selection", "Tool", "ToolEvent", "ToolContext",
+    "fileio", "StrokeSession", "Gradient", "shapes", "Selection", "Tool", "ToolEvent", "ToolContext",
     "ToolRegistry", "Document", "Frame", "Layer", "LayerGroup", "LayerNode", "Palette",
     "Surface", "Rect", "DirtyRegion", "IniDB", "Settings", "DEFAULTS",
     "grayscale", "mul255", "lerp255", "blend_over",

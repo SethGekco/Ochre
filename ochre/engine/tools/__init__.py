@@ -15,11 +15,14 @@ from .paint import (BrushTool, BucketFillTool, EraserTool, EyedropperTool,
                     PencilTool)
 from .select import (EllipseSelectTool, LassoTool, MagicWandTool,
                      RectSelectTool)
+from .shapetools import (EllipseTool, FreeformTool, GradientTool, LineTool,
+                         RectangleTool)
 
 BUILTIN = {
     cls.name: cls for cls in (
         PencilTool, BrushTool, EraserTool, BucketFillTool, EyedropperTool,
         RectSelectTool, EllipseSelectTool, LassoTool, MagicWandTool,
+        LineTool, RectangleTool, EllipseTool, FreeformTool, GradientTool,
     )
 }
 
@@ -108,6 +111,7 @@ __all__ = [
     "Tool", "ToolEvent", "ToolContext", "ToolRegistry", "BUILTIN",
     "PencilTool", "BrushTool", "EraserTool", "BucketFillTool",
     "EyedropperTool", "RectSelectTool", "EllipseSelectTool", "LassoTool",
-    "MagicWandTool", "constrain_angle", "constrain_square", "drag_rect",
+    "MagicWandTool", "LineTool", "RectangleTool", "EllipseTool",
+    "FreeformTool", "GradientTool", "constrain_angle", "constrain_square", "drag_rect",
     "MOD_NONE", "MOD_SHIFT", "MOD_CTRL", "MOD_ALT",
 ]
