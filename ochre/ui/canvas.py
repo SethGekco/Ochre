@@ -109,6 +109,14 @@ class CanvasView(QAbstractScrollArea):
         self._timer.timeout.connect(self._do_repaint)
         self._repaint_ms = int(self.cfg.get("Canvas", "RepaintMs") or 16)
 
+        # The text caret blinks on its own timer and is drawn as an overlay,
+        # never into the layer -- it is chrome, not content, and must not end
+        # up in the pixels or in undo.
+        self._caret_on = True
+        self._caret_timer = QTimer(self)
+        self._caret_timer.timeout.connect(self._blink)
+        self._caret_ms = int(self.cfg.get("Canvas", "CaretBlinkMs") or 530)
+
     # ---- document binding ------------------------------------------------
 
     def bind(self):
@@ -150,6 +158,55 @@ class CanvasView(QAbstractScrollArea):
         else:
             self.viewport().update(self._pending)
             self._pending = None
+
+    # ---- text caret ------------------------------------------------------
+
+    def _text_tool(self):
+        """The active text tool, if one is mid-edit."""
+        tool = self.ctl.tool
+        if tool is None or getattr(tool, "name", "") != "text":
+            return None
+        return tool if tool.active else None
+
+    def _blink(self):
+        self._caret_on = not self._caret_on
+        rect = self._caret_widget_rect()
+        if rect is not None:
+            self.viewport().update(rect.adjusted(-2, -2, 2, 2))
+
+    def _start_caret(self):
+        self._caret_on = True
+        if not self._caret_timer.isActive():
+            self._caret_timer.start(self._caret_ms)
+
+    def _stop_caret(self):
+        self._caret_timer.stop()
+        self._caret_on = False
+        self.viewport().update()
+
+    def _caret_widget_rect(self):
+        tool = self._text_tool()
+        if tool is None:
+            return None
+        doc_rect = tool.caret_rect(self.ctl._context())
+        if doc_rect is None:
+            return None
+        x, y, w, h = self.view.doc_to_widget_rect(doc_rect)
+        return QRect(int(x), int(y), max(1, int(w)), max(2, int(h)))
+
+    def _draw_caret(self, painter):
+        if not self._caret_on:
+            return
+        rect = self._caret_widget_rect()
+        if rect is None:
+            return
+        # Drawn in an inverting mode so it stays visible over any colour --
+        # a black caret vanishes on black text, which is exactly where
+        # someone is most likely to be typing.
+        painter.save()
+        painter.setCompositionMode(QPainter.RasterOp_SourceXorDestination)
+        painter.fillRect(rect, QColor(255, 255, 255))
+        painter.restore()
 
     # ---- painting --------------------------------------------------------
 
@@ -196,6 +253,7 @@ class CanvasView(QAbstractScrollArea):
         if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
             self._draw_pixel_grid(painter, event.rect(), target)
         self._draw_selection(painter, target)
+        self._draw_caret(painter)
         painter.end()
 
     def _draw_pixel_grid(self, painter, clip, target):
@@ -251,6 +309,22 @@ class CanvasView(QAbstractScrollArea):
         return out
 
     def mousePressEvent(self, event):
+        tool = self._text_tool()
+        if tool is not None and event.button() == Qt.LeftButton:
+            dx, dy = self._doc_pos(event.position())
+            box = tool.caret_rect(self.ctl._context())
+            inside = box is not None and box.inflated(
+                max(8, int(tool.option("size", 24)))).contains(int(dx), int(dy))
+            if inside:
+                # Reposition within the text being edited.
+                tool.caret_from_point(self.ctl._context(), dx, dy)
+                self._start_caret()
+                self.viewport().update()
+                return
+            # Clicking away finishes the edit, then falls through so the
+            # click also starts the next one where the user pointed.
+            self.commit_text()
+
         if event.button() == Qt.MiddleButton:
             self._panning = True
             self._pan_origin = event.position().toPoint()
@@ -261,6 +335,8 @@ class CanvasView(QAbstractScrollArea):
         self._drawing = True
         self.ctl.begin_stroke(dx, dy, 1.0, self._mods(event), button)
         self.refresh()
+        if self._text_tool() is not None:
+            self._start_caret()
 
     def mouseMoveEvent(self, event):
         pos = event.position()
@@ -287,6 +363,9 @@ class CanvasView(QAbstractScrollArea):
             self._drawing = False
             self.ctl.end_stroke(dx, dy, 1.0, self._mods(event))
             self.refresh()
+            # A text tool stays active after mouse-up so typing can begin.
+            if self._text_tool() is not None:
+                self._start_caret()
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
@@ -306,6 +385,11 @@ class CanvasView(QAbstractScrollArea):
         event.accept()
 
     def keyPressEvent(self, event):
+        # Text editing owns the keyboard while a text tool is mid-edit.
+        tool = self._text_tool()
+        if tool is not None and self._handle_text_key(tool, event):
+            return
+
         if event.key() == Qt.Key_Escape and self._drawing:
             self._drawing = False
             self.ctl.cancel_stroke()
@@ -313,6 +397,91 @@ class CanvasView(QAbstractScrollArea):
             self.viewport().update()
             return
         super().keyPressEvent(event)
+
+    def _handle_text_key(self, tool, event):
+        """Map a key onto the tool's edit operations. True if consumed.
+
+        Deliberately thin: every operation already exists on the tool and is
+        tested headlessly, so this maps keys and nothing more.
+        """
+        ctx = self.ctl._context()
+        key = event.key()
+        ctrl = bool(event.modifiers() & Qt.ControlModifier)
+
+        if key == Qt.Key_Escape:
+            self.cancel_text()
+            return True
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            if ctrl:
+                # Ctrl+Enter finishes; plain Enter is a newline, because
+                # this is a multi-line text box.
+                self.commit_text()
+            else:
+                tool.insert(ctx, "\n")
+                self._after_text_edit()
+            return True
+        if key == Qt.Key_Backspace:
+            tool.backspace(ctx)
+            self._after_text_edit()
+            return True
+        if key == Qt.Key_Delete:
+            tool.delete(ctx)
+            self._after_text_edit()
+            return True
+        if key in (Qt.Key_Left, Qt.Key_Right):
+            tool.move_caret(-1 if key == Qt.Key_Left else 1)
+            self._after_caret_move()
+            return True
+        if key in (Qt.Key_Up, Qt.Key_Down):
+            tool.caret_line(-1 if key == Qt.Key_Up else 1)
+            self._after_caret_move()
+            return True
+        if key == Qt.Key_Home:
+            tool.caret_home()
+            self._after_caret_move()
+            return True
+        if key == Qt.Key_End:
+            tool.caret_end()
+            self._after_caret_move()
+            return True
+
+        text = event.text()
+        if text and text.isprintable():
+            tool.insert(ctx, text)
+            self._after_text_edit()
+            return True
+        return False
+
+    def _after_text_edit(self):
+        self.refresh()
+        self._start_caret()
+        self.viewport().update()
+
+    def _after_caret_move(self):
+        self._start_caret()
+        self.viewport().update()
+
+    def commit_text(self):
+        """Finish a text edit and push its history entry."""
+        tool = self._text_tool()
+        if tool is None:
+            return None
+        cmd = tool.commit_text(self.ctl._context())
+        self._stop_caret()
+        self.ctl.emit("history.changed")
+        self.refresh()
+        self.viewport().update()
+        return cmd
+
+    def cancel_text(self):
+        tool = self._text_tool()
+        if tool is None:
+            return None
+        rect = tool.cancel(self.ctl._context())
+        self._stop_caret()
+        self.refresh()
+        self.viewport().update()
+        return rect
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -385,13 +385,31 @@ a new position also silently undoes the lift, and the move quietly becomes a
 copy. The test that caught this asserts the source region is actually
 cleared.
 
-The text tool's IN-CANVAS EDITOR is also still missing, and that distinction
-matters. The engine side is complete: text rasterises, places, clips, undoes
-and commits, and a script can drive it. What does not exist is the caret and
-keyboard handling that let you type directly on the canvas. The seam is
-already there — the text session deliberately stays open after mouse-up, and
-`set_text()` redraws live — so the UI work is wiring keystrokes to a method
-that already does the right thing.
+The text tool's IN-CANVAS EDITOR works: click, type, watch it render. The
+seam this document predicted was the right one — the text session stays open
+after mouse-up and `set_text()` already redrew live, so keyboard handling was
+wiring keystrokes to a method that did the right thing. Two decisions are
+worth recording.
+
+**The caret is an integer index in the ENGINE, not UI state.** It would have
+been easier to keep it in the canvas widget next to the blink timer, and that
+would have made the entire text edit loop — insert, backspace, delete, arrow
+keys, home, end, click-to-position — reachable only through a `QKeyEvent`.
+Keeping it on the tool means all of it is tested headlessly alongside every
+other tool, and a script can drive typing. The UI contributes exactly three
+things Qt is actually needed for: the blink timer, the key mapping, and
+drawing one rectangle.
+
+**Rasterisation crops tight, so the caret needs the crop delta.** A caret
+position is computed in uncropped layout space, but the block that gets
+composited has had its blank margins removed, so a caret drawn at the
+computed position sits several pixels off. `layout()` therefore returns a
+`Layout` carrying the crop deltas and line metrics beside the coverage plane,
+where `render_coverage()` discards them. The same object answers the inverse
+question — `index_at(x, y)` for click-to-position — and it deliberately
+reports a position for an EMPTY string rather than collapsing, since a caret
+matters most in a text box with nothing in it yet. The caret is drawn with
+XOR composition so it stays visible over any colour underneath.
 
 The shape tools did confirm the prediction this document makes in the history
 section: because they redraw from scratch on every motion event via

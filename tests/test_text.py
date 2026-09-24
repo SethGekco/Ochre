@@ -225,6 +225,132 @@ def main():
     tool.commit_text(ctx)
     check("text placed off-canvas is harmless", True)
 
+    # ---- the caret -------------------------------------------------------
+    # The caret lives in the ENGINE as an integer index, so the whole edit
+    # loop is testable with no Qt and no display.
+    lay = textmod.layout("Hi\nthere", size=32)
+    check("layout reports a line step", lay.line_step > 0)
+    check("layout keeps the crop delta",
+          isinstance(lay.crop_x, int) and isinstance(lay.crop_y, int),
+          "-- a caret computed in uncropped space needs this to line up")
+
+    x0, y0, ch = lay.caret_at(0)
+    x1, _y1, _h = lay.caret_at(1)
+    check("the caret advances along a line", x1 > x0)
+    check("the caret has a height", ch > 0)
+    _x, y3, _h = lay.caret_at(3)
+    check("the caret drops to the next line", y3 > y0,
+          "-- index 3 is past the newline")
+
+    check("an EMPTY string still has a caret position",
+          textmod.layout("", size=32).caret_at(0) is not None,
+          "-- otherwise clicking to start typing shows nothing")
+
+    check("clicking maps back to an index",
+          lay.index_at(*lay.caret_at(2)[:2]) == 2,
+          "-- round-tripping a caret position must return the same index")
+
+    # ---- editing operations ---------------------------------------------
+    d, lay_, sel, hist, ctx = setup()
+    tool = reg.create("text", size=28)
+    tool.begin(ctx, ToolEvent(20, 30))
+
+    for ch in "Hello":
+        tool.insert(ctx, ch)
+    check("typing builds the string", tool.option("text") == "Hello")
+    check("the caret follows typing", tool.caret == 5)
+
+    tool.move_caret(-2)
+    check("left arrow moves the caret back", tool.caret == 3)
+    tool.insert(ctx, "XY")
+    check("typing inserts AT the caret", tool.option("text") == "HelXYlo",
+          "-- got %r" % tool.option("text"))
+    check("the caret follows the insertion", tool.caret == 5)
+
+    tool.backspace(ctx)
+    check("backspace deletes before the caret",
+          tool.option("text") == "HelXlo" and tool.caret == 4)
+    tool.delete(ctx)
+    check("delete removes after the caret", tool.option("text") == "HelXo")
+
+    tool.caret_home()
+    check("home goes to the line start", tool.caret == 0)
+    tool.backspace(ctx)
+    check("backspace at the start is harmless", tool.option("text") == "HelXo")
+    tool.caret_end()
+    check("end goes to the line end", tool.caret == 5)
+    tool.delete(ctx)
+    check("delete at the end is harmless", tool.option("text") == "HelXo")
+
+    tool.move_caret(-100)
+    check("the caret cannot go negative", tool.caret == 0)
+    tool.move_caret(1000)
+    check("the caret cannot run past the end", tool.caret == 5)
+
+    # Multi-line navigation
+    tool.set_text(ctx, "one\ntwo\nthree")
+    tool.caret = 5                       # inside "two"
+    tool.caret_line(-1)
+    check("up a line keeps the column", tool.caret == 1,
+          "-- got %d" % tool.caret)
+    tool.caret_line(1)
+    check("down a line keeps the column", tool.caret == 5)
+    tool.caret = 1
+    tool.caret_line(-1)
+    check("up from the first line stays put", tool.caret == 1)
+    tool.caret = 10
+    tool.caret_line(1)
+    check("down from the last line stays put", tool.caret == 10)
+
+    tool.caret_home()
+    check("home finds the LINE start, not the string start", tool.caret == 8,
+          "-- got %d" % tool.caret)
+
+    # ---- the caret's drawn position -------------------------------------
+    rect = tool.caret_rect(ctx)
+    check("the caret has a document rect", rect is not None)
+    check("the caret is one pixel wide", rect.w == 1)
+    check("the caret is as tall as a line", rect.h > 1)
+
+    tool.set_text(ctx, "")
+    empty_rect = tool.caret_rect(ctx)
+    check("an empty text box still shows a caret", empty_rect is not None,
+          "-- this is exactly when a caret matters most")
+
+    tool.set_text(ctx, "Positioned")
+    tool.caret = 0
+    left = tool.caret_rect(ctx)
+    tool.caret = 10
+    right = tool.caret_rect(ctx)
+    check("the caret rect moves with the caret", right.x > left.x)
+
+    tool.caret_from_point(ctx, right.x, right.y + 2)
+    check("clicking positions the caret near the click",
+          abs(tool.caret - 10) <= 1, "-- landed at %d" % tool.caret)
+
+    tool.commit_text(ctx)
+    check("editing then committing pushes one entry", len(hist) == 1)
+
+    # Typing is still just set_text underneath, so the no-residue property
+    # from earlier holds for keystroke-driven editing too.
+    d, lay_, sel, hist, ctx = setup()
+    tool = reg.create("text", size=36)
+    tool.begin(ctx, ToolEvent(10, 20))
+    for ch in "Wide text":
+        tool.insert(ctx, ch)
+    for _ in range(7):
+        tool.backspace(ctx)
+    tool.commit_text(ctx)
+    typed = d.cell(lay_).pixels.copy()
+
+    d2, lay2, _s, _h, ctx2 = setup()
+    direct = reg.create("text", text="Wi", size=36)
+    direct.begin(ctx2, ToolEvent(10, 20))
+    direct.commit_text(ctx2)
+    check("TYPING AND DELETING LEAVES NO RESIDUE",
+          np.array_equal(typed, d2.cell(lay2).pixels),
+          "-- deleted characters left pixels behind")
+
     print("\nall text checks passed")
 
 

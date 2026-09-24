@@ -320,9 +320,128 @@ class TextTool(_DragTool):
             return drawn
         return restored if drawn is None else restored.union(drawn)
 
+    # ---- editing -------------------------------------------------------
+    # The caret lives here, not in the UI. It is an integer index into a
+    # string -- plain data, no Qt -- so the whole edit loop stays scriptable
+    # and headlessly testable like every other tool. The UI's job shrinks to
+    # mapping key events onto these methods.
+
+    @property
+    def caret(self):
+        return max(0, min(int(getattr(self, "_caret", 0)),
+                          len(str(self.option("text", "")))))
+
+    @caret.setter
+    def caret(self, index):
+        self._caret = max(0, min(int(index), len(str(self.option("text", "")))))
+
+    def insert(self, ctx, chunk):
+        """Type at the caret. Handles multi-character input, e.g. a paste."""
+        body = str(self.option("text", ""))
+        at = self.caret
+        self._caret = at + len(chunk)
+        return self.set_text(ctx, body[:at] + chunk + body[at:])
+
+    def backspace(self, ctx):
+        body = str(self.option("text", ""))
+        at = self.caret
+        if at == 0:
+            return None
+        self._caret = at - 1
+        return self.set_text(ctx, body[:at - 1] + body[at:])
+
+    def delete(self, ctx):
+        body = str(self.option("text", ""))
+        at = self.caret
+        if at >= len(body):
+            return None
+        return self.set_text(ctx, body[:at] + body[at + 1:])
+
+    def move_caret(self, delta):
+        self.caret = self.caret + int(delta)
+        return self.caret
+
+    def caret_home(self):
+        """To the start of the current LINE, not of the whole string."""
+        body = str(self.option("text", ""))
+        self.caret = body.rfind("\n", 0, self.caret) + 1
+        return self.caret
+
+    def caret_end(self):
+        body = str(self.option("text", ""))
+        nxt = body.find("\n", self.caret)
+        self.caret = len(body) if nxt < 0 else nxt
+        return self.caret
+
+    def caret_line(self, delta):
+        """Up or down a line, keeping the column where possible."""
+        body = str(self.option("text", ""))
+        before = body.rfind("\n", 0, self.caret) + 1
+        column = self.caret - before
+        if delta < 0:
+            prev = body.rfind("\n", 0, max(0, before - 1))
+            if before == 0:
+                return self.caret
+            self.caret = min(prev + 1 + column, before - 1)
+        else:
+            nxt = body.find("\n", self.caret)
+            if nxt < 0:
+                return self.caret
+            after = body.find("\n", nxt + 1)
+            limit = len(body) if after < 0 else after
+            self.caret = min(nxt + 1 + column, limit)
+        return self.caret
+
+    def caret_rect(self, ctx):
+        """Where to draw the caret, in DOCUMENT coordinates.
+
+        Returns a 1-pixel-wide Rect. Returned even when the string is empty,
+        which is exactly when a caret matters most -- otherwise clicking to
+        start typing shows nothing at all.
+        """
+        from .. import text as textmod
+
+        if self._anchor is None:
+            return None
+        lay = textmod.layout(
+            str(self.option("text", "")),
+            family=str(self.option("font", "DejaVu Sans")),
+            size=int(self.option("size", 24)),
+            align=str(self.option("align", textmod.LEFT)),
+            line_spacing=float(self.option("line_spacing", 1.0)))
+        cx, cy, height = lay.caret_at(self.caret)
+
+        ax, ay = self._anchor
+        align = str(self.option("align", textmod.LEFT))
+        origin = textmod.place(lay.coverage, ax, ay, align) if lay.width else None
+        ox = origin.x if origin is not None else int(round(ax))
+        oy = origin.y if origin is not None else int(round(ay))
+        return Rect(ox + cx, oy + cy, 1, max(1, int(height)))
+
+    def caret_from_point(self, ctx, x, y):
+        """Click-to-position: move the caret nearest a document point."""
+        from .. import text as textmod
+
+        if self._anchor is None:
+            return self.caret
+        lay = textmod.layout(
+            str(self.option("text", "")),
+            family=str(self.option("font", "DejaVu Sans")),
+            size=int(self.option("size", 24)),
+            align=str(self.option("align", textmod.LEFT)),
+            line_spacing=float(self.option("line_spacing", 1.0)))
+        ax, ay = self._anchor
+        align = str(self.option("align", textmod.LEFT))
+        origin = textmod.place(lay.coverage, ax, ay, align) if lay.width else None
+        ox = origin.x if origin is not None else int(round(ax))
+        oy = origin.y if origin is not None else int(round(ay))
+        self.caret = lay.index_at(x - ox, y - oy)
+        return self.caret
+
     def set_text(self, ctx, text):
         """Replace the string and redraw. What a UI calls on every keystroke."""
         self.set_option("text", text)
+        self._caret = min(getattr(self, "_caret", len(text)), len(text))
         if self._session is None:
             return None
         restored = self._session.restore(self._last_rect)

@@ -196,6 +196,106 @@ def render_coverage(text, family="DejaVu Sans", size=24, align=LEFT,
     return cropped, cropped.shape[1], cropped.shape[0]
 
 
+class Layout:
+    """A rasterised block plus the metrics a caret needs.
+
+    render_coverage() crops its output tight, which is right for compositing
+    and useless for a caret: the caret has to sit at a position computed in
+    UNCROPPED layout space and then be shifted by however much the crop
+    removed. So the crop delta is returned rather than discarded.
+    """
+
+    __slots__ = ("coverage", "width", "height", "crop_x", "crop_y",
+                 "line_step", "lines", "font")
+
+    def __init__(self, coverage, width, height, crop_x, crop_y, line_step,
+                 lines, font):
+        self.coverage = coverage
+        self.width = width
+        self.height = height
+        self.crop_x = crop_x
+        self.crop_y = crop_y
+        self.line_step = line_step
+        self.lines = lines
+        self.font = font
+
+    def caret_at(self, index):
+        """(x, y, height) of the caret before character `index`.
+
+        Coordinates are relative to the cropped block's top-left, which is
+        what a caller already has a position for.
+        """
+        index = max(0, min(int(index), sum(len(l) for l in self.lines)
+                           + max(0, len(self.lines) - 1)))
+        row, col, seen = 0, index, 0
+        for i, line in enumerate(self.lines):
+            if index <= seen + len(line):
+                row, col = i, index - seen
+                break
+            seen += len(line) + 1          # +1 for the newline
+            row = i + 1
+            col = 0
+
+        prefix = self.lines[row][:col] if row < len(self.lines) else ""
+        try:
+            advance = self.font.getlength(prefix)
+        except AttributeError:
+            advance = self.font.getbbox(prefix)[2] if prefix else 0
+
+        return (int(round(advance)) - self.crop_x,
+                row * self.line_step - self.crop_y,
+                self.line_step)
+
+    def index_at(self, x, y):
+        """The character index nearest a point -- for click-to-position."""
+        row = max(0, min(int((y + self.crop_y) // max(1, self.line_step)),
+                         len(self.lines) - 1))
+        line = self.lines[row]
+        target = x + self.crop_x
+        best, best_dist = 0, None
+        for col in range(len(line) + 1):
+            try:
+                advance = self.font.getlength(line[:col])
+            except AttributeError:
+                advance = self.font.getbbox(line[:col])[2] if col else 0
+            dist = abs(advance - target)
+            if best_dist is None or dist < best_dist:
+                best, best_dist = col, dist
+        return sum(len(l) + 1 for l in self.lines[:row]) + best
+
+
+def layout(text, family="DejaVu Sans", size=24, align=LEFT, line_spacing=1.0,
+           book=None, antialias=True):
+    """Rasterise AND report the metrics a caret needs."""
+    book = book or DEFAULT_BOOK
+    font = book.load(family, size)
+    lines = (text or "").split("\n")
+
+    width, height, step = measure(text or " ", font, line_spacing)
+    pad = max(4, int(size))
+    canvas = Image.new("L", (max(1, width + pad * 2), max(1, height + pad * 2)), 0)
+    if text:
+        draw = ImageDraw.Draw(canvas)
+        draw.multiline_text((pad, pad), text, fill=255, font=font, align=align,
+                            spacing=max(0, step - _line_height(font)))
+
+    arr = np.asarray(canvas, dtype=np.uint8)
+    if not antialias:
+        arr = ((arr >= 128).astype(np.uint8)) * 255
+
+    ys, xs = np.nonzero(arr)
+    if ys.size == 0:
+        # An empty or whitespace-only string still needs a caret position, so
+        # the layout reports the padded origin rather than collapsing.
+        return Layout(np.zeros((0, 0), dtype=np.uint8), 0, 0, pad, pad,
+                      step, lines, font)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    cropped = np.ascontiguousarray(arr[y0:y1, x0:x1])
+    return Layout(cropped, cropped.shape[1], cropped.shape[0],
+                  x0 - pad, y0 - pad, step, lines, font)
+
+
 def _line_height(font):
     try:
         ascent, descent = font.getmetrics()

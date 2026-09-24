@@ -29,6 +29,9 @@ UI_DEFAULTS = {
         # ends up SLOWER than a single-threaded one.
         "RepaintMs": 16,
         "BackgroundColour": (60, 62, 68, 255),
+        # Text caret blink. 530 ms is the long-standing platform
+        # default; 0 disables blinking, which some users need.
+        "CaretBlinkMs": 530,
     },
     "Tools": {
         "DefaultTool": "brush",
