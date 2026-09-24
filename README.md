@@ -9,7 +9,7 @@ selections, tools, undo, adjustments and effects, a native document format,
 an optional C accelerator, an addon system, and a Command & Conquer addon
 that reads and writes SHP sprites and TMP terrain templates.
 
-    ./tests/run_all.sh      # 43 checks, both backends
+    ./tests/run_all.sh      # 49 checks, both backends
     python -m ochre.ui      # the editor
 
 ## The rules
@@ -75,6 +75,26 @@ non-zero on the first failure, so any of them can be run directly:
 ```sh
 python3 tests/test_geometry.py
 ```
+
+### Testing the C&C codecs against real game files
+
+`tests/test_corpus.py` skips unless you point it at a game directory. Game
+assets cannot be redistributed, so the test travels and the data does not:
+
+```sh
+OCHRE_CNC_CORPUS=~/games/RA2 python3 tests/test_corpus.py
+```
+
+It reads every SHP, TMP and palette it finds, writes each one back, and
+requires the bytes to be identical — at the codec level and through a real
+open/save cycle. Verified against a full RA2 + Yuri's Revenge install:
+**6,749 sprites (374,548 frames), 716 terrain templates, 195 palettes, all
+byte-exact.** That run found eight real defects the synthetic tests could
+not, because the files Ochre authors are tidier than the ones Westwood
+shipped; see `docs/DESIGN.md`, "What the real files taught us".
+
+Still unverified: whether a game *loads* a sprite we wrote. Byte-exact
+re-saving is strong evidence and is not the same claim.
 
 ## Licence
 

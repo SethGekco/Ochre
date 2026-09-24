@@ -40,14 +40,51 @@ def compress8(values):
     return (np.asarray(values, dtype=np.uint8) >> 2).astype(np.uint8)
 
 
+JASC_MAGIC = b"JASC-PAL"
+
+
 def read_pal(data, name="palette"):
-    """Parse 768 bytes into a Palette, expanding from 6-bit."""
+    """Parse a palette file. Binary 768-byte VGA, or JASC-PAL text.
+
+    The text form has to be handled rather than ignored: it shares the .pal
+    extension, it is what Paint Shop Pro and several modding tools emit, and
+    six of them turned up in a real RA2 install. Reading one as binary does
+    not fail -- it interprets ASCII digits as 6-bit colour and returns a
+    palette of confident nonsense, which is the worst possible outcome.
+    """
+    if data[:len(JASC_MAGIC)] == JASC_MAGIC:
+        return read_jasc(data, name)
     if len(data) < PAL_BYTES:
         raise ValueError("a .pal is %d bytes; got %d" % (PAL_BYTES, len(data)))
     raw = np.frombuffer(data[:PAL_BYTES], dtype=np.uint8).reshape(LENGTH, 3)
     entries = np.empty((LENGTH, 4), dtype=np.uint8)
     entries[:, :3] = expand6(raw)
     entries[:, 3] = 255
+    return Palette(entries, name=name)
+
+
+def read_jasc(data, name="palette"):
+    """JASC-PAL: a magic line, a version, a count, then "r g b" per line.
+
+    Values are 8-bit here, not the 6-bit the binary form uses, so they are
+    taken as-is. Short files are padded rather than rejected, matching how
+    lenient the rest of this addon is about real-world input.
+    """
+    entries = np.zeros((LENGTH, 4), dtype=np.uint8)
+    entries[:, 3] = 255
+    lines = data.decode("ascii", "replace").splitlines()
+    i = 0
+    for row in lines[3:]:            # magic, version, count
+        parts = row.split()
+        if len(parts) < 3:
+            continue
+        try:
+            entries[i, :3] = [int(p) & 0xFF for p in parts[:3]]
+        except ValueError:
+            continue
+        i += 1
+        if i >= LENGTH:
+            break
     return Palette(entries, name=name)
 
 

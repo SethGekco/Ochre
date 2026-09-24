@@ -46,12 +46,33 @@ normalising them would silently change tile behaviour.
 """
 
 import struct
+import weakref
 
 import numpy as np
 
 from ochre.engine.document import Document
 from ochre.engine.frame import Frame
 from ochre.engine.geometry import Rect
+
+# {document: {frame_id: tile record}} as read from the file, carrying the two
+# things the document model cannot hold: the original 52 header bytes (see
+# build_tmp on why the uninitialised ones matter) and the EXTRA block -- the
+# plain rectangle holding art that overflows the diamond, which is what
+# cliffs, bridges and tall rocks are made of.
+#
+# The extra lives beside the document rather than in it because it does not
+# fit the plane model, and that was measured rather than assumed: across the
+# shipped theaters, 767 of 3147 tiles have one, the largest is 60x84 against a 60x30
+# tile, and they sit up to 72 pixels ABOVE the tile origin. A cell's planes
+# are canvas-aligned by design -- one dirty rect, one history delta, one
+# bbox -- so a block nearly three times the canvas height cannot be one.
+#
+# The consequence, and it is a real limitation rather than a detail: extras
+# round-trip and are never corrupted, but they cannot yet be PAINTED, and
+# they do not survive a trip through .ochre. Making them editable means
+# giving the document a canvas large enough for tile plus overhang and
+# recording where the diamond sits inside it. See docs/DESIGN.md.
+_SOURCE_TILES = weakref.WeakKeyDictionary()
 
 HEADER = struct.Struct("<iiii")
 TILE = struct.Struct("<iiiiiiiiiIBBB3s3s")   # 52 bytes to the padding
@@ -163,12 +184,29 @@ def read_tmp(data):
                       "radar_low": radar_lo, "radar_high": radar_hi,
                       "image": image, "z": zdata,
                       "extra": extra, "extra_z": extra_z,
-                      "extra_x": ex, "extra_y": ey})
+                      "extra_x": ex, "extra_y": ey,
+                      # The original 52 bytes, kept verbatim. See build_tmp:
+                      # the vanilla files carry uninitialised memory in the
+                      # fields the flags say to ignore, and reproducing a
+                      # file we did not change means reproducing that too.
+                      "raw": bytes(data[offset:offset + TILE_HEADER_SIZE])})
     return {"bx": bx, "by": by, "cx": cx, "cy": cy}, tiles
 
 
-def build_tmp(header, tiles):
-    """Serialise back to TMP bytes."""
+def build_tmp(header, tiles, preserve=True):
+    """Serialise back to TMP bytes.
+
+    `preserve` keeps each tile's original 52 header bytes and overwrites only
+    the fields this writer manages. That sounds like pedantry and is not: the
+    vanilla templates were written by a debug-build MSVC tool that left
+    uninitialised heap in every field the flags mark absent -- `0xCD` fill in
+    the extra offsets and extents, and in the three bytes of padding past the
+    49-byte struct. Measured across the shipped RA2 theaters, that garbage is
+    the ONLY thing that differs on a read-write cycle; every pixel, z-plane
+    and extra block already matched. Normalising it to zero is harmless to
+    the game and fatal to the one test that can prove this codec correct, so
+    a file we did not edit is reproduced exactly as found.
+    """
     bx, by = header["bx"], header["by"]
     cx, cy = header["cx"], header["cy"]
     cb = cx * cy // 2
@@ -213,14 +251,37 @@ def build_tmp(header, tiles):
                 extra_z_off = cursor
                 cursor += ew * eh
 
-        body += TILE.pack(
-            int(tile.get("x", 0)), int(tile.get("y", 0)),
-            extra_off, z_off, extra_z_off,
-            int(tile.get("extra_x", 0)), int(tile.get("extra_y", 0)), ew, eh,
-            flags, int(tile.get("height", 0)) & 0xFF,
-            int(tile.get("land", 0)) & 0xFF, int(tile.get("ramp", 0)) & 0xFF,
-            _rgb(tile.get("radar_low")), _rgb(tile.get("radar_high")))
-        body += b"\0" * (TILE_HEADER_SIZE - TILE.size)
+        raw = tile.get("raw") if preserve else None
+        header = bytearray(raw if raw and len(raw) == TILE_HEADER_SIZE
+                           else b"\0" * TILE_HEADER_SIZE)
+        if raw:
+            # Keep whatever the original tool left behind in the fields this
+            # tile does not use, and merge our three meaningful flag bits
+            # into the rest of its word rather than replacing it.
+            flags = (struct.unpack_from("<I", header, 36)[0]
+                     & ~(FLAG_EXTRA | FLAG_Z)) | (flags & (FLAG_EXTRA | FLAG_Z))
+
+        struct.pack_into("<ii", header, 0,
+                         int(tile.get("x", 0)), int(tile.get("y", 0)))
+        struct.pack_into("<I", header, 36, flags)
+        struct.pack_into("<BBB3s3s", header, 40,
+                         int(tile.get("height", 0)) & 0xFF,
+                         int(tile.get("land", 0)) & 0xFF,
+                         int(tile.get("ramp", 0)) & 0xFF,
+                         _rgb(tile.get("radar_low")), _rgb(tile.get("radar_high")))
+        # Only write an offset or extent the flags actually point at. Writing
+        # a zero into a field the game will never read would still change the
+        # bytes, and a stale value there is the original file's, not ours.
+        if has_z or not raw:
+            struct.pack_into("<i", header, 12, z_off)
+        if has_extra or not raw:
+            struct.pack_into("<i", header, 8, extra_off)
+            struct.pack_into("<iiii", header, 20,
+                             int(tile.get("extra_x", 0)),
+                             int(tile.get("extra_y", 0)), ew, eh)
+            if (has_extra and has_z) or not raw:
+                struct.pack_into("<i", header, 16, extra_z_off)
+        body += bytes(header)
         body += encode_diamond(tile["image"], cx, cy)
         if has_z:
             body += encode_diamond(tile["z"], cx, cy)
@@ -301,18 +362,16 @@ class TmpFormat:
             frame.meta["cnc.radar_high"] = _hex(tile["radar_high"])
             doc.frames.append(frame)
 
+            _SOURCE_TILES.setdefault(doc, {})[frame.id] = tile
+
             cell = doc.cell(layer, frame)
             cell.plane("index")[...] = tile["image"]
             if tile["z"] is not None:
                 cell.plane("height")[...] = tile["z"]
             if tile["extra"] is not None:
-                # Kept as metadata rather than composited in: the extra block
-                # is a separate rectangle with its own placement, and folding
-                # it into the diamond would lose that.
                 frame.meta["cnc.extra_w"] = str(tile["extra"].shape[1])
                 frame.meta["cnc.extra_h"] = str(tile["extra"].shape[0])
-                cell.surface_extra = tile["extra"]
-                cell.surface_extra_z = tile["extra_z"]
+
             cell.content_bbox = doc.bounds
             cell.refresh_derived()
 
@@ -329,6 +388,7 @@ class TmpFormat:
                                    max(1, -(-len(document.frames) // max(1, bx)))))
         header = {"bx": bx, "by": by, "cx": document.width, "cy": document.height}
 
+        was_tiles = _SOURCE_TILES.get(document, {})
         tiles = []
         for frame in document.frames:
             document.ensure_warm(frame)
@@ -336,6 +396,7 @@ class TmpFormat:
             if cell is None or frame.meta.get("cnc.empty") == "1":
                 tiles.append(None)
                 continue
+            was = was_tiles.get(frame.id, {})
             entry = {
                 "x": _int(frame.meta.get("cnc.x")),
                 "y": _int(frame.meta.get("cnc.y")),
@@ -353,8 +414,9 @@ class TmpFormat:
                 "radar_high": _unhex(frame.meta.get("cnc.radar_high")),
                 "image": cell.plane("index"),
                 "z": cell.plane("height") if cell.has("height") else None,
-                "extra": getattr(cell, "surface_extra", None),
-                "extra_z": getattr(cell, "surface_extra_z", None),
+                "extra": was.get("extra"),
+                "extra_z": was.get("extra_z"),
+                "raw": was.get("raw"),
             }
             tiles.append(entry)
 

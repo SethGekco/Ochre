@@ -47,11 +47,22 @@ colour.
 """
 
 import struct
+import weakref
 
 import numpy as np
 
 from ochre.engine.document import Document
 from ochre.engine.geometry import Rect
+
+# Documents loaded from a SHP, mapped to the frame records they came from,
+# so save() can hand an untouched frame back its original bytes.
+#
+# Deliberately NOT frame metadata. Metadata is persisted strings, and putting
+# payloads there would write the whole original sprite into every .ochre file
+# as hex. This is a cache: it makes open-edit-save exact within a session and
+# is simply absent afterwards, at which point re-encoding is correct anyway.
+# Weak keys so closing a document frees it.
+_SOURCES = weakref.WeakKeyDictionary()
 
 HEADER = struct.Struct("<HHHH")
 FRAME = struct.Struct("<HHHHI4sII")
@@ -119,6 +130,22 @@ def decode_rle(buf, offset, width, height):
     return out
 
 
+def rle_span(buf, offset, height):
+    """How many bytes an RLE block occupies. The format never records it.
+
+    Needed to keep an untouched frame's ORIGINAL bytes -- see build_shp, and
+    the leniency note above: the shipped art is full of rows whose trailing
+    zero run is declared one longer than the row, so a re-encode is correct
+    but not identical.
+    """
+    pos = offset
+    for _ in range(height):
+        if pos + 2 > len(buf):
+            break
+        pos += max(2, buf[pos] | (buf[pos + 1] << 8))
+    return min(pos, len(buf)) - offset
+
+
 # ---- reading ------------------------------------------------------------
 
 def is_shp(data):
@@ -142,9 +169,14 @@ def read_frames(data):
     frames = []
     for i in range(count):
         off = HEADER.size + FRAME.size * i
-        x, y, w, h, flags, radar, _reserved, data_off = FRAME.unpack_from(data, off)
+        x, y, w, h, flags, radar, reserved, data_off = FRAME.unpack_from(data, off)
         entry = {"x": x, "y": y, "w": w, "h": h, "flags": flags,
-                 "radar": radar, "offset": data_off, "plane": None}
+                 "radar": radar, "offset": data_off, "plane": None,
+                 "payload": b"", "pad": b"",
+                 # Nominally reserved, and in the shipped art frequently a
+                 # leaked 32-bit stack address (0x0012fxxx). Meaningless to
+                 # the game, and still part of the file.
+                 "reserved": reserved}
         # A zero offset, or a zero-sized rect, is the canonical EMPTY frame.
         # Very common -- blank shadow frames especially -- so it must not be
         # treated as corruption.
@@ -154,15 +186,44 @@ def read_frames(data):
             # like 0x02A40002 rather than 2.
             if flags & FLAG_RLE:
                 entry["plane"] = decode_rle(data, data_off, w, h)
+                span = rle_span(data, data_off, h)
             elif (flags & 0xFF) == 2:
                 entry["plane"] = _decode_prefixed(data, data_off, w, h)
+                span = _prefixed_span(data, data_off, h)
             else:
                 need = w * h
                 raw = data[data_off:data_off + need]
+                span = len(raw)
                 if len(raw) == need:
                     entry["plane"] = np.frombuffer(raw, np.uint8).reshape(h, w)
+            # The bytes exactly as found. An untouched frame is copied rather
+            # than re-encoded, which is the only way to reproduce quirks no
+            # rule explains -- see build_shp.
+            entry["payload"] = bytes(data[data_off:data_off + span])
         frames.append(entry)
+
+    # Second pass for the gaps BETWEEN data blocks. They are not always zero
+    # padding: real files leave fragments of whatever the writer's buffer
+    # previously held there (`1e 0f 0f 0f ...` and the like). Writing zeros
+    # instead is invisible to the game and still changes the file, so the gap
+    # is carried along with the frame that follows it. File order, not header
+    # order -- the two need not agree.
+    ordered = sorted((f for f in frames if f["offset"]), key=lambda f: f["offset"])
+    cursor = HEADER.size + FRAME.size * count
+    for entry in ordered:
+        if entry["offset"] > cursor:
+            entry["pad"] = bytes(data[cursor:entry["offset"]])
+        cursor = entry["offset"] + len(entry["payload"])
     return width, height, frames
+
+
+def _prefixed_span(data, offset, height):
+    pos = offset
+    for _ in range(height):
+        if pos + 2 > len(data):
+            break
+        pos += max(2, data[pos] | (data[pos + 1] << 8))
+    return min(pos, len(data)) - offset
 
 
 def _decode_prefixed(data, offset, width, height):
@@ -194,13 +255,35 @@ def crop_bounds(plane, transparent=0):
 
 
 def build_shp(width, height, planes, transparent=0, compress=True,
-              radar_colours=None, bounds=None):
+              radar_colours=None, bounds=None, source=None, align=8,
+              tail=b""):
     """Serialise index planes to SHP bytes.
 
     Each frame is auto-cropped to its own content, which is what the format
     expects and what keeps files small. `bounds` can override that per frame
     to preserve a file's original rectangles on a round-trip -- re-saving an
     untouched sprite should reproduce it, not re-optimise it.
+
+    `source`, the frame list from read_frames(), extends that principle to
+    the three choices a writer is otherwise free to make, all of which were
+    measured against the shipped RA2 art and all of which vary in the wild:
+
+      * WHETHER TO COMPRESS. Picking RLE whenever it is smaller is the sane
+        default and is what XCC does, but the original tool left 1327 frames
+        uncompressed where RLE would have won. Re-compressing them is an
+        improvement nobody asked for on a file the user only opened.
+      * WHICH RAW FLAG. Compression 0 and 1 both mean raw scanlines, and real
+        files use both. There is no way to choose correctly; there is only
+        remembering.
+      * ALIGNMENT. 52 of 73 sampled files are NOT 8-byte aligned -- most pack
+        frames flat. Padding is therefore reproduced from the original
+        offsets rather than imposed, falling back to `align` for any frame
+        whose payload an edit has resized.
+
+    `tail` is whatever followed the last frame's data in the original file.
+    Some writers round the file length up to 8 and some do not, and the two
+    groups cannot be told apart from the frame offsets -- every rule worth
+    trying has files on both sides of it. So it is remembered, not inferred.
     """
     count = len(planes)
     headers = bytearray()
@@ -208,38 +291,152 @@ def build_shp(width, height, planes, transparent=0, compress=True,
     base = HEADER.size + FRAME.size * count
 
     for i, plane in enumerate(planes):
+        was = source[i] if source and i < len(source) else None
         box = (bounds[i] if bounds and bounds[i] is not None
                else crop_bounds(plane, transparent))
         if box is None:
-            # Empty frame: zero size, zero offset, no data block.
-            headers += FRAME.pack(0, 0, 0, 0, 0, b"\0\0\0\0", 0, 0)
+            # Empty frame: zero size, no data block. "Zero offset" is the
+            # canonical spelling and not the only one -- plenty of real files
+            # point their empty frames at the end of the data instead, and
+            # they still carry a flag word and a radar colour. Nothing reads
+            # any of it, since w and h are zero; it is still what the file
+            # said, so an untouched frame keeps it.
+            headers += FRAME.pack(was["x"] if was else 0,
+                                  was["y"] if was else 0, 0, 0,
+                                  was["flags"] if was else 0,
+                                  _radar_bytes(radar_colours, i,
+                                               was["radar"] if was else None),
+                                  was["reserved"] if was else 0,
+                                  was["offset"] if was else 0)
             continue
 
         sub = plane[box.y:box.y1, box.x:box.x1]
-        rle = encode_rle(sub)
         raw = sub.tobytes()
-        # Only use RLE when it actually wins, as XCC does.
-        use_rle = compress and len(rle) < len(raw)
-        payload = rle if use_rle else raw
-        flags = (FLAG_RLE | FLAG_TRANSPARENT) if use_rle else 0
+        if was is not None:
+            # Mirror what this frame was: the low bits carry the compression,
+            # and some writers pack a size into the upper half, so the flag
+            # word goes back verbatim rather than being rebuilt.
+            flags = was["flags"]
+            if _unchanged(sub, box, was):
+                payload = was["payload"]
+            else:
+                payload = (encode_rle(sub) if was["flags"] & FLAG_RLE else raw)
+        else:
+            rle = encode_rle(sub)
+            # Only use RLE when it actually wins, as XCC does.
+            use_rle = compress and len(rle) < len(raw)
+            payload = rle if use_rle else raw
+            flags = (FLAG_RLE | FLAG_TRANSPARENT) if use_rle else 0
 
-        # Frame data blocks are 8-byte aligned.
-        pad = (-(base + len(body))) % 8
-        body += b"\0" * pad
+        here = base + len(body)
+        pad = b"\0" * ((-here) % max(1, align))
+        if was is not None and was["offset"] >= here:
+            # Reproduce the original gap exactly -- its bytes, not zeros. When
+            # the payload is unchanged this lands on the original offset; when
+            # an edit has moved things along, the align rule stands instead.
+            want = was["offset"] - here
+            original = was.get("pad") or b""
+            pad = original if len(original) == want else b"\0" * want
+        body += pad
         offset = base + len(body)
         body += payload
 
-        radar = b"\0\0\0\0"
-        if radar_colours and radar_colours[i] is not None:
-            value = radar_colours[i]
-            if isinstance(value, (bytes, bytearray)):
-                radar = (bytes(value) + b"\0\0\0\0")[:4]
-            else:
-                r, g, b = value[:3]
-                radar = bytes((int(r), int(g), int(b), 0))
-        headers += FRAME.pack(box.x, box.y, box.w, box.h, flags, radar, 0, offset)
+        radar = _radar_bytes(radar_colours, i, was["radar"] if was else None)
+        headers += FRAME.pack(box.x, box.y, box.w, box.h, flags, radar,
+                              was["reserved"] if was else 0, offset)
 
-    return HEADER.pack(0, width, height, count) + bytes(headers) + bytes(body)
+    return (HEADER.pack(0, width, height, count) + bytes(headers)
+            + bytes(body) + bytes(tail or b""))
+
+
+def _unchanged(sub, box, was):
+    """Do these pixels still match the ones this frame was read with?
+
+    If they do, the frame's original bytes go back untouched. That matters
+    because a re-encode is only guaranteed to be CORRECT, not identical: the
+    shipped RA2 art is littered with rows whose trailing zero run is declared
+    one longer than the row is wide, and the same frame mixes padded and
+    exact rows, so no rule recovers it. Copying does.
+    """
+    prior = was.get("plane")
+    if prior is None or not was.get("payload"):
+        return False
+    if (box.x, box.y, box.w, box.h) != (was["x"], was["y"], was["w"], was["h"]):
+        return False
+    return prior.shape == sub.shape and np.array_equal(prior, sub)
+
+
+def trailing_bytes(data, frames):
+    """Whatever sits past the last frame's payload. Usually nothing.
+
+    Derived by re-encoding the last frame rather than stored, because the
+    format records where a frame STARTS and never how long it is.
+    """
+    last = max((f for f in frames if f["offset"] and f["plane"] is not None),
+               key=lambda f: f["offset"], default=None)
+    if last is None:
+        return b""
+    end = last["offset"] + len(last["payload"])
+    return data[end:] if 0 < end <= len(data) else b""
+
+
+def _unhex_tail(text):
+    if not text:
+        return b""
+    try:
+        return bytes.fromhex(text)
+    except ValueError:
+        return b""
+
+
+def _source_from_meta(document):
+    """The per-frame writer choices this document was loaded with.
+
+    Metadata carries the scalars, which survive a trip through .ochre; the
+    cache adds the original pixels and bytes, which do not. Frame count is
+    checked because inserting or deleting a frame invalidates the pairing
+    entirely, and a misaligned payload would be far worse than re-encoding.
+    """
+    cached = _SOURCES.get(document)
+    if cached is not None and len(cached) != len(document.frames):
+        cached = None
+
+    out = []
+    for i, frame in enumerate(document.frames):
+        entry = {"flags": _int_meta(frame, "cnc.flags"),
+                 "offset": _int_meta(frame, "cnc.offset"),
+                 "reserved": _int_meta(frame, "cnc.reserved"),
+                 "x": _int_meta(frame, "cnc.x"), "y": _int_meta(frame, "cnc.y"),
+                 "w": _int_meta(frame, "cnc.w"), "h": _int_meta(frame, "cnc.h"),
+                 "radar": None, "plane": None, "payload": b"", "pad": b""}
+        if cached is not None:
+            was = cached[i]
+            entry.update({"plane": was["plane"], "payload": was["payload"],
+                          "pad": was["pad"],
+                          "x": was["x"], "y": was["y"],
+                          "w": was["w"], "h": was["h"]})
+        out.append(entry)
+    return out
+
+
+def _int_meta(frame, key):
+    try:
+        return int(frame.meta.get(key, "0"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _radar_bytes(radar_colours, i, fallback=None):
+    """The 4-byte radar field: an explicit colour, else whatever was there."""
+    value = radar_colours[i] if radar_colours and i < len(radar_colours) else None
+    if value is None:
+        value = fallback
+    if value is None:
+        return b"\0\0\0\0"
+    if isinstance(value, (bytes, bytearray)):
+        return (bytes(value) + b"\0\0\0\0")[:4]
+    r, g, b = value[:3]
+    return bytes((int(r), int(g), int(b), 0))
 
 
 # ---- the provider -------------------------------------------------------
@@ -253,7 +450,15 @@ class ShpFormat:
     """
 
     name = "cnc.shp"
-    extensions = ("shp",)
+    # The theater suffixes are here as well as on the TMP provider, and that
+    # is not a mistake. In TS/RA2 an extension names the THEATER, not the
+    # format: terrain templates and the theater-specific sprites that sit on
+    # them -- trees, smudges, bridges, overlays -- all end in .tem or .sno.
+    # Measured on the shipped art, 1392 of 2108 theater-suffixed files are
+    # SHPs rather than templates. Both providers therefore claim them, and
+    # the host sniffs to decide, which is exactly the case its two-candidate
+    # path exists for.
+    extensions = ("shp", "tem", "sno", "urb", "ubn", "des", "lun")
     can_read = True
     can_write = True
 
@@ -273,6 +478,9 @@ class ShpFormat:
         doc = Document(width, height, palette=palette)
         doc.meta["format"] = "cnc.shp"
         doc.meta["cnc.frames"] = str(len(frames))
+        tail = trailing_bytes(data, frames)
+        if tail:
+            doc.meta["cnc.tail"] = tail.hex()
 
         # Unit sprites conventionally store art in the first half of the
         # frame list and 1-bit shadows in the second. Recording the guess as
@@ -291,6 +499,8 @@ class ShpFormat:
             frame.meta["cnc.w"] = str(entry["w"])
             frame.meta["cnc.h"] = str(entry["h"])
             frame.meta["cnc.flags"] = str(entry["flags"])
+            frame.meta["cnc.offset"] = str(entry["offset"])
+            frame.meta["cnc.reserved"] = str(entry["reserved"])
             # Cosmetic, but it is data the file carried. Recomputing it on
             # save would mean re-saving an untouched sprite changed bytes,
             # which is exactly what a round-trip guarantee rules out.
@@ -309,6 +519,7 @@ class ShpFormat:
                 cell.content_bbox = None
             cell.refresh_derived()
         doc.current = 0
+        _SOURCES[doc] = frames
         return doc
 
     def save(self, document, path, host, options):
@@ -329,7 +540,11 @@ class ShpFormat:
             if cell is None or cell.planes.get("index") is None:
                 planes.append(np.zeros((document.height, document.width), np.uint8))
                 bounds.append(None)
-                radar.append(None)
+                # An empty frame still carried a radar colour, and blank
+                # shadow frames routinely do. Dropping it here would undo the
+                # preservation the loaded metadata exists for.
+                stored = frame.meta.get("cnc.radar")
+                radar.append(_unhex_radar(stored) if stored else None)
                 continue
             plane = cell.plane("index")
             planes.append(plane)
@@ -350,9 +565,11 @@ class ShpFormat:
             else:
                 radar.append(_average_colour(plane, palette))
 
+        source = _source_from_meta(document) if preserve else None
         data = build_shp(document.width, document.height, planes,
                          transparent=0, compress=True,
-                         radar_colours=radar, bounds=bounds)
+                         radar_colours=radar, bounds=bounds, source=source,
+                         tail=_unhex_tail(document.meta.get("cnc.tail")))
         with open(path, "wb") as f:
             f.write(data)
         return path

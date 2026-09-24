@@ -325,7 +325,9 @@ Load-bearing tests, beyond the per-module ones:
 - **`test_composite.py`** — the below/above cached result must be *identical* to an uncached full composite. This is what makes the cache trustworthy.
 - **`test_addon_isolation.py`** — an addon raising in `register` leaves the registry byte-identical; an effect raising mid-apply leaves the layer bit-identical; writing outside the given ROI is caught by a canary-filled destination.
 - **`test_ui_smoke.py`** — under `QT_QPA_PLATFORM=offscreen`, builds the window and forces a real synchronous `repaint()` on a live document. Constructing widgets verifies almost nothing about a canvas; forcing a `paintEvent` exercises the buffer aliasing, the premultiply, and `drawImage` — precisely the code that segfaults if the lifetime rules are broken.
-- **`shp_roundtrip.py` / `tmp_roundtrip.py`** — over a corpus directory, skipped with a printed `ok: skipped` when unset. Read→write→read must be **byte-identical** for untouched files. This is the only honest proof that a reimplemented format codec is correct, and it's the regression net that later makes the compiled tier safe to optimise aggressively. XCC Mixer's output is the external oracle.
+- **`test_corpus.py`** *[built as one file, not two]* — over a corpus directory named by `OCHRE_CNC_CORPUS`, skipped with a printed `ok: skipped` when unset. Read→write must be **byte-identical** for untouched files, at the codec level *and* through a real `open_path`/`save_path` cycle. This is the only honest proof that a reimplemented format codec is correct, and it's the regression net that later makes the compiled tier safe to optimise aggressively.
+
+  **It has now been run**, against a 5,300-file RA2 + Yuri's Revenge install. What it found is recorded below under "What the real files taught us" — everything the synthetic tests missed, it missed because the files Ochre authors are cleaner than the files Westwood shipped.
 
 **Beyond tests**, three things get driven manually because no test substitutes for them: open a large photo and zoom to fit (checks downscale quality, which has no mip chain in v1); paint a long stroke on a 4000×4000 document with ten layers and confirm it feels immediate; and load a written SHP in XCC Mixer and in the actual game before declaring the codec correct.
 
@@ -419,6 +421,85 @@ what is committed. Their outlines are also composed from the *selection*
 rasterisers — `coverage(grown)` minus `coverage(shrunk)` — so they inherited
 the supersampling symmetry fix rather than needing their own.
 
+## What the real files taught us
+
+The codecs were written against the format documentation and tested against
+files Ochre itself authored. Both round-tripped perfectly, and both were
+wrong, in the specific way that a reader and a writer sharing one
+misunderstanding always agree with each other. Pointing `test_corpus.py` at a
+real RA2 + Yuri's Revenge install — 6,749 sprites, 374,548 frames, 716
+terrain templates, 195 palettes — found eight defects in an afternoon. Every
+one of them is now a passing assertion.
+
+One shape recurred so often it is worth stating on its own, because it is the
+general lesson and the rest are instances of it: **a file we did not change
+must be reproduced, not regenerated.** Everywhere the format leaves the
+writer a free choice, the shipped art has files on both sides of it, so there
+is no rule to derive — only a value to remember. Five separate fields turned
+out to work this way before the pattern was obvious.
+
+**The extension names the theater, not the format.** `.tem`, `.sno`, `.urb`
+are the theater suffixes — and terrain templates *and* the sprites that sit
+on them (trees, smudges, bridges, overlays) all use them. Measured: **1,392
+of 2,108** theater-suffixed files are SHPs rather than TMPs. Both providers
+therefore claim those extensions and the host sniffs to choose. This is what
+the two-candidate path in `_addon_format_for` was built for; until a real
+corpus arrived, nothing had ever exercised it.
+
+**Saving cannot sniff, and that was silently catastrophic.** Sniffing reads
+the file at the target path — which, when saving, does not exist yet. With
+two providers claiming `.tem`, the tie-break fell to "first candidate", and
+saving a terrain template wrote a *SHP* into it. Fixed generically: when
+writing, the document's own recorded format wins. No sniffing, no guessing.
+
+**Vanilla files are full of uninitialised memory, and preserving it is the
+only way to round-trip.** TMP tile headers carry `0xCD` — MSVC's debug-build
+heap fill — in every field the flags mark absent, plus three bytes of
+padding. SHP frame headers carry a leaked 32-bit stack address (`0x0012fxxx`)
+in the reserved dword. Normalising these to zero is harmless to the game and
+fatal to a byte-exact guarantee, so an untouched record keeps the bytes it
+came with. Across all 716 templates, that garbage was the *only* thing that
+differed — every pixel, z-plane and extra block already matched, which is a
+much stronger statement about the diamond packing than any synthetic test
+made.
+
+**A correct re-encode is not an identical one.** 32,754 scanlines in the
+shipped art declare a trailing transparent run one pixel longer than the row
+is wide. The lenient decoder handles it, as intended. But the same frame
+mixes padded and exact rows with no rule that separates them — row 8 and row
+12 of one tile have identical structure and different counts — so the quirk
+cannot be reproduced, only remembered. Hence the rule that settles this whole
+class of problem: **an untouched frame is copied, not re-encoded.** Original
+payload bytes go back verbatim when the pixels still match; anything edited
+is encoded properly.
+
+The same principle covers every other free choice a SHP writer has, and the
+list kept growing as the corpus widened: whether to compress (1,327 frames
+were left raw where RLE would have won), which of the two raw flag values to
+use, how much padding to put between frames (**52 of 73** sampled files are
+not 8-byte aligned, so the "always align to 8" rule in Appendix A is simply
+wrong as a writer behaviour), *what is in* that padding (not zeros — real
+files leave fragments of the writer's previous buffer there), whether the
+file length is rounded up at the end, and what an empty frame records. That
+last one is a good example of how little intuition helps: a zero-size frame
+is supposed to have a zero offset, and plenty of real ones instead point at
+the end of the data and carry a non-zero x/y. Nothing reads any of it, since
+the width and height are zero. It is still what the file said.
+
+**A palette that is not a palette still parses.** Six `.pal` files in the
+corpus are JASC-PAL — the *text* format, sharing the extension. Read as
+binary this does not fail; it interprets ASCII digits as 6-bit colour and
+returns a palette of confident nonsense, which is worse than an error because
+nothing looks wrong until the colours do. Both forms are now detected and
+parsed.
+
+**A crash in one file takes the addon down for the session.** Loading any
+template with an extra block raised, because the extra was being stashed on a
+`Surface` that defines `__slots__`. The fault isolation did its job and
+disabled the addon — which meant every *subsequent* file fell through to
+Pillow and failed with a baffling `UnidentifiedImageError`. Worth knowing
+when reading a bug report: the first failure is the real one.
+
 ## Open questions
 
 None of these blocked starting, and none blocks using the editor. Each is
@@ -432,7 +513,7 @@ contained, and each names what would settle it.
 | 4 | **Onion-skinning** would need 2–3 frames composited live, which the current per-frame below/above cache doesn't serve. | Decide before building the timeline UI. Contained to `compositor.py` (the cache becomes per-frame and LRU'd). |
 | 5 | ~~Text rendering is the one place the UI generates pixels~~ | **RESOLVED, and the premise was wrong.** The question assumed glyph rasterisation must happen in the UI because it needs font machinery, and proposed rendering through `QPainter` into a `QImage` and handing the engine a blit. That is unnecessary: Pillow is ALREADY an engine dependency and ships FreeType (with raqm, so complex scripts shape correctly). Text rasterises in `ochre/engine/text.py` to an ordinary coverage plane, the engine stays Qt-free, and text is scriptable and headlessly testable like every other tool. Font family names resolve through fontconfig, so aliases such as `sans-serif` work and fallback is delegated rather than reimplemented. One deliberate exclusion: subpixel (LCD) antialiasing is avoided, because its colour fringes are correct against a known opaque background and wrong on a transparent layer. |
 | 6 | **Tablet pressure on X11** needs XInput2 and varies by device. | Test with the actual tablet; degrades cleanly to `pressure=1.0`, which is already the default. |
-| 7 | **How large do TMP "extra" extents get in practice?** Drives whether canvas-sized cells stay free. | Cheap to settle empirically — scan the vanilla theater tiles under the `RA2_TILES` root that `tmp.py` already walks, and histogram the extra dimensions. Worth doing before the canvas decision is frozen. |
+| 7 | ~~How large do TMP "extra" extents get in practice?~~ | **RESOLVED, and the answer is inconvenient.** Across the shipped theaters: 767 of 3,147 tiles carry an extra, the largest is **60×84 against a 60×30 tile**, and they sit up to **72 pixels above** the tile origin. So an extra is nearly three times the canvas height and starts off-canvas — canvas-aligned cells cannot hold one. Extras currently round-trip through a side table and are never corrupted, but they cannot be painted and do not survive `.ochre`. Making them editable means sizing the document to tile-plus-overhang and recording where the diamond sits inside it. |
 | 8 | ~~Does SHP writing need byte-exact reproduction of original compression choices?~~ | **RESOLVED.** The addon preserves each frame's original crop rect and radar colour, and chooses RLE only when it is actually smaller — so an untouched sprite re-saves byte-identically, asserted by `tests/test_cnc.py`. One refinement the plan did not anticipate: the stored crop rect is honoured only while the content still fits inside it, because honouring it unconditionally silently discards any edit made outside the original bounds. Still unverified in-game. |
 
 ---

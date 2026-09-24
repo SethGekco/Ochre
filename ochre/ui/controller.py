@@ -96,6 +96,18 @@ class Controller:
                       if (p.can_write if writing else p.can_read)]
         if len(candidates) <= 1:
             return candidates[0] if candidates else None
+
+        # Writing cannot sniff -- there is nothing at the target path yet, or
+        # worse, something unrelated. When two providers share an extension
+        # the document itself is the authority on which one it came from.
+        # Without this, saving to an ambiguous extension silently writes the
+        # wrong FORMAT, which is the most destructive outcome available.
+        if writing and self.doc is not None:
+            came_from = self.doc.meta.get("format")
+            for provider in candidates:
+                if provider.name == came_from:
+                    return provider
+
         try:
             with open(path, "rb") as f:
                 head = f.read(4096)
