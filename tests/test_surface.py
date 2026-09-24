@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Surface: lazy allocation, plane coherence, and the index-locked contract.
 
 Run: python3 tests/test_surface.py

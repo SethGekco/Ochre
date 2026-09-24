@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Integer pixel arithmetic. This module is normative.
 
 Every operation Ochre may one day accelerate in C is specified here in

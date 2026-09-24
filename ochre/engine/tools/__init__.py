@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Tools: Qt-free, event-driven, and INI-registered.
 
 A tool receives ToolEvents -- plain data, not widget types -- so the whole

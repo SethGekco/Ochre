@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Stroke sessions: one drag becomes one undo entry, and preview comes free.
 
 The obvious designs are both wrong. Snapshotting per dab is O(dabs) and far

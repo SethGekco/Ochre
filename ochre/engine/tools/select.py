@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Selection tools: rectangle, ellipse, lasso, magic wand.
 
 All four produce an antialiased coverage mask and hand it to the selection's

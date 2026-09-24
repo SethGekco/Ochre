@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """UI settings. Same rule as the engine: the DEFAULTS dict is the schema.
 
 Precedence is DEFAULTS < data/ui.ini < OCHRE_<KEY>, and the type of each

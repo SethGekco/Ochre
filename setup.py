@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Build script. The C accelerator is OPTIONAL and must never break an install.
 
 Ochre is a pure-Python application that happens to ship an optional

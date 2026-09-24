@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Palette: 256 RGBA entries, annotated index ranges, and nearest-colour snap.
 
 This module is deliberately format-agnostic. It knows that a palette can carry

@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """INI database: every tunable and every piece of content lives in data/*.ini.
 
 Load order: data/*.ini sorted by filename, then data/addons/**/*.ini sorted.

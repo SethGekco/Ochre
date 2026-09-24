@@ -78,7 +78,7 @@ python3 tests/test_geometry.py
 
 ## Licence
 
-GPL-3.0-or-later. See [COPYING](COPYING).
+GPL-3.0-or-later. See [LICENSE](LICENSE).
 
 Ochre draws on several existing projects, all licence-compatible:
 

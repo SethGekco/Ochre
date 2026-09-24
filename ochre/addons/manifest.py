@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """addon.ini -- what an addon declares about itself before any code runs.
 
 Same house rule as everywhere else: the DEFAULTS dict is the schema, the type

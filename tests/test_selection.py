@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Selections: coverage masks, combine modes, and the None fast path.
 
 Two properties matter most. Combining must PRESERVE ANTIALIASING -- boolean

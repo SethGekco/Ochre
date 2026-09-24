@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Ochre's engine: the I/O-free, Qt-free core.
 
 Nothing in this package may import PySide6, shiboken6 or PyQt. That rule is

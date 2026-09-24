@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """The engine must never import Qt, and must be plain ASCII.
 
 Both halves of this exist because the alternative is a convention nobody

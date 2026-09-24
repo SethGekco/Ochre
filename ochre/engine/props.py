@@ -1,6 +1,6 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
-# Licensed under the GNU General Public License v3 or later. See COPYING.
+# Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Typed properties with constraints and cross-property rules.
 
 This is Paint.NET's PropertySystem idea, and the reason to copy it is that an
