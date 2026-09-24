@@ -269,3 +269,110 @@ class GradientTool(_DragTool):
         src = gradient.render(rect, base)
         cell.apply_masked(rect, src, ctx.coverage(None, rect))
         return rect
+
+
+class TextTool(_DragTool):
+    """Place and re-render text, live.
+
+    The interaction a text tool needs is different from a shape's: you click
+    once, then TYPE, and the result must update as you go. So the session
+    deliberately stays open after mouse-up -- `on_end` finishes POSITIONING,
+    not the edit. A caller keeps editing by calling `set_text()` and finishes
+    with `commit_text()`.
+
+    That is the same restore-and-redraw loop the shapes use, so live text
+    preview costs nothing extra and, because it restores from the buffer that
+    becomes the undo entry, what you see while typing is exactly what gets
+    committed.
+
+    The in-canvas caret and keyboard handling belong to the UI; everything
+    below is headless and scriptable.
+    """
+
+    name = "text"
+    label = "Text"
+
+    def on_begin(self, ctx, event):
+        if ctx.cell is None:
+            return None
+        self._session = self._begin_session(ctx)
+        self._anchor = (event.x, event.y)
+        self._last_rect = None
+        return self._render(ctx, event)
+
+    def on_motion(self, ctx, event):
+        """Dragging repositions the text rather than resizing it."""
+        if self._session is None:
+            return None
+        self._anchor = (event.x, event.y)
+        return super().on_motion(ctx, event)
+
+    def on_end(self, ctx, event):
+        """Finish POSITIONING. The session stays open so typing can continue."""
+        if self._session is None:
+            return None
+        self._anchor = (event.x, event.y)
+        restored = self._session.restore(self._last_rect)
+        drawn = self._render(ctx, event)
+        self._last_rect = drawn
+        self.active = True          # still editing
+        if restored is None:
+            return drawn
+        return restored if drawn is None else restored.union(drawn)
+
+    def set_text(self, ctx, text):
+        """Replace the string and redraw. What a UI calls on every keystroke."""
+        self.set_option("text", text)
+        if self._session is None:
+            return None
+        restored = self._session.restore(self._last_rect)
+        drawn = self._render(ctx, None)
+        self._last_rect = drawn
+        if restored is None:
+            return drawn
+        return restored if drawn is None else restored.union(drawn)
+
+    def commit_text(self, ctx):
+        """Finish the edit and push one history entry."""
+        if self._session is None:
+            return None
+        cmd = self._session.commit()
+        self._session = None
+        self.active = False
+        if cmd is not None and ctx.history is not None:
+            ctx.history.push(cmd, self.label, frame_id=ctx.frame.id)
+        return cmd
+
+    def _render(self, ctx, event):
+        from .. import text as textmod
+
+        cell = ctx.cell
+        body = str(self.option("text", ""))
+        if not body:
+            return None
+
+        cov, w, h = textmod.render_coverage(
+            body,
+            family=str(self.option("font", "DejaVu Sans")),
+            size=int(self.option("size", 24)),
+            align=str(self.option("align", textmod.LEFT)),
+            line_spacing=float(self.option("line_spacing", 1.0)),
+            antialias=bool(self.option("antialias", True)))
+        if w == 0 or h == 0:
+            return None
+
+        ax, ay = self._anchor
+        rect = textmod.place(cov, ax, ay, str(self.option("align", textmod.LEFT)))
+        clipped = rect.clipped_to(cell.width, cell.height)
+        if clipped is None:
+            return None
+
+        window = cov[clipped.y - rect.y:clipped.y - rect.y + clipped.h,
+                     clipped.x - rect.x:clipped.x - rect.x + clipped.w]
+        self._session.touch(clipped)
+
+        colour = ctx.colour_for(event) if event is not None else ctx.primary
+        src = np.empty((clipped.h, clipped.w, 4), dtype=np.uint8)
+        src[:] = colour
+        cell.apply_masked(clipped, src, ctx.coverage(window, clipped))
+        return clipped

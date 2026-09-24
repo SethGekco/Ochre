@@ -29,7 +29,7 @@ from .quantize import (convert_layer_to_indexed, palette_usage,
 from .props import (BoolProperty, ChoiceProperty, ColorProperty,
                     FloatProperty, IntProperty, PropertyCollection)
 from .selection import Selection
-from . import shapes
+from . import shapes, text
 from .settings import DEFAULTS, Settings
 from .stroke import StrokeSession
 from .tools import Tool, ToolContext, ToolEvent, ToolRegistry
@@ -43,7 +43,7 @@ __all__ = [
     "quantize", "convert_layer_to_indexed", "quantization_error",
     "palette_usage", "PropertyCollection", "IntProperty", "FloatProperty", "BoolProperty",
     "ChoiceProperty", "ColorProperty",
-    "fileio", "StrokeSession", "Gradient", "shapes", "Selection", "Tool", "ToolEvent", "ToolContext",
+    "fileio", "StrokeSession", "Gradient", "shapes", "text", "Selection", "Tool", "ToolEvent", "ToolContext",
     "ToolRegistry", "Document", "Frame", "Layer", "LayerGroup", "LayerNode", "Palette",
     "Surface", "Rect", "DirtyRegion", "IniDB", "Settings", "DEFAULTS",
     "grayscale", "mul255", "lerp255", "blend_over",

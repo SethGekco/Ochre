@@ -365,16 +365,23 @@ Things a from-scratch implementation gets wrong, established by surveying the Op
 The plan describes Paint.NET's full tool set. What exists is the subset the
 phases actually reached:
 
-**Built** — 14 tools: pencil, paintbrush, eraser, paint bucket, colour
+**Built** — 15 tools: pencil, paintbrush, eraser, paint bucket, colour
 picker; four selection tools (rectangle, ellipse, lasso, magic wand); four
-shape tools (line, rectangle, ellipse, freeform); and a gradient with five
-types. Adjustments: brightness/contrast, levels, hue/saturation, invert,
+shape tools (line, rectangle, ellipse, freeform); a gradient with five
+types; and text. Adjustments: brightness/contrast, levels, hue/saturation, invert,
 posterize, black & white, sepia. Effects: gaussian blur, sharpen, add noise.
 
-**Not built** — text, clone stamp, move-selection and move-pixels, zoom and
-pan tools. None is blocked by the architecture; each is a `Tool` subclass
-registered in `data/tools.ini`. The text tool is the only one with a design
-question attached — see open question 5.
+**Not built** — clone stamp, move-selection and move-pixels, zoom and pan
+tools. None is blocked by the architecture; each is a `Tool` subclass
+registered in `data/tools.ini`.
+
+The text tool's IN-CANVAS EDITOR is also still missing, and that distinction
+matters. The engine side is complete: text rasterises, places, clips, undoes
+and commits, and a script can drive it. What does not exist is the caret and
+keyboard handling that let you type directly on the canvas. The seam is
+already there — the text session deliberately stays open after mouse-up, and
+`set_text()` redraws live — so the UI work is wiring keystrokes to a method
+that already does the right thing.
 
 The shape tools did confirm the prediction this document makes in the history
 section: because they redraw from scratch on every motion event via
@@ -395,7 +402,7 @@ contained, and each names what would settle it.
 | 2 | ~~Paint.NET's exact formulas for Reflect, Glow, and Negation~~ | **RESOLVED.** Extracted verbatim from OpenPDN `Data/UserBlendOps.Generated.H.cs`. All integer, so they drop straight into the parity contract. `Glow(A,B) = Reflect(B,A)` — arguments swapped — and `Xor` is genuinely bitwise; both would have been wrong if guessed. |
 | 3 | **Downscale quality without a mip chain.** Bilinear at 12% on a 6000px image will alias. | Build v1 without it, open a large photo, zoom to fit, look. The insertion point is already designed in. |
 | 4 | **Onion-skinning** would need 2–3 frames composited live, which the current per-frame below/above cache doesn't serve. | Decide before building the timeline UI. Contained to `compositor.py` (the cache becomes per-frame and LRU'd). |
-| 5 | **Text rendering is the one place the UI generates pixels**, breaking the otherwise-clean "engine owns all pixels" rule. | Render via `QPainter` into a transparent `QImage`, then hand the engine a plain blit. Watch `bytesPerLine` padding — don't assume `4*w` — and disable subpixel antialiasing, which produces colour fringes that are wrong on a transparent layer. |
+| 5 | ~~Text rendering is the one place the UI generates pixels~~ | **RESOLVED, and the premise was wrong.** The question assumed glyph rasterisation must happen in the UI because it needs font machinery, and proposed rendering through `QPainter` into a `QImage` and handing the engine a blit. That is unnecessary: Pillow is ALREADY an engine dependency and ships FreeType (with raqm, so complex scripts shape correctly). Text rasterises in `ochre/engine/text.py` to an ordinary coverage plane, the engine stays Qt-free, and text is scriptable and headlessly testable like every other tool. Font family names resolve through fontconfig, so aliases such as `sans-serif` work and fallback is delegated rather than reimplemented. One deliberate exclusion: subpixel (LCD) antialiasing is avoided, because its colour fringes are correct against a known opaque background and wrong on a transparent layer. |
 | 6 | **Tablet pressure on X11** needs XInput2 and varies by device. | Test with the actual tablet; degrades cleanly to `pressure=1.0`, which is already the default. |
 | 7 | **How large do TMP "extra" extents get in practice?** Drives whether canvas-sized cells stay free. | Cheap to settle empirically — scan the vanilla theater tiles under the `RA2_TILES` root that `tmp.py` already walks, and histogram the extra dimensions. Worth doing before the canvas decision is frozen. |
 | 8 | ~~Does SHP writing need byte-exact reproduction of original compression choices?~~ | **RESOLVED.** The addon preserves each frame's original crop rect and radar colour, and chooses RLE only when it is actually smaller — so an untouched sprite re-saves byte-identically, asserted by `tests/test_cnc.py`. One refinement the plan did not anticipate: the stored crop rect is honoured only while the content still fits inside it, because honouring it unconditionally silently discards any edit made outside the original bounds. Still unverified in-game. |
