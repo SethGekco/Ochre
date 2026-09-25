@@ -437,6 +437,55 @@ def main():
              "\n    ".join("%s  %s" % (os.path.basename(p), why)
                            for p, why in bad[:8])))
 
+    # Painting a REAL extra, with real offsets. The synthetic fixture proves
+    # the mechanism; this proves it against the geometry that actually ships,
+    # where the block starts above the tile and overlaps it.
+    with_extra = None
+    for p in tmps[:limit]:
+        with open(p, "rb") as f:
+            _h, ts = cnctmp.read_tmp(f.read())
+        hit = next((i for i, t in enumerate(ts)
+                    if t is not None and t["extra"] is not None), None)
+        if hit is not None:
+            with_extra = (p, hit)
+            break
+
+    if with_extra is not None:
+        p, slot = with_extra
+        doc = ctl.open_path(p)
+        elayer = next((l for l in doc.layers() if l.name == "Extra"), None)
+        frame = next(f for f in doc.frames if f.meta.get("cnc.slot") == str(slot))
+        ox = int(doc.meta["cnc.origin_x"])
+        oy = int(doc.meta["cnc.origin_y"])
+        ex = ox + int(frame.meta["cnc.extra_x"]) - int(frame.meta["cnc.x"])
+        ey = oy + int(frame.meta["cnc.extra_y"]) - int(frame.meta["cnc.y"])
+        cell = doc.cells[(elayer.id, frame.id)]
+        whole = cell.plane("index").copy()
+        before = whole[ey:ey + 4, ex:ex + 6]
+        # Paint a value the block does not already contain, or the assertion
+        # would pass without the stroke ever having happened.
+        ink = next(v for v in range(1, 256) if not (before == v).any())
+        cell.plane("index")[ey:ey + 4, ex:ex + 6] = ink
+        cell.refresh_derived()
+
+        out = os.path.join(work, "painted_" + os.path.basename(p))
+        ctl.save_path(out)
+        with open(out, "rb") as f:
+            _h, after = cnctmp.read_tmp(f.read())
+        got = after[slot]["extra"]
+        check("PAINTING A REAL TILE'S OVERHANG REACHES THE FILE",
+              got is not None and bool((got[0:4, 0:6] == ink).all()),
+              "-- %s slot %d: the stroke did not survive"
+              % (os.path.basename(p), slot))
+
+        restored = got.copy()
+        restored[0:4, 0:6] = before
+        original = whole[ey:ey + got.shape[0], ex:ex + got.shape[1]]
+        check("...and nothing else in the block moved",
+              np.array_equal(restored, original),
+              "-- painting one corner disturbed the rest of the overhang")
+
+
     print("\nall corpus checks passed")
 
 

@@ -43,6 +43,15 @@ z-data -- which is exactly why the core grew arbitrary non-colour planes.
 Per-tile land and ramp types live in frame metadata and are preserved
 verbatim, because several distinct numeric values share a human label and
 normalising them would silently change tile behaviour.
+
+The EXTRA block gets a second layer of its own, and the canvas is sized to
+the tile plus whatever its extras overhang. Both halves of that are forced by
+measurement rather than taste: extras start up to 72 pixels ABOVE their tile
+(so the diamond's origin has to be recorded, not assumed to be 0,0), and 758
+of the 767 in the shipped theaters OVERLAP the diamond -- so one plane
+holding both would have each destroying the other. Two layers composite to
+what the game draws and paint independently, and a tile with no extra simply
+has no cell on that layer.
 """
 
 import struct
@@ -54,24 +63,14 @@ from ochre.engine.document import Document
 from ochre.engine.frame import Frame
 from ochre.engine.geometry import Rect
 
-# {document: {frame_id: tile record}} as read from the file, carrying the two
-# things the document model cannot hold: the original 52 header bytes (see
-# build_tmp on why the uninitialised ones matter) and the EXTRA block -- the
-# plain rectangle holding art that overflows the diamond, which is what
-# cliffs, bridges and tall rocks are made of.
+# {document: {frame_id: tile record}} as read from the file. This holds the
+# one thing the document model has no place for: the original 52 header
+# bytes, which build_tmp writes back verbatim because the vanilla files carry
+# uninitialised memory in the fields the flags mark absent.
 #
-# The extra lives beside the document rather than in it because it does not
-# fit the plane model, and that was measured rather than assumed: across the
-# shipped theaters, 767 of 3147 tiles have one, the largest is 60x84 against a 60x30
-# tile, and they sit up to 72 pixels ABOVE the tile origin. A cell's planes
-# are canvas-aligned by design -- one dirty rect, one history delta, one
-# bbox -- so a block nearly three times the canvas height cannot be one.
-#
-# The consequence, and it is a real limitation rather than a detail: extras
-# round-trip and are never corrupted, but they cannot yet be PAINTED, and
-# they do not survive a trip through .ochre. Making them editable means
-# giving the document a canvas large enough for tile plus overhang and
-# recording where the diamond sits inside it. See docs/DESIGN.md.
+# The pixels are NOT kept here. Both the diamond and its extra live on real
+# layers and are paintable; this is only the provenance that lets an
+# untouched tile be reproduced rather than regenerated.
 _SOURCE_TILES = weakref.WeakKeyDictionary()
 
 HEADER = struct.Struct("<iiii")
@@ -125,6 +124,28 @@ def encode_diamond(rect, cx, cy):
             continue
         out += rect[y, x:x + width].tobytes()
     return bytes(out)
+
+
+def extra_bounds(header, tiles):
+    """(origin_x, origin_y, width, height) for a canvas holding everything.
+
+    The diamond sits at the origin; extras are placed relative to their own
+    tile and routinely start ABOVE it -- measured, up to 72 pixels above --
+    so the origin is usually not (0, 0). Returned rather than assumed because
+    it varies per file: most templates need exactly the tile, and the worst
+    in the shipped theaters needs 60x102 for a 60x30 tile.
+    """
+    cx, cy = header["cx"], header["cy"]
+    x0, y0, x1, y1 = 0, 0, cx, cy
+    for tile in tiles:
+        if tile is None or tile.get("extra") is None:
+            continue
+        eh, ew = tile["extra"].shape
+        dx = tile["extra_x"] - tile["x"]
+        dy = tile["extra_y"] - tile["y"]
+        x0, y0 = min(x0, dx), min(y0, dy)
+        x1, y1 = max(x1, dx + ew), max(y1, dy + eh)
+    return -x0, -y0, x1 - x0, y1 - y0
 
 
 def is_tmp(data):
@@ -330,11 +351,22 @@ class TmpFormat:
         header, tiles = read_tmp(data)
         cx, cy = header["cx"], header["cy"]
 
+        # The canvas has to hold the diamond AND every extra block, because
+        # an extra is art that overflows the tile -- a cliff top, a bridge
+        # span -- and is meaningless shown apart from what it overhangs.
+        origin_x, origin_y, width, height = extra_bounds(header, tiles)
+
         palette = self._pick_palette(host)
-        doc = Document(cx, cy, palette=palette)
+        doc = Document(width, height, palette=palette)
         doc.meta["format"] = "cnc.tmp"
         doc.meta["cnc.blocks_x"] = str(header["bx"])
         doc.meta["cnc.blocks_y"] = str(header["by"])
+        # The canvas is no longer the tile, so the tile size has to be
+        # recorded rather than read back off the document.
+        doc.meta["cnc.cx"] = str(cx)
+        doc.meta["cnc.cy"] = str(cy)
+        doc.meta["cnc.origin_x"] = str(origin_x)
+        doc.meta["cnc.origin_y"] = str(origin_y)
         doc.axis_layout = "grid"
         doc.axis_columns = header["bx"]
 
@@ -343,6 +375,13 @@ class TmpFormat:
         # the first time someone moved or deleted one of the pair.
         layer = doc.add_layer("Tile", planes=("index", "rgba", "height"),
                               authoritative=("index", "height"))
+        # The extra is a SEPARATE layer rather than more of the same canvas,
+        # and that is forced rather than chosen: measured across the shipped
+        # theaters, 758 of 767 extras OVERLAP the diamond they belong to. One
+        # plane cannot hold both without one destroying the other. Two layers
+        # composite to what the game draws, and paint independently.
+        extra_layer = doc.add_layer("Extra", planes=("index", "rgba", "height"),
+                                    authoritative=("index", "height"))
 
         doc.frames = []
         for slot, tile in enumerate(tiles):
@@ -365,28 +404,51 @@ class TmpFormat:
             _SOURCE_TILES.setdefault(doc, {})[frame.id] = tile
 
             cell = doc.cell(layer, frame)
-            cell.plane("index")[...] = tile["image"]
+            box = Rect(origin_x, origin_y, cx, cy)
+            cell.plane("index")[box.slice()] = tile["image"]
             if tile["z"] is not None:
-                cell.plane("height")[...] = tile["z"]
-            if tile["extra"] is not None:
-                frame.meta["cnc.extra_w"] = str(tile["extra"].shape[1])
-                frame.meta["cnc.extra_h"] = str(tile["extra"].shape[0])
-
-            cell.content_bbox = doc.bounds
+                cell.plane("height")[box.slice()] = tile["z"]
+            else:
+                # No z-plane means no depth, which is 255 -- not 0, which is
+                # a valid depth and would bury the tile behind everything.
+                cell.plane("height")[...] = Z_NONE
+            cell.content_bbox = box
             cell.refresh_derived()
+
+            if tile["extra"] is not None:
+                eh, ew = tile["extra"].shape
+                spot = Rect(origin_x + tile["extra_x"] - tile["x"],
+                            origin_y + tile["extra_y"] - tile["y"], ew, eh)
+                frame.meta["cnc.extra_w"] = str(ew)
+                frame.meta["cnc.extra_h"] = str(eh)
+                ecell = doc.cell(extra_layer, frame)
+                ecell.plane("index")[spot.slice()] = tile["extra"]
+                ecell.plane("height")[...] = Z_NONE
+                if tile["extra_z"] is not None:
+                    ecell.plane("height")[spot.slice()] = tile["extra_z"]
+                ecell.content_bbox = spot
+                ecell.refresh_derived()
 
         doc.current = 0
         return doc
 
     def save(self, document, path, host, options):
-        layer = next((l for l in document.layers() if l.index_locked), None)
-        if layer is None:
+        indexed = [l for l in document.layers() if l.index_locked]
+        if not indexed:
             raise ValueError("TMP needs an index-locked layer")
+        # By name, not by position: "the first indexed layer" would silently
+        # write the overhang as the tile the moment someone reordered them.
+        layer = next((l for l in indexed if l.name == "Tile"), indexed[0])
+        extra_layer = next((l for l in indexed if l.name == "Extra"), None)
 
         bx = int(document.meta.get("cnc.blocks_x", document.axis_columns or 1))
         by = int(document.meta.get("cnc.blocks_y",
                                    max(1, -(-len(document.frames) // max(1, bx)))))
-        header = {"bx": bx, "by": by, "cx": document.width, "cy": document.height}
+        cx = _int(document.meta.get("cnc.cx"), document.width)
+        cy = _int(document.meta.get("cnc.cy"), document.height)
+        origin_x = _int(document.meta.get("cnc.origin_x"))
+        origin_y = _int(document.meta.get("cnc.origin_y"))
+        header = {"bx": bx, "by": by, "cx": cx, "cy": cy}
 
         was_tiles = _SOURCE_TILES.get(document, {})
         tiles = []
@@ -397,6 +459,8 @@ class TmpFormat:
                 tiles.append(None)
                 continue
             was = was_tiles.get(frame.id, {})
+            box = Rect(origin_x, origin_y, cx, cy).clipped_to(
+                document.width, document.height) or document.bounds
             entry = {
                 "x": _int(frame.meta.get("cnc.x")),
                 "y": _int(frame.meta.get("cnc.y")),
@@ -412,17 +476,50 @@ class TmpFormat:
                 "extra_y": _int(frame.meta.get("cnc.extra_y")),
                 "radar_low": _unhex(frame.meta.get("cnc.radar_low")),
                 "radar_high": _unhex(frame.meta.get("cnc.radar_high")),
-                "image": cell.plane("index"),
-                "z": cell.plane("height") if cell.has("height") else None,
-                "extra": was.get("extra"),
-                "extra_z": was.get("extra_z"),
+                # Slice the tile back out of the larger canvas. The diamond
+                # packer only ever sees a cx-by-cy rectangle, exactly as
+                # before the canvas grew.
+                "image": cell.plane("index")[box.slice()],
+                "z": (cell.plane("height")[box.slice()]
+                      if cell.has("height") else None),
                 "raw": was.get("raw"),
             }
+            entry.update(self._extra_for(document, extra_layer, frame, was,
+                                         origin_x, origin_y, entry))
             tiles.append(entry)
 
         with open(path, "wb") as f:
             f.write(build_tmp(header, tiles))
         return path
+
+    @staticmethod
+    def _extra_for(document, extra_layer, frame, was, origin_x, origin_y, entry):
+        """The extra block and its z, read back off the Extra layer.
+
+        The rectangle is taken from the frame's recorded extent rather than
+        from wherever ink happens to be: the block has a fixed size the file
+        header declares, and painting a transparent hole in its corner must
+        not silently resize it.
+        """
+        ew = _int(frame.meta.get("cnc.extra_w"))
+        eh = _int(frame.meta.get("cnc.extra_h"))
+        cell = (document.cells.get((extra_layer.id, frame.id))
+                if extra_layer is not None else None)
+        if cell is None or ew <= 0 or eh <= 0:
+            # Nothing on the layer: fall back to whatever was read in, so a
+            # document that never grew an Extra layer still round-trips.
+            return {"extra": was.get("extra"), "extra_z": was.get("extra_z")}
+
+        spot = Rect(origin_x + entry["extra_x"] - entry["x"],
+                    origin_y + entry["extra_y"] - entry["y"], ew, eh)
+        if spot.clipped_to(document.width, document.height) != spot:
+            return {"extra": was.get("extra"), "extra_z": was.get("extra_z")}
+
+        extra = np.ascontiguousarray(cell.plane("index")[spot.slice()])
+        extra_z = None
+        if was.get("extra_z") is not None and cell.has("height"):
+            extra_z = np.ascontiguousarray(cell.plane("height")[spot.slice()])
+        return {"extra": extra, "extra_z": extra_z}
 
     def _pick_palette(self, host):
         if self._palettes is not None:

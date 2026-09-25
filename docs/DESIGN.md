@@ -497,6 +497,24 @@ returns a palette of confident nonsense, which is worse than an error because
 nothing looks wrong until the colours do. Both forms are now detected and
 parsed.
 
+**The overhang needed a second layer, and the measurement chose it.** A TMP
+tile can carry an *extra* — a plain rectangle of art that overflows the
+diamond, which is what cliffs, bridges and tall rocks are made of. The
+obvious fix for "the canvas is too small" is a bigger canvas, and it is
+wrong: **758 of the 767 extras overlap the diamond they belong to**, so a
+single plane holding both would have each destroying the other. So the canvas
+grows to tile-plus-overhang (worst real case 60×102 for a 60×30 tile, with
+the diamond's origin in metadata, since extras start up to 72 pixels *above*
+their tile), and the extra becomes its own index-locked `Extra` layer with
+its own z-plane. The two composite to exactly what the game draws, and paint
+independently. Tiles without an extra simply have no cell on that layer,
+which is what sparse cells were for.
+
+One detail that is easy to get wrong in the other direction: the extra's
+rectangle on save comes from the size the file declared, never from where ink
+happens to be. Deriving it from content would let painting a transparent
+corner silently re-crop the block.
+
 **A crash in one file takes the addon down for the session.** Loading any
 template with an extra block raised, because the extra was being stashed on a
 `Surface` that defines `__slots__`. The fault isolation did its job and
@@ -517,7 +535,7 @@ contained, and each names what would settle it.
 | 4 | **Onion-skinning** would need 2–3 frames composited live, which the current per-frame below/above cache doesn't serve. | Decide before building the timeline UI. Contained to `compositor.py` (the cache becomes per-frame and LRU'd). |
 | 5 | ~~Text rendering is the one place the UI generates pixels~~ | **RESOLVED, and the premise was wrong.** The question assumed glyph rasterisation must happen in the UI because it needs font machinery, and proposed rendering through `QPainter` into a `QImage` and handing the engine a blit. That is unnecessary: Pillow is ALREADY an engine dependency and ships FreeType (with raqm, so complex scripts shape correctly). Text rasterises in `ochre/engine/text.py` to an ordinary coverage plane, the engine stays Qt-free, and text is scriptable and headlessly testable like every other tool. Font family names resolve through fontconfig, so aliases such as `sans-serif` work and fallback is delegated rather than reimplemented. One deliberate exclusion: subpixel (LCD) antialiasing is avoided, because its colour fringes are correct against a known opaque background and wrong on a transparent layer. |
 | 6 | **Tablet pressure on X11** needs XInput2 and varies by device. | Test with the actual tablet; degrades cleanly to `pressure=1.0`, which is already the default. |
-| 7 | ~~How large do TMP "extra" extents get in practice?~~ | **RESOLVED, and the answer is inconvenient.** Across the shipped theaters: 767 of 3,147 tiles carry an extra, the largest is **60×84 against a 60×30 tile**, and they sit up to **72 pixels above** the tile origin. So an extra is nearly three times the canvas height and starts off-canvas — canvas-aligned cells cannot hold one. Extras currently round-trip through a side table and are never corrupted, but they cannot be painted and do not survive `.ochre`. Making them editable means sizing the document to tile-plus-overhang and recording where the diamond sits inside it. |
+| 7 | ~~How large do TMP "extra" extents get in practice?~~ | **RESOLVED and implemented.** Across the shipped theaters: 767 of 3,147 tiles carry an extra, the largest is **60×84 against a 60×30 tile**, and they sit up to **72 pixels above** the tile origin. The document canvas is therefore sized to tile-plus-overhang (worst real case 60×102) with the diamond's origin recorded in metadata. The decisive measurement was a second one: **758 of those 767 extras overlap the diamond**, so one plane cannot hold both — the extra is a separate `Extra` layer, and the two composite to what the game draws while painting independently. |
 | 8 | ~~Does SHP writing need byte-exact reproduction of original compression choices?~~ | **RESOLVED.** The addon preserves each frame's original crop rect and radar colour, and chooses RLE only when it is actually smaller — so an untouched sprite re-saves byte-identically, asserted by `tests/test_cnc.py`. One refinement the plan did not anticipate: the stored crop rect is honoured only while the content still fits inside it, because honouring it unconditionally silently discards any edit made outside the original bounds. Still unverified in-game. |
 
 ---

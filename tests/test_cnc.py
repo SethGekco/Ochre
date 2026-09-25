@@ -267,11 +267,23 @@ def main():
             if w:
                 image[y, x:x + w] = (slot * 20 + y) % 200 + 1
                 zdata[y, x:x + w] = (y * 31) // max(1, cy - 1)
-        tiles.append({"x": (slot % 2) * cx, "y": (slot // 2) * cy,
-                      "height": slot, "land": 13, "ramp": 9,
-                      "flags": 0, "extra_x": 0, "extra_y": 0,
-                      "radar_low": b"\x10\x20\x30", "radar_high": b"\x40\x50\x60",
-                      "image": image, "z": zdata, "extra": None, "extra_z": None})
+        tile = {"x": (slot % 2) * cx, "y": (slot // 2) * cy,
+                "height": slot, "land": 13, "ramp": 9,
+                "flags": 0, "extra_x": 0, "extra_y": 0,
+                "radar_low": b"\x10\x20\x30", "radar_high": b"\x40\x50\x60",
+                "image": image, "z": zdata, "extra": None, "extra_z": None}
+        if slot == 2:
+            # One tile gets an EXTRA: the rectangle holding art that
+            # overflows the diamond, which is what cliffs and bridges are.
+            # It deliberately starts ABOVE the tile and OVERLAPS it, because
+            # that is what real ones do -- 758 of 767 in the shipped
+            # theaters -- and it is the case a single plane cannot represent.
+            tile["extra"] = np.full((cy + 10, cx - 8), 77, np.uint8)
+            tile["extra_z"] = np.full((cy + 10, cx - 8), 5, np.uint8)
+            tile["extra_x"] = tile["x"]
+            tile["extra_y"] = tile["y"] - (cy - 6)
+            tile["flags"] = cnctmp.FLAG_EXTRA
+        tiles.append(tile)
 
     header = {"bx": 2, "by": 2, "cx": cx, "cy": cy}
     tmp_blob = cnctmp.build_tmp(header, tiles)
@@ -306,7 +318,15 @@ def main():
     ctl4.open_path(tmp_path)
     tdoc = ctl4.doc
     check("TMP opened through the addon", tdoc is not None)
-    check("the canvas is one tile", (tdoc.width, tdoc.height) == (cx, cy))
+    # The canvas is the tile PLUS whatever its extras overhang, because a
+    # cliff top shown detached from the cliff is not something you can paint.
+    check("the canvas grew to hold the overhang",
+          (tdoc.width, tdoc.height) == (cx, cy + (cy - 6)),
+          "-- got %dx%d, tile is %dx%d" % (tdoc.width, tdoc.height, cx, cy))
+    check("the diamond's place on that canvas is recorded",
+          tdoc.meta.get("cnc.origin_y") == str(cy - 6)
+          and tdoc.meta.get("cnc.cx") == str(cx),
+          "-- without it, save cannot find the tile again")
     check("each tile became a document frame", len(tdoc.frames) == 4)
     check("the axis is laid out as a GRID",
           tdoc.axis_layout == "grid" and tdoc.axis_columns == 2,
@@ -332,6 +352,54 @@ def main():
     check("RE-SAVING AN UNTOUCHED TMP REPRODUCES THE BYTES",
           tmp_resaved == tmp_blob,
           "-- %d vs %d bytes" % (len(tmp_resaved), len(tmp_blob)))
+
+    # ---- THE EXTRA IS A SECOND LAYER, and it is paintable ----------------
+    # Two layers rather than a bigger canvas is forced, not chosen: real
+    # extras overlap the diamond almost always, so one plane holding both
+    # would have each destroying the other.
+    names = [l.name for l in tdoc.layers()]
+    check("the overhang is its own layer", names == ["Tile", "Extra"],
+          "-- got %r" % names)
+    elayer = next(l for l in tdoc.layers() if l.name == "Extra")
+    check("the extra layer is index-locked too", elayer.index_locked)
+
+    eframe = tdoc.frames[2]
+    check("only the tile that HAS an extra gets an extra cell",
+          (elayer.id, eframe.id) in tdoc.cells
+          and (elayer.id, tdoc.frames[0].id) not in tdoc.cells,
+          "-- sparse cells are exactly what keeps this cheap")
+
+    ecell = tdoc.cell(elayer, eframe)
+    ex = int(tdoc.meta["cnc.origin_x"]) + 0
+    ey = int(tdoc.meta["cnc.origin_y"]) - (cy - 6)
+    check("the extra landed where it belongs on the canvas",
+          int(ecell.plane("index")[ey + 1, ex + 1]) == 77,
+          "-- expected the extra's fill at its own offset")
+
+    tile_before = tdoc.cell(tlayer, eframe).plane("index").copy()
+    ecell.plane("index")[ey + 2:ey + 5, ex + 2:ex + 9] = 42
+    ecell.refresh_derived()
+
+    painted_out = os.path.join(work, "terrain-painted.tem")
+    ctl4.save_path(painted_out)
+    with open(painted_out, "rb") as f:
+        _h, painted_tiles = cnctmp.read_tmp(f.read())
+    got = painted_tiles[2]["extra"]
+    check("PAINTING AN EXTRA SURVIVES THE ROUND TRIP",
+          got is not None and bool((got[2:5, 2:9] == 42).all()),
+          "-- the stroke did not reach the file")
+    untouched = got.copy()
+    untouched[2:5, 2:9] = 77
+    check("...and changes nothing else in the block",
+          bool((untouched == 77).all()))
+    check("...and does not disturb the diamond",
+          np.array_equal(tdoc.cell(tlayer, eframe).plane("index"), tile_before))
+    check("the extra keeps its declared size",
+          got.shape == (cy + 10, cx - 8),
+          "-- a transparent corner must not silently re-crop the block")
+    check("the extra's own z-plane survives",
+          painted_tiles[2]["extra_z"] is not None
+          and int(painted_tiles[2]["extra_z"][0, 0]) == 5)
 
     cmd = ctl4.addons.registry.get("commands", "cnc.terrain_info")
     info = cmd.run(ctl4.addons_host("cnc"))
