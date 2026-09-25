@@ -213,6 +213,45 @@ def main():
              if not np.array_equal(again[i], original[f.id])]
     check("a second open/save cycle is still exact", not drift, "-- %r" % drift)
 
+    # ---- a many-frame sprite must not be loaded all-warm -----------------
+    # Every frame's pixels are canvas-sized, and the rgba cache derived from
+    # an index plane is four times its size. Materialising both for every
+    # frame is what made a real 136-frame sprite cost 5 GB resident against
+    # 203 MB of file, so the loader applies the residency budget as it goes.
+    many = [np.zeros((H, W), np.uint8) for _ in range(40)]
+    for i, plane in enumerate(many):
+        plane[2:H - 2, 2:W - 2] = (i % 200) + 1
+    big = os.path.join(work, "many.shp")
+    with open(big, "wb") as f:
+        f.write(cncshp.build_shp(W, H, many))
+
+    ctl4 = controller(state)
+    ctl4.open_path(big)
+    doc4 = ctl4.doc
+    warm = [f for f in doc4.frames if f.residency == "warm"]
+    check("A MANY-FRAME SPRITE DOES NOT LOAD EVERY FRAME WARM",
+          len(warm) < len(doc4.frames),
+          "-- all %d frames resident; the budget never ran" % len(doc4.frames))
+    check("the current frame is one of the warm ones",
+          doc4.frames[doc4.current].residency == "warm")
+
+    cached = [c for (lid, fid), c in doc4.cells.items()
+              if c.planes.get("rgba") is not None]
+    check("...and cold frames hold no derived cache",
+          len(cached) <= len(warm),
+          "-- %d rgba caches for %d warm frames" % (len(cached), len(warm)))
+
+    # The saving has to be free of consequence, which is the only part that
+    # actually matters: a frame nobody has looked at must still write back.
+    resaved_big = os.path.join(work, "many-resaved.shp")
+    ctl4.save_path(resaved_big)
+    with open(big, "rb") as f:
+        want = f.read()
+    with open(resaved_big, "rb") as f:
+        got = f.read()
+    check("A COLD FRAME STILL SAVES CORRECTLY", got == want,
+          "-- %d vs %d bytes" % (len(got), len(want)))
+
     # ---- editing then saving --------------------------------------------
     cell = doc.cell(layer, doc.frames[0])
     cell.fill(Rect(0, 0, 4, 4), 200, name="index")

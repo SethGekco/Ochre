@@ -64,6 +64,11 @@ from ochre.engine.geometry import Rect
 # Weak keys so closing a document frees it.
 _SOURCES = weakref.WeakKeyDictionary()
 
+# How often to apply the frame budget while loading. Small enough that peak
+# memory stays near the budget, large enough that the zlib cost of freezing is
+# not paid on every single frame.
+RESIDENCY_STRIDE = 16
+
 HEADER = struct.Struct("<HHHH")
 FRAME = struct.Struct("<HHHHI4sII")
 FLAG_TRANSPARENT = 0x01
@@ -517,8 +522,23 @@ class ShpFormat:
                 cell.content_bbox = clipped or doc.bounds
             else:
                 cell.content_bbox = None
-            cell.refresh_derived()
+
+            # NOT refresh_derived() here. The rgba cache is four times the
+            # size of the index plane it is derived from, and Surface.plane()
+            # builds it coherently on first access -- so materialising it for
+            # a frame nobody is looking at costs 80% of the document's memory
+            # to cache something that will be thrown away by the residency
+            # policy before it is read. Measured on a real 136-frame sprite:
+            # 5.08 GB resident, against 203 MB of file.
+            #
+            # Keeping frames warm as they are built is a second copy of the
+            # same mistake, so the budget is applied as we go rather than
+            # after the damage. enforce_residency keeps the frames nearest
+            # the current one and compresses the rest.
+            if len(doc.frames) % RESIDENCY_STRIDE == 0:
+                doc.enforce_residency()
         doc.current = 0
+        doc.enforce_residency()
         _SOURCES[doc] = frames
         return doc
 

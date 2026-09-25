@@ -139,9 +139,37 @@ class Controller:
                 self.selection.mask = mask
                 self.selection._bbox = None
         else:
-            doc = import_flat(path, settings=self.settings)
+            try:
+                doc = import_flat(path, settings=self.settings)
+            except Exception as exc:
+                raise self._unopenable(path, exc) from exc
             self._adopt(doc, path=None)   # imported, not "the same file"
         return self.doc
+
+    def _unopenable(self, path, exc):
+        """Explain a failed open, blaming the right thing.
+
+        Pillow's "cannot identify image file" is technically true and
+        actively misleading when the format IS supported and its addon
+        simply is not loaded -- which happens routinely, because trust is
+        keyed to a content hash and every addon update revokes it. Saying
+        so turns a dead end into an instruction.
+        """
+        idle = sorted(a.id for a in self.addons.addons.values()
+                      if "formats" in (a.manifest.provides or ())
+                      and a.state != "loaded")
+        if idle:
+            return ValueError(
+                "cannot open %s: no loaded format handles it, but %s %s "
+                "format support and %s not loaded. Enable %s under "
+                "Addons, or re-approve %s -- updating an addon revokes "
+                "trust, by design."
+                % (os.path.basename(path), " and ".join(repr(i) for i in idle),
+                   "provide" if len(idle) > 1 else "provides",
+                   "are" if len(idle) > 1 else "is",
+                   "them" if len(idle) > 1 else "it",
+                   "them" if len(idle) > 1 else "it"))
+        return ValueError("cannot open %s: %s" % (os.path.basename(path), exc))
 
     def save_path(self, path=None):
         target = path or self.path

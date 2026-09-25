@@ -256,8 +256,22 @@ def main():
     check("index-locked frame freezes", d2.frames[0].residency == COLD)
     d2.frames[0].thaw(d2.cells)
     check("index plane restored", int(d2.cell(il).plane("index")[0, 0]) == 100)
-    check("derived cache rebuilt on thaw",
-          tuple(d2.cell(il).pixels[0, 0]) == (100, 100, 100, 255))
+
+    # Thawing must NOT rebuild the derived cache, and reading it must still
+    # give the right answer. Both halves matter: the first is why saving a
+    # 136-frame sprite costs 1.9 GB instead of 4.8, and the second is why
+    # that saving is safe. An eager rebuild here populates a cache that the
+    # commonest caller -- save, which reads only authoritative planes --
+    # never looks at.
+    check("THAW LEAVES THE DERIVED CACHE UNBUILT",
+          d2.cell(il).planes["rgba"] is None,
+          "-- rebuilding it eagerly costs 4x the index plane per frame")
+    check("...and reading it still expands correctly",
+          tuple(d2.cell(il).pixels[0, 0]) == (100, 100, 100, 255),
+          "-- lazy is only safe if first access is coherent")
+    check("...including where the index was never written",
+          tuple(d2.cell(il).pixels[31, 31]) == (0, 0, 0, 255),
+          "-- an all-zero index means palette entry 0, not transparent")
 
     # ---- dirty aggregation ----------------------------------------------
     d = Document(32, 32)

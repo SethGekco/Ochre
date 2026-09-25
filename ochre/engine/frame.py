@@ -94,7 +94,16 @@ class Frame:
         return freed
 
     def thaw(self, cells):
-        """Restore compressed planes, then rebuild any derived caches."""
+        """Restore compressed planes.
+
+        Derived caches are deliberately NOT rebuilt here. Surface.plane()
+        builds them coherently on first access, so rebuilding eagerly only
+        matters if something is about to read them -- and the commonest
+        reason to thaw a pile of frames is saving, which reads authoritative
+        planes and never touches the cache. On a real 136-frame sprite that
+        eager rebuild was 3.1 GB of the 4.8 GB a save cost, to populate
+        caches nothing would read before they were freed again.
+        """
         if self.residency != COLD or self._frozen is None:
             return 0
         restored = 0
@@ -109,7 +118,6 @@ class Frame:
                 arr = np.frombuffer(zlib.decompress(data), dtype=np.uint8)
                 surface.planes[name] = arr.reshape(shape).copy()
                 restored += arr.nbytes
-            surface.refresh_derived()
         self._frozen = None
         self.residency = WARM
         return restored

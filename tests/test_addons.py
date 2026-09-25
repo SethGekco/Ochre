@@ -473,6 +473,41 @@ def main():
     for d in (root, root2, root3, root4, root5, root6):
         shutil.rmtree(d, ignore_errors=True)
 
+    # ---- an untrusted addon must not look like a broken file -------------
+    # Trust is keyed to a content hash, so every addon update revokes it.
+    # That is the design working, but the user sees only the consequence --
+    # and the consequence used to be Pillow's "cannot identify image file",
+    # which blames the file for the editor's state. The error has to name
+    # the addon and say what to do, or the format looks unsupported.
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    addons_dir = os.path.join(repo, "addons")
+    if os.path.isdir(os.path.join(addons_dir, "cnc")):
+        from ochre.ui.controller import Controller
+
+        data = os.path.join(repo, "data")
+        ctl = Controller(Settings(data), data, addon_dirs=[addons_dir],
+                         state_dir=tempfile.mkdtemp())
+        ctl.load_addons()               # nothing trusted in a fresh state dir
+        check("an unapproved addon does not load",
+              all(a.state != "loaded" for a in ctl.addons.addons.values()))
+
+        sample = os.path.join(tempfile.mkdtemp(), "sprite.shp")
+        with open(sample, "wb") as f:
+            f.write(b"\0\0\x08\0\x08\0\x01\0" + b"\0" * 24)
+        try:
+            ctl.open_path(sample)
+            message = None
+        except Exception as exc:                        # noqa: BLE001
+            message = str(exc)
+        check("opening a file no LOADED format handles still fails",
+              message is not None)
+        check("THE ERROR BLAMES THE ADDON, NOT THE FILE",
+              "cnc" in message and "trust" in message.lower(),
+              "-- got %r" % message)
+        check("...and does not leak Pillow's misleading wording",
+              "cannot identify image file" not in message,
+              "-- got %r" % message)
+
     print("\nall addon checks passed")
 
 
