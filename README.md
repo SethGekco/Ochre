@@ -93,8 +93,16 @@ byte-exact.** That run found eight real defects the synthetic tests could
 not, because the files Ochre authors are tidier than the ones Westwood
 shipped; see `docs/DESIGN.md`, "What the real files taught us".
 
+It also re-encodes every sprite **from scratch**, discarding the original's
+choices, and requires the result to be lossless and structurally valid —
+374,548 frames through the encoder a user actually invokes the moment they
+paint a pixel. Validity is judged against the format description by code that
+shares nothing with the codec, and a negative control corrupts a good file
+four ways to prove that judgement can fail.
+
 Still unverified: whether a game *loads* a sprite we wrote. Byte-exact
-re-saving is strong evidence and is not the same claim.
+re-saving is strong evidence and is not the same claim. `OCHRE_CNC_ENCODE_LIMIT`
+caps the from-scratch pass (default 300 files) since it is the slow one.
 
 ## Licence
 

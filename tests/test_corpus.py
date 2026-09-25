@@ -50,6 +50,112 @@ THEATER = (".tem", ".sno", ".urb", ".lun", ".des", ".ubn")
 CANDIDATES = THEATER + (".shp", ".tmp")
 
 
+def audit_shp(blob, shp):
+    """Check a file against the written spec, independently of our reader.
+
+    Deliberately re-derived from the format description rather than sharing
+    code with the codec: a reader and a writer that agree with each other
+    prove nothing, which is the whole reason this file exists. It has teeth
+    -- run it on the shipped art and it reports the vanilla over-long-run
+    quirk, 12 rows in burnt01.tem alone.
+    """
+    problems = []
+    zero, width, height, count = shp.HEADER.unpack_from(blob, 0)
+    if zero != 0:
+        problems.append("leading word is %d, not 0" % zero)
+    base = 8 + 24 * count
+    for i in range(count):
+        x, y, w, h, flags, _rad, _res, off = shp.FRAME.unpack_from(blob, 8 + 24 * i)
+        if not (w and h):
+            continue
+        if off < base or off >= len(blob):
+            problems.append("frame %d: offset %d outside the file" % (i, off))
+            continue
+        if x + w > width or y + h > height:
+            problems.append("frame %d: %dx%d at %d,%d escapes the %dx%d canvas"
+                            % (i, w, h, x, y, width, height))
+        if not flags & shp.FLAG_RLE:
+            if off + w * h > len(blob):
+                problems.append("frame %d: raw block runs past EOF" % i)
+            continue
+        pos = off
+        for row in range(h):
+            if pos + 2 > len(blob):
+                problems.append("frame %d row %d: truncated" % (i, row))
+                break
+            length = blob[pos] | (blob[pos + 1] << 8)
+            end = pos + length
+            if length < 2 or end > len(blob):
+                problems.append("frame %d row %d: bad length %d" % (i, row, length))
+                break
+            k, total = pos + 2, 0
+            while k < end:
+                b = blob[k]
+                k += 1
+                if b:
+                    total += 1
+                else:
+                    if k >= end:
+                        problems.append("frame %d row %d: run marker with no count"
+                                        % (i, row))
+                        break
+                    total += blob[k]
+                    k += 1
+            if total != w:
+                problems.append("frame %d row %d: declares %d pixels, frame is %d wide"
+                                % (i, row, total, w))
+            pos = end
+    return problems
+
+
+def mutations(good, shp):
+    """(name, bytes) for each single-field corruption of a valid file.
+
+    The negative control for audit_shp. Each one breaks a different rule, so
+    an audit that silently stopped checking any of them shows up here.
+    """
+    out = []
+    first = next((i for i in range(len(good) // 24)
+                  if shp.FRAME.unpack_from(good, 8 + 24 * i)[2]), None)
+    if first is None:
+        return out
+    off = 8 + 24 * first
+    x, y, w, h, flags, radar, res, data_off = shp.FRAME.unpack_from(good, off)
+
+    for name, fields in (
+            ("an offset pointing past EOF",
+             (x, y, w, h, flags, radar, res, len(good) + 999)),
+            ("a rect escaping the canvas",
+             (x + 8192, y, w, h, flags, radar, res, data_off)),
+            ("a frame claiming to be wider than it is",
+             (x, y, w + 7, h, flags, radar, res, data_off))):
+        broken = bytearray(good)
+        shp.FRAME.pack_into(broken, off, *fields)
+        out.append((name, bytes(broken)))
+
+    if flags & shp.FLAG_RLE and data_off + 2 <= len(good):
+        broken = bytearray(good)
+        broken[data_off] = 1              # a scanline length below the minimum
+        broken[data_off + 1] = 0
+        out.append(("a corrupted scanline length", bytes(broken)))
+    return out
+
+
+def canvas_planes(width, height, frames):
+    """Every frame's pixels on a full canvas, so rects need not match."""
+    out = []
+    for entry in frames:
+        full = np.zeros((height, width), dtype=np.uint8)
+        plane = entry["plane"]
+        if plane is not None:
+            fh, fw = plane.shape
+            if entry["y"] + fh <= height and entry["x"] + fw <= width:
+                full[entry["y"]:entry["y"] + fh,
+                     entry["x"]:entry["x"] + fw] = plane
+        out.append(full)
+    return out
+
+
 def check(name, cond, detail=""):
     if not cond:
         print("FAIL: %s %s" % (name, detail))
@@ -226,6 +332,71 @@ def main():
         print("   %d TMP files, %d tiles" % (len(tmps[:limit]), tiles_seen)
               + (" (%d more not checked; raise OCHRE_CNC_CORPUS_LIMIT)" % dropped
                  if dropped else ""))
+
+    # ---- OUR encoder, on its own ------------------------------------------
+    # Everything above proves we can reproduce a file. That is a test of the
+    # preservation path, and it deliberately avoids re-encoding -- so it says
+    # nothing about the encoder a user actually invokes the moment they paint
+    # a single pixel. This runs that path over the same real artwork: encode
+    # from scratch, with none of the original's choices, then require the
+    # bytes to be spec-clean and to decode back to exactly the same pixels.
+    limit_enc = int(os.environ.get("OCHRE_CNC_ENCODE_LIMIT", "300"))
+    dropped = max(0, len(shps) - limit_enc)
+    bad, frames_done = [], 0
+    for p in shps[:limit_enc]:
+        with open(p, "rb") as f:
+            data = f.read()
+        try:
+            width, height, frames = cncshp.read_frames(data)
+            before = canvas_planes(width, height, frames)
+            ours = cncshp.build_shp(width, height, before)   # no source=
+            w2, h2, back = cncshp.read_frames(ours)
+            after = canvas_planes(w2, h2, back)
+        except Exception as exc:                 # noqa: BLE001
+            bad.append((p, "%s: %s" % (type(exc).__name__, exc)))
+            continue
+        frames_done += len(frames)
+        if (w2, h2) != (width, height) or len(back) != len(frames):
+            bad.append((p, "shape changed: %dx%d/%d -> %dx%d/%d"
+                        % (width, height, len(frames), w2, h2, len(back))))
+            continue
+        if not all(np.array_equal(a, b) for a, b in zip(before, after)):
+            bad.append((p, "pixels changed through our own encoder"))
+            continue
+        problems = audit_shp(ours, cncshp)
+        if problems:
+            bad.append((p, "%d spec violations: %s" % (len(problems), problems[:2])))
+
+    if shps:
+        check("WHAT OUR ENCODER WRITES IS SPEC-CLEAN AND LOSSLESS", not bad,
+              "-- %d of %d failed:\n    %s"
+              % (len(bad), len(shps[:limit_enc]),
+                 "\n    ".join("%s  %s" % (os.path.basename(p), why)
+                               for p, why in bad[:8])))
+        print("   re-encoded %d files, %d frames, from scratch"
+              % (len(shps[:limit_enc]), frames_done)
+              + (" (%d more not checked; raise OCHRE_CNC_ENCODE_LIMIT)" % dropped
+                 if dropped else ""))
+
+    # A NEGATIVE CONTROL, because "spec-clean" is worthless unless the audit
+    # can fail. Corrupt one byte of a known-good file in three different ways
+    # and require each to be caught. This is deliberately synthetic rather
+    # than "some real files trip it": whether the corpus happens to contain
+    # quirky art depends on which directory it was pointed at, and a check
+    # whose teeth come and go with the input is not a check.
+    if shps:
+        with open(shps[0], "rb") as f:
+            width, height, frames = cncshp.read_frames(f.read())
+        good = cncshp.build_shp(width, height,
+                                canvas_planes(width, height, frames))
+        check("the audit passes a file we just wrote",
+              not audit_shp(good, cncshp))
+
+        missed = [name for name, broken in mutations(good, cncshp)
+                  if not audit_shp(broken, cncshp)]
+        check("THE AUDIT CATCHES DELIBERATE CORRUPTION", not missed,
+              "-- these went undetected, so a clean verdict above proves "
+              "nothing: %s" % ", ".join(missed))
 
     # ---- through the actual editor ---------------------------------------
     # The byte checks above drive the codec functions. A user drives the
