@@ -95,6 +95,7 @@ class CanvasView(QAbstractScrollArea):
         self.view = ViewState(1, 1)
         self._panning = False
         self._pan_origin = QPoint()
+        self._view_dragging = False
         self._drawing = False
         self._checker = None
         # Where the pointer is, in document coordinates, or None when it has
@@ -259,8 +260,81 @@ class CanvasView(QAbstractScrollArea):
             self._draw_pixel_grid(painter, event.rect(), target)
         self._draw_selection(painter, target)
         self._draw_footprint(painter)
+        self._draw_zoom_band(painter)
         self._draw_caret(painter)
         painter.end()
+
+    # ---- view tools ------------------------------------------------------
+
+    def _view_tool(self):
+        """The active tool if it moves the VIEW rather than pixels.
+
+        Selected on the tool's own declaration rather than by name, so an
+        addon can ship one without the canvas learning about it.
+        """
+        tool = getattr(self.ctl, "tool", None)
+        if tool is not None and getattr(tool, "affects", "pixels") == "view":
+            return tool
+        return None
+
+    def _tool_event(self, event, dx, dy):
+        from ochre.engine.tools import ToolEvent
+        return ToolEvent(dx, dy, 1.0, self._mods(event),
+                         2 if event.button() == Qt.RightButton else 1)
+
+    def _apply_view(self, request):
+        """Carry out a ViewRequest. The only place view policy becomes Qt.
+
+        Zoom anchors arrive in DOCUMENT coordinates and have to be converted
+        here, because ViewState.zoom_at pins a WIDGET point -- and the whole
+        point of anchoring is that the pixel under the cursor does not move,
+        which is a statement about the screen.
+        """
+        if request is None:
+            return
+        from ochre.engine.tools.viewtools import (PAN, ZOOM_IN, ZOOM_OUT,
+                                                  ZOOM_RECT)
+        vp = self.viewport()
+        if request.kind == PAN:
+            self.view.pan_by(request.dx * self.view.scale,
+                             request.dy * self.view.scale)
+        elif request.kind == ZOOM_RECT:
+            self.view.fit_rect(request.rect, vp.width(), vp.height())
+        elif request.kind in (ZOOM_IN, ZOOM_OUT):
+            anchor = None
+            if request.anchor is not None:
+                anchor = self.view.doc_to_widget(*request.anchor)
+            if request.kind == ZOOM_IN:
+                self.view.zoom_in(anchor)
+            else:
+                self.view.zoom_out(anchor)
+        else:
+            return
+        self.zoom_changed.emit(format_zoom(self.view.zoom))
+        vp.update()
+
+    def _draw_zoom_band(self, painter):
+        """The zoom tool's rubber band, if it has one."""
+        tool = self._view_tool()
+        band = getattr(tool, "band", None) if tool is not None else None
+        if not band:
+            return
+        x, y, w, h = band
+        x0, y0 = self.view.doc_to_widget(x, y)
+        x1, y1 = self.view.doc_to_widget(x + w, y + h)
+        rect = QRect(int(round(x0)), int(round(y0)),
+                     max(1, int(round(x1 - x0))), max(1, int(round(y1 - y0))))
+        painter.save()
+        # Composed the same way as the caret, so the band stays visible over
+        # whatever it is drawn on top of.
+        painter.setCompositionMode(QPainter.RasterOp_SourceXorDestination)
+        pen = QPen(QColor(255, 255, 255))
+        pen.setStyle(Qt.DashLine)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(rect)
+        painter.restore()
 
     # ---- the pointer -----------------------------------------------------
 
@@ -433,6 +507,15 @@ class CanvasView(QAbstractScrollArea):
             self._pan_origin = event.position().toPoint()
             self.setCursor(Qt.ClosedHandCursor)
             return
+
+        view_tool = self._view_tool()
+        if view_tool is not None:
+            dx, dy = self._doc_pos(event.position())
+            self._view_dragging = True
+            self._apply_view(view_tool.begin(self.ctl._context(),
+                                             self._tool_event(event, dx, dy)))
+            return
+
         dx, dy = self._doc_pos(event.position())
         button = 2 if event.button() == Qt.RightButton else 1
         self._drawing = True
@@ -453,6 +536,13 @@ class CanvasView(QAbstractScrollArea):
             self.view.pan_by(delta.x(), delta.y())
             self.viewport().update()
             return
+        if self._view_dragging:
+            tool = self._view_tool()
+            if tool is not None:
+                self._apply_view(tool.motion(self.ctl._context(),
+                                             self._tool_event(event, dx, dy)))
+                self.viewport().update()
+            return
         if self._drawing:
             self.ctl.motion_stroke(dx, dy, 1.0, self._mods(event))
             self.refresh()
@@ -461,6 +551,15 @@ class CanvasView(QAbstractScrollArea):
         if self._panning and event.button() == Qt.MiddleButton:
             self._panning = False
             self.unsetCursor()
+            return
+        if self._view_dragging:
+            self._view_dragging = False
+            tool = self._view_tool()
+            if tool is not None:
+                dx, dy = self._doc_pos(event.position())
+                self._apply_view(tool.end(self.ctl._context(),
+                                          self._tool_event(event, dx, dy)))
+            self.viewport().update()
             return
         if self._drawing:
             dx, dy = self._doc_pos(event.position())

@@ -498,6 +498,66 @@ def main():
               for b in win.layers_dock.findChildren(QPushButton)),
           "-- both routes, since which one you reach for is personal")
 
+    # ---- view tools, end to end through real mouse events ----------------
+    # The engine decides what a click MEANS; only this path proves the canvas
+    # carries it out. A view tool that quietly fell through to the painting
+    # branch would draw on the document instead of zooming, which is the
+    # failure worth guarding against.
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    def press(kind, x, y, button=Qt.LeftButton):
+        ev = QMouseEvent(kind, QPointF(x, y), QPointF(x, y), button,
+                         button, Qt.NoModifier)
+        return ev
+
+    win.canvas.zoom_to(Fraction(1, 1))
+    ctl.set_tool("zoom")
+    win.canvas.apply_tool_cursor()
+    start_zoom = win.canvas.view.zoom
+    pixels_before = ctl.doc.cell(ctl.doc.layers()[0]).pixels.copy()
+    hist_before = len(ctl.history)
+
+    win.canvas.mousePressEvent(press(QMouseEvent.Type.MouseButtonPress, 200, 150))
+    win.canvas.mouseReleaseEvent(press(QMouseEvent.Type.MouseButtonRelease, 200, 150))
+    check("CLICKING WITH THE ZOOM TOOL ZOOMS IN",
+          win.canvas.view.zoom > start_zoom,
+          "-- %s -> %s" % (start_zoom, win.canvas.view.zoom))
+
+    zoomed = win.canvas.view.zoom
+    win.canvas.mousePressEvent(
+        press(QMouseEvent.Type.MouseButtonPress, 200, 150, Qt.RightButton))
+    win.canvas.mouseReleaseEvent(
+        press(QMouseEvent.Type.MouseButtonRelease, 200, 150, Qt.RightButton))
+    check("right-clicking zooms back out", win.canvas.view.zoom < zoomed)
+
+    # A drag must select a region, not paint one.
+    win.canvas.mousePressEvent(press(QMouseEvent.Type.MouseButtonPress, 60, 60))
+    win.canvas.mouseMoveEvent(press(QMouseEvent.Type.MouseMove, 260, 210))
+    check("the rubber band exists mid-drag", ctl.tool.band is not None)
+    win.canvas.repaint()
+    check("painting the rubber band does not crash", True)
+    win.canvas.mouseReleaseEvent(press(QMouseEvent.Type.MouseButtonRelease, 260, 210))
+    check("releasing a drag zooms to the region", ctl.tool.band is None)
+
+    ctl.set_tool("pan")
+    win.canvas.apply_tool_cursor()
+    before_offset = (win.canvas.view.offset_x, win.canvas.view.offset_y)
+    win.canvas.mousePressEvent(press(QMouseEvent.Type.MouseButtonPress, 300, 200))
+    win.canvas.mouseMoveEvent(press(QMouseEvent.Type.MouseMove, 260, 230))
+    win.canvas.mouseReleaseEvent(press(QMouseEvent.Type.MouseButtonRelease, 260, 230))
+    check("DRAGGING WITH THE PAN TOOL SCROLLS THE VIEW",
+          (win.canvas.view.offset_x, win.canvas.view.offset_y) != before_offset)
+
+    check("NO VIEW TOOL PAINTED ANYTHING",
+          np.array_equal(ctl.doc.cell(ctl.doc.layers()[0]).pixels, pixels_before),
+          "-- a view tool fell through to the painting branch")
+    check("...and none of it is undoable", len(ctl.history) == hist_before,
+          "-- moving the view is not an edit")
+
+    ctl.set_tool("brush")
+    win.canvas.apply_tool_cursor()
+
     print("\nall UI smoke checks passed")
 
 

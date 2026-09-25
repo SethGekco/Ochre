@@ -102,6 +102,10 @@ class Tool:
     target_plane = "rgba"       # INI-overridable; a height brush sets "height"
     wants_stroke = True         # False for tools that do not paint pixels
     cursor = "crosshair"
+    # "pixels" or "view". A view tool returns a ViewRequest rather than a
+    # dirty rect and never touches the document; the canvas routes on this
+    # attribute rather than on a list of names, so an addon can ship one.
+    affects = "pixels"
 
     def __init__(self, **options):
         self.options = dict(options)

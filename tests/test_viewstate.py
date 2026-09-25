@@ -219,6 +219,37 @@ def main():
           not any(m.startswith(("PySide", "PyQt", "shiboken")) for m in sys.modules),
           "-- Qt leaked into a module that must not need it")
 
+    # ---- fit_rect: what the zoom tool's rubber band asks for -------------
+    v = ViewState(400, 300)
+    v.fit_rect((100, 100, 50, 50), 800, 600)
+    check("fit_rect scales the rect to the viewport", v.zoom == Fraction(12),
+          "-- got %s" % v.zoom)
+    cx, cy = v.doc_to_widget(125, 125)
+    check("fit_rect centres the rect", (round(cx), round(cy)) == (400, 300),
+          "-- centre landed at (%.1f, %.1f)" % (cx, cy))
+
+    # The centring is computed from the CLAMPED scale, not the requested one,
+    # so an absurd request still leaves the rect centred rather than flung
+    # off-screen.
+    v.fit_rect((0, 0, 1, 1), 800, 600)
+    check("an absurd rect clamps to max zoom", v.zoom == MAX_ZOOM,
+          "-- got %s" % v.zoom)
+    cx, cy = v.doc_to_widget(0.5, 0.5)
+    check("...and is still centred afterwards",
+          (round(cx), round(cy)) == (400, 300),
+          "-- centre landed at (%.1f, %.1f)" % (cx, cy))
+
+    before = v.zoom
+    v.fit_rect((5, 5, 0, 0), 800, 600)
+    check("a zero-sized rect is ignored, not divided by", v.zoom == before)
+
+    v = ViewState(4000, 4000)
+    v.fit_rect((10, 10, 333, 777), 1280, 800)
+    cx, cy = v.doc_to_widget(10 + 333 / 2.0, 10 + 777 / 2.0)
+    check("odd non-square rects centre exactly too",
+          (round(cx), round(cy)) == (640, 400),
+          "-- centre landed at (%.1f, %.1f)" % (cx, cy))
+
     print("\nall viewstate checks passed")
 
 

@@ -110,6 +110,25 @@ class ViewState:
         self.center(viewport_w, viewport_h)
         return self._zoom
 
+    def fit_rect(self, rect, viewport_w, viewport_h):
+        """Scale and scroll so a DOCUMENT rect fills the viewport.
+
+        What the zoom tool's rubber band asks for. Zoom is still clamped to
+        the legal range, so dragging a one-pixel box asks for the maximum
+        rather than an absurdity -- and the centring is done afterwards from
+        the clamped scale, so the rect stays centred even when the requested
+        zoom was not granted.
+        """
+        x, y, w, h = rect
+        if w <= 0 or h <= 0:
+            return self._zoom
+        ratio = min(Fraction(max(1, int(viewport_w)), 1) / Fraction(w).limit_denominator(1000),
+                    Fraction(max(1, int(viewport_h)), 1) / Fraction(h).limit_denominator(1000))
+        self.zoom = ratio
+        self.offset_x = viewport_w / 2.0 - (x + w / 2.0) * self.scale
+        self.offset_y = viewport_h / 2.0 - (y + h / 2.0) * self.scale
+        return self._zoom
+
     def center(self, viewport_w, viewport_h):
         self.offset_x = (viewport_w - self.doc_w * self.scale) / 2.0
         self.offset_y = (viewport_h - self.doc_h * self.scale) / 2.0

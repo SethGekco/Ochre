@@ -26,7 +26,7 @@ from ochre.engine.history import HistoryStack
 from ochre.engine.ini import IniDB
 from ochre.engine.palette import grayscale
 from ochre.engine.selection import REPLACE, Selection, UNION
-from ochre.engine.tools import (MOD_SHIFT, ToolContext, ToolEvent,
+from ochre.engine.tools import (MOD_ALT, MOD_CTRL, MOD_SHIFT, ToolContext, ToolEvent,
                                 ToolRegistry, constrain_angle,
                                 constrain_square, drag_rect)
 
@@ -300,6 +300,91 @@ def main():
     check("tool module imports no Qt",
           not any(m.startswith(("PySide", "PyQt", "shiboken"))
                   for m in sys.modules))
+
+    # ---- view tools: policy in the engine, effect in Qt ------------------
+    # Zoom and pan are the only tools that change nothing about the document.
+    # They live here anyway, because WHICH BUTTON MEANS OUT and WHEN A DRAG
+    # STOPS BEING A CLICK is exactly the sort of policy that is miserable to
+    # debug through a display, and returning a request instead of performing
+    # it makes all of it assertable.
+    from ochre.engine.tools.viewtools import (PAN, ZOOM_IN, ZOOM_OUT,
+                                              ZOOM_RECT)
+
+    check("the zoom tool is registered", "zoom" in reg)
+    check("the pan tool is registered", "pan" in reg)
+    zoom = reg.create("zoom")
+    pan = reg.create("pan")
+    check("a view tool declares that it moves the VIEW",
+          zoom.affects == "view" and pan.affects == "view",
+          "-- the canvas routes on this, not on a list of names")
+    check("...and wants no stroke session",
+          not zoom.wants_stroke and not pan.wants_stroke)
+
+    d, lay, sel, hist, ctx = setup()
+    before = d.cell(lay).pixels.copy()
+
+    def click(tool, x, y, x2=None, y2=None, button=1, mods=0):
+        tool.begin(ctx, ToolEvent(x, y, 1.0, mods, button))
+        if x2 is not None:
+            tool.motion(ctx, ToolEvent(x2, y2, 1.0, mods, button))
+        return tool.end(ctx, ToolEvent(x2 if x2 is not None else x,
+                                       y2 if y2 is not None else y,
+                                       1.0, mods, button))
+
+    req = click(zoom, 10, 20)
+    check("clicking zooms in", req is not None and req.kind == ZOOM_IN)
+    check("...anchored where it was clicked", req.anchor == (10.0, 20.0),
+          "-- anchoring is what keeps the clicked pixel under the cursor")
+
+    # has() tests MODIFIERS and MOD_CTRL is 2, so asking it about a button
+    # number quietly makes ctrl-click zoom out and right-click do nothing.
+    check("RIGHT-CLICK ZOOMS OUT", click(zoom, 10, 20, button=2).kind == ZOOM_OUT)
+    check("alt-click zooms out",
+          click(zoom, 10, 20, mods=MOD_ALT).kind == ZOOM_OUT)
+    check("ctrl-click still zooms IN",
+          click(zoom, 10, 20, mods=MOD_CTRL).kind == ZOOM_IN,
+          "-- ctrl is not alt, however similar the bit patterns look")
+
+    req = click(zoom, 10, 20, 50, 60)
+    check("dragging asks for a rectangle", req.kind == ZOOM_RECT)
+    check("...normalised regardless of drag direction",
+          req.rect == click(zoom, 50, 60, 10, 20).rect == (10.0, 20.0, 40.0, 40.0),
+          "-- got %r" % (req.rect,))
+    check("a tiny drag is still a click",
+          click(zoom, 10, 20, 11, 21).kind == ZOOM_IN,
+          "-- below min_drag it must not become a rectangle")
+
+    zoom.begin(ctx, ToolEvent(10, 20))
+    zoom.motion(ctx, ToolEvent(50, 60))
+    check("the rubber band is exposed while dragging",
+          zoom.band == (10.0, 20.0, 40.0, 40.0))
+    zoom.end(ctx, ToolEvent(50, 60))
+    check("...and cleared afterwards", zoom.band is None,
+          "-- a stale band would be drawn over everything forever")
+    zoom.begin(ctx, ToolEvent(10, 20))
+    zoom.motion(ctx, ToolEvent(50, 60))
+    zoom.cancel(ctx)
+    check("cancelling clears the band too", zoom.band is None)
+
+    req = click(pan, 100, 100, 80, 110)
+    check("panning reports the distance the grab point moved",
+          req.kind == PAN and (req.dx, req.dy) == (-20.0, 10.0))
+
+    # Measured from the grab point each time, never accumulated: panning
+    # moves the coordinates these events are reported in, so summing deltas
+    # between motions drifts.
+    pan.begin(ctx, ToolEvent(100, 100))
+    first = pan.motion(ctx, ToolEvent(90, 100))
+    second = pan.motion(ctx, ToolEvent(90, 100))
+    check("REPEATED MOTION TO THE SAME POINT DOES NOT ACCUMULATE",
+          (first.dx, first.dy) == (second.dx, second.dy) == (-10.0, 0.0),
+          "-- deltas are measured from the grab point, not summed")
+    pan.end(ctx, ToolEvent(90, 100))
+
+    check("NO VIEW TOOL TOUCHED A PIXEL",
+          np.array_equal(d.cell(lay).pixels, before))
+    check("...or pushed history", len(hist) == 0,
+          "-- moving the view is not an edit and must not be undoable")
 
     print("\nall tool checks passed")
 

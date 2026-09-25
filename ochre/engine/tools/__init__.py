@@ -19,6 +19,7 @@ from .select import (EllipseSelectTool, LassoTool, MagicWandTool,
                      RectSelectTool)
 from .shapetools import (EllipseTool, FreeformTool, GradientTool, LineTool,
                          RectangleTool, TextTool)
+from .viewtools import PanTool, ViewRequest, ZoomTool
 
 BUILTIN = {
     cls.name: cls for cls in (
@@ -26,6 +27,7 @@ BUILTIN = {
         RectSelectTool, EllipseSelectTool, LassoTool, MagicWandTool,
         LineTool, RectangleTool, EllipseTool, FreeformTool, GradientTool,
         TextTool, CloneStampTool, MovePixelsTool, MoveSelectionTool,
+        ZoomTool, PanTool,
     )
 }
 

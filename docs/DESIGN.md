@@ -371,15 +371,30 @@ Things a from-scratch implementation gets wrong, established by surveying the Op
 The plan describes Paint.NET's full tool set. What exists is the subset the
 phases actually reached:
 
-**Built** — 18 tools: pencil, paintbrush, eraser, paint bucket, colour
+**Built** — 20 tools: pencil, paintbrush, eraser, paint bucket, colour
 picker, clone stamp; four selection tools (rectangle, ellipse, lasso, magic
 wand); four shape tools (line, rectangle, ellipse, freeform); a gradient with
-five types; text; and the two move tools. Adjustments: brightness/contrast, levels, hue/saturation, invert,
+five types; text; the two move tools; and zoom and pan. Adjustments: brightness/contrast, levels, hue/saturation, invert,
 posterize, black & white, sepia. Effects: gaussian blur, sharpen, add noise.
+That is the whole Paint.NET tool list.
 
-**Not built** — zoom and pan as TOOLS. Both functions exist (the canvas
-handles wheel-zoom and middle-drag pan directly), so what is missing is only
-the toolbar affordance for people who expect one.
+Zoom and pan are the only tools that change nothing about the document, so
+they are the one place the tool contract had to stretch — and the stretch is
+smaller than it looks. A tool declares `affects = "view"` and returns a
+`ViewRequest` instead of a dirty rect; the canvas routes on that attribute
+rather than on a list of names, so an addon could ship one. Everything that
+is actually decision-making stays in the engine and stays testable with no
+display: which button means out, whether a drag is a rubber-band or a click,
+how small a drag is too small to be a rectangle. Applying the result is
+about ten lines of Qt.
+
+Two details that only a headless test would pin down. Pan reports the
+distance the *grabbed document point* has moved rather than accumulating
+deltas between motion events — panning moves the very coordinates those
+events are reported in, so summing them drifts and anchoring cannot. And
+`event.has()` tests MODIFIERS, where `MOD_CTRL` happens to equal 2; asking
+it about a button number quietly turns ctrl-click into zoom-out and
+right-click into nothing at all. Both are asserted.
 
 Moving pixels turned out to be the one interaction that does not fit the
 "mark dirty and redraw" pattern, because it is a LIFT rather than a paint.
