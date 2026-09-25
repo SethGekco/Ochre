@@ -288,9 +288,56 @@ class Controller:
         return value
 
     def move_layer(self, layer, parent, index):
-        parent = parent or self.doc.root
+        # `parent or self.doc.root` would be wrong here: an empty LayerGroup
+        # is falsy because it defines __len__, so dropping into an empty
+        # group silently moved the layer to the root instead.
+        if parent is None:
+            parent = self.doc.root
+        here = layer.parent
+        if here is parent and here.children.index(layer) == index:
+            return False
+
+        from ..engine.commands import ReorderDelta
+        undo = ReorderDelta(
+            layer.id,
+            None if here is None or here is self.doc.root else here.id,
+            here.children.index(layer) if here is not None else 0,
+            "Reorder layer")
         parent.add(layer, index)
+        self.history.push(undo, "Reorder layer")
         self._after_structure_change()
+        return True
+
+    def duplicate_layer(self, layer=None):
+        """Copy a layer and everything it holds across every frame."""
+        source = layer or self.active_layer
+        if source is None or source.is_group:
+            return None
+        # The copy must have the SAME planes as the source. An index-locked
+        # layer duplicated into a plain RGBA one would lose the authoritative
+        # indices -- the single thing the whole indexed model exists to keep.
+        copy = self.doc.add_layer(
+            "%s copy" % (source.name or source.id), parent=source.parent,
+            planes=tuple(source.planes) if hasattr(source, "planes") else ("rgba",),
+            authoritative=tuple(getattr(source, "authoritative", ("rgba",))))
+        copy.opacity, copy.blend = source.opacity, source.blend
+        copy.visible = source.visible
+        for (layer_id, frame_id), cell in list(self.doc.cells.items()):
+            if layer_id != source.id:
+                continue
+            frame = self.doc.frame_by_id(frame_id)
+            if frame is None:
+                continue
+            target = self.doc.cell(copy, frame)
+            for name in cell.authoritative:
+                plane = cell.planes.get(name)
+                if plane is not None:
+                    target.plane(name)[...] = plane
+            target.content_bbox = cell.content_bbox
+            target.refresh_derived()
+        self.set_active_layer(copy)
+        self._after_structure_change()
+        return copy
 
     def _after_structure_change(self):
         """Anything that changes the stack invalidates the composite cache."""

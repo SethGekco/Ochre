@@ -22,6 +22,7 @@ Verified on PySide6 6.11 + numpy 2.5: a numpy write is immediately visible
 through the QImage, bytesPerLine equals width*4, and sub-rect copies behave.
 """
 
+import math
 from fractions import Fraction
 
 import numpy as np
@@ -96,6 +97,10 @@ class CanvasView(QAbstractScrollArea):
         self._pan_origin = QPoint()
         self._drawing = False
         self._checker = None
+        # Where the pointer is, in document coordinates, or None when it has
+        # left the widget. Drives the tool footprint overlay.
+        self._hover = None
+        self._show_while_drawing = True
 
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.viewport().setMouseTracking(True)
@@ -253,8 +258,106 @@ class CanvasView(QAbstractScrollArea):
         if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
             self._draw_pixel_grid(painter, event.rect(), target)
         self._draw_selection(painter, target)
+        self._draw_footprint(painter)
         self._draw_caret(painter)
         painter.end()
+
+    # ---- the pointer -----------------------------------------------------
+
+    CURSORS = {
+        "cross": Qt.CrossCursor,
+        "ibeam": Qt.IBeamCursor,
+        "move": Qt.SizeAllCursor,
+        "pointing": Qt.PointingHandCursor,
+        "arrow": Qt.ArrowCursor,
+        "blank": Qt.BlankCursor,
+    }
+
+    def apply_tool_cursor(self):
+        """Set the pointer for the active tool, per tools.ini.
+
+        A size-based tool hides the system cursor entirely and draws its own
+        footprint instead: when the thing you are aiming is a 16-pixel disc,
+        an arrow tells you nothing about what is about to change. Tools with
+        no footprint keep a real cursor, because an invisible pointer with
+        nothing drawn in its place is just a lost pointer.
+        """
+        cursor, footprint = self._appearance()
+        if cursor == "blank" and footprint == "none":
+            cursor = "cross"        # never leave the pointer invisible
+        self.viewport().setCursor(self.CURSORS.get(cursor, Qt.CrossCursor))
+        self.viewport().update()
+
+    def _appearance(self):
+        name = getattr(self.ctl, "tool_name", None)
+        if not name:
+            return ("cross", "none")
+        return self.ctl.tools.appearance(name)
+
+    def _footprint_size(self):
+        """The dab diameter in document pixels, or None if not size-based."""
+        tool = self.ctl.tool
+        if tool is None:
+            return None
+        try:
+            return max(1.0, float(tool.option("size", 1)))
+        except (TypeError, ValueError):
+            return None
+
+    def _footprint_rect(self):
+        """Where the footprint outline sits, in viewport coordinates.
+
+        Built from the SAME floor-and-centre arithmetic the brush uses to
+        place a dab, so the outline covers the pixels that would actually
+        change rather than an approximation of them.
+        """
+        if self._hover is None:
+            return None
+        _cursor, shape = self._appearance()
+        if shape == "none":
+            return None
+        dx, dy = self._hover
+
+        if shape == "point":
+            x0, y0, x1, y1 = math.floor(dx), math.floor(dy), 0, 0
+            x1, y1 = x0 + 1, y0 + 1
+        else:
+            size = self._footprint_size()
+            if size is None:
+                return None
+            diameter = max(1, int(round(size)))
+            x0 = math.floor(dx - diameter / 2.0)
+            y0 = math.floor(dy - diameter / 2.0)
+            x1, y1 = x0 + diameter, y0 + diameter
+
+        ax, ay = self.view.doc_to_widget(x0, y0)
+        bx, by = self.view.doc_to_widget(x1, y1)
+        return QRect(int(round(ax)), int(round(ay)),
+                     max(1, int(round(bx - ax))), max(1, int(round(by - ay))))
+
+    def _draw_footprint(self, painter):
+        rect = self._footprint_rect()
+        if rect is None or self._drawing and not self._show_while_drawing:
+            return
+        _cursor, shape = self._appearance()
+
+        # Drawn twice, black over white, so the outline stays visible on any
+        # colour underneath -- the same problem the caret solves with XOR,
+        # but an outline needs to keep its shape, which XOR does not.
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setBrush(Qt.NoBrush)
+        for colour, inset in ((QColor(255, 255, 255, 200), 0),
+                              (QColor(0, 0, 0, 200), 1)):
+            painter.setPen(QPen(colour, 1))
+            box = rect.adjusted(inset, inset, -inset, -inset)
+            if box.width() <= 0 or box.height() <= 0:
+                break
+            if shape == "circle" and box.width() > 3:
+                painter.drawEllipse(box)
+            else:
+                painter.drawRect(box)
+        painter.restore()
 
     def _draw_pixel_grid(self, painter, clip, target):
         scale = self.view.scale
@@ -342,6 +445,7 @@ class CanvasView(QAbstractScrollArea):
         pos = event.position()
         dx, dy = self._doc_pos(pos)
         self.cursor_moved.emit(dx, dy)
+        self._move_hover(dx, dy)
         if self._panning:
             point = pos.toPoint()
             delta = point - self._pan_origin
@@ -482,6 +586,27 @@ class CanvasView(QAbstractScrollArea):
         self.refresh()
         self.viewport().update()
         return rect
+
+    def leaveEvent(self, event):
+        """The footprint must not be left stranded when the pointer goes."""
+        self._move_hover(None, None)
+        super().leaveEvent(event)
+
+    def enterEvent(self, event):
+        self.apply_tool_cursor()
+        super().enterEvent(event)
+
+    def _move_hover(self, dx, dy):
+        """Update the hover position, repainting only what the move touched."""
+        old = self._footprint_rect()
+        self._hover = None if dx is None else (dx, dy)
+        new = self._footprint_rect()
+        if old is None and new is None:
+            return
+        area = new if old is None else (old if new is None else old.united(new))
+        # Two pixels of slack: the outline is drawn one inside the rect and
+        # antialiasing off still leaves the pen straddling the boundary.
+        self.viewport().update(area.adjusted(-2, -2, 2, 2))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

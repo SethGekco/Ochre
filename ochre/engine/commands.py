@@ -146,6 +146,51 @@ class PropertyDelta(Command):
         return "PropertyDelta(%s.%s = %r)" % (self.target_id, self.attr, self.value)
 
 
+class ReorderDelta(Command):
+    """Where a node sits in the tree. Moves no pixels, so it costs two ints.
+
+    A PropertyDelta cannot express this: position is not an attribute of the
+    node, it is the parent's ordering of its children. Reordering changes
+    what the composite looks like without touching a single pixel, which is
+    exactly the case the property/pixel split was drawn around.
+    """
+
+    __slots__ = ("label", "target_id", "parent_id", "index")
+
+    def __init__(self, target_id, parent_id, index, label="Reorder"):
+        self.target_id = target_id
+        self.parent_id = parent_id      # None means the root
+        self.index = index
+        self.label = label
+
+    def undo(self, doc):
+        node = doc.layer(self.target_id)
+        if node is None:
+            return None, None
+        # Inverse-generating, like every other command here: capture where
+        # the node is NOW before moving it, so redo is derived from reality
+        # rather than from a prediction made earlier.
+        here = node.parent
+        opposite = ReorderDelta(
+            self.target_id,
+            None if here is None or here is doc.root else here.id,
+            here.children.index(node) if here is not None else 0,
+            self.label)
+
+        parent = doc.root if self.parent_id is None else doc.layer(self.parent_id)
+        if parent is None:
+            return None, None
+        parent.add(node, self.index)
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return 64
+
+    def __repr__(self):
+        return "ReorderDelta(%s -> %s[%d])" % (self.target_id, self.parent_id,
+                                               self.index)
+
+
 class PaletteDelta(Command):
     """One palette entry. The cheapest meaningful edit in the system.
 

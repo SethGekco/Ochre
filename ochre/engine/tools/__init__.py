@@ -40,12 +40,18 @@ class ToolRegistry:
         self._defaults = {}
         self._order = {}
         self._labels = {}
+        self._appearance = {}
         if db is not None:
             self.load(db)
 
     def load(self, db):
         """Read [Tool:Name] sections. Unknown keys become tool options."""
-        reserved = {"Class", "Label", "Order", "TargetPlane"}
+        # Cursor and Footprint are presentation, read by the canvas through
+        # appearance() below. They are reserved so they do not silently
+        # become tool options and end up passed to a tool's constructor --
+        # the engine has no business knowing what a cursor is.
+        reserved = {"Class", "Label", "Order", "TargetPlane",
+                    "Cursor", "Footprint"}
         for name in db.sections("Tool"):
             section = "Tool:" + name
             cls_name = db.get(section, "Class", name)
@@ -65,7 +71,20 @@ class ToolRegistry:
             if plane:
                 opts["target_plane"] = plane
             self._defaults[key] = opts
+            self._appearance[key] = (
+                (db.get(section, "Cursor") or "cross").lower(),
+                (db.get(section, "Footprint") or "none").lower())
         return self
+
+    def appearance(self, name):
+        """(cursor, footprint) for a tool -- how the POINTER should look.
+
+        Kept here rather than in the UI because it is per-tool configuration
+        like everything else in tools.ini, which is also what lets an addon's
+        tool declare its own cursor without the canvas learning its name.
+        The two strings are opaque to the engine; the canvas interprets them.
+        """
+        return self._appearance.get(name, ("cross", "none"))
 
     def create(self, name, **overrides):
         cls = self._classes.get(name)

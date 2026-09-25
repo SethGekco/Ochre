@@ -44,6 +44,11 @@ def _ask_trust(addon, digest):
     Python running with the user's privileges -- no dialog can make that
     safe, so the dialog says so rather than implying a sandbox exists.
     """
+    # A modal dialog with nobody to answer it is a hang, not a prompt, and
+    # "no" is the safe answer when there is no one to ask.
+    if os.environ.get("OCHRE_SELFTEST") or os.environ.get("OCHRE_NO_PROMPT"):
+        return False
+
     from PySide6.QtWidgets import QMessageBox
     box = QMessageBox()
     box.setIcon(QMessageBox.Warning)
@@ -79,6 +84,25 @@ def main(argv=None):
                             trust_callback=_ask_trust)
     window = MainWindow(controller, ui_settings)
 
+    # Load addons BEFORE anything opens a file. There is a menu item for this
+    # too, and relying on it meant a format addon could not claim a file
+    # passed on the command line: it fell through to Pillow and died on a
+    # file the editor supports. Nothing caught it because every test calls
+    # load_addons() explicitly.
+    #
+    # After the window exists, so the trust prompt has a parent to sit on.
+    controller.load_addons()
+
+    # Opening happens BEFORE the self-test branch, so running the self-test
+    # with a file argument exercises the real open path. It used to come
+    # after, which is why the self-test never noticed that the command line
+    # could not open an addon format at all.
+    for arg in argv[1:]:
+        if os.path.exists(arg):
+            controller.open_path(arg)
+            window.canvas.bind()
+            break
+
     # A self-test that only constructs widgets verifies almost nothing about
     # a canvas. This one forces a real synchronous paintEvent over a live
     # document, which exercises the numpy-to-QImage aliasing, the checker,
@@ -86,12 +110,6 @@ def main(argv=None):
     # would segfault if the buffer-lifetime rules were broken.
     if os.environ.get("OCHRE_SELFTEST"):
         return _selftest(window, controller)
-
-    for arg in argv[1:]:
-        if os.path.exists(arg):
-            controller.open_path(arg)
-            window.canvas.bind()
-            break
 
     window.show()
     return app.exec()
@@ -133,8 +151,11 @@ def _selftest(window, controller):
     assert controller.history.position == -1, "undo did not rewind"
 
     status = controller.status()
-    print("selftest OK: %d docks, %dx%d doc, %d layers, tool=%s, accel=%s, "
-          "%d dirty rects, aliasing verified"
+    loaded = sorted(a.id for a in controller.addons.loaded())
+    print("selftest OK: %d docks, %dx%d doc, %d layers, %d frames, tool=%s, "
+          "accel=%s, %d dirty rects, aliasing verified, addons=%s, format=%s"
           % (len(docks), status["size"][0], status["size"][1], status["layers"],
-             status["tool"], accel.BACKEND, len(rects)))
+             len(controller.doc.frames), status["tool"], accel.BACKEND,
+             len(rects), ",".join(loaded) or "none",
+             controller.doc.meta.get("format", "-")))
     return 0

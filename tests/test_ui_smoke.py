@@ -16,8 +16,10 @@ with only the engine installed.
 Run: QT_QPA_PLATFORM=offscreen python3 tests/test_ui_smoke.py
 """
 
+import math
 import os
 import sys
+from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,11 +36,12 @@ def check(name, cond, detail=""):
 try:
     import numpy as np
     from PySide6.QtCore import QRect, Qt
-    from PySide6.QtWidgets import QApplication, QDockWidget
+    from PySide6.QtWidgets import QApplication, QDockWidget, QPushButton
 except ImportError as exc:
     print("ok: skipped (PySide6 unavailable: %s)" % exc)
     sys.exit(0)
 
+from ochre.engine.geometry import Rect
 from ochre.engine.settings import Settings
 from ochre.ui.bus import EventBus
 from ochre.ui.canvas import CanvasSurface
@@ -356,7 +359,151 @@ def main():
     check("the bad subscriber was recorded and removed",
           any(t == "layers.changed" for t, _h, _e in bus.errors))
 
+    # ---- the tool footprint ---------------------------------------------
+    # A brush hides the system cursor and draws its own outline, so that
+    # outline has to cover the pixels that would ACTUALLY change. If it is
+    # off by even half a pixel the tool aims wrong, which is worse than
+    # having no cursor at all.
+    from PySide6.QtCore import Qt
+
+    canvas = win.canvas
+    ctl.set_tool("pencil")
+    canvas.apply_tool_cursor()
+    check("a footprint tool hides the system cursor",
+          canvas.viewport().cursor().shape() == Qt.BlankCursor,
+          "-- it draws its own outline instead")
+
+    ctl.set_tool("bucket")
+    canvas.apply_tool_cursor()
+    check("a tool with NO footprint keeps a real cursor",
+          canvas.viewport().cursor().shape() != Qt.BlankCursor,
+          "-- an invisible pointer with nothing drawn is a lost pointer")
+
+    canvas.view.zoom = Fraction(8)
+    canvas.view.offset_x = canvas.view.offset_y = 0
+
+    ctl.set_tool("pencil", size=1)
+    canvas._move_hover(10.5, 20.5)
+    rect = canvas._footprint_rect()
+    check("a 1px pencil covers exactly one pixel cell",
+          rect.width() == 8 and rect.height() == 8,
+          "-- got %dx%d at zoom 8" % (rect.width(), rect.height()))
+    check("...and it is the cell under the pointer",
+          rect.x() == 80 and rect.y() == 160,
+          "-- got %d,%d" % (rect.x(), rect.y()))
+
+    ctl.set_tool("brush", size=16)
+    canvas._move_hover(10.5, 20.5)
+    rect = canvas._footprint_rect()
+    check("the footprint scales with brush size",
+          rect.width() == 16 * 8, "-- got %d" % rect.width())
+
+    # The footprint must sit where the DAB sits. Both floor the same way, so
+    # a brush centred at x uses the same origin the outline draws from.
+    size = 16
+    expect_x = math.floor(10.5 - size / 2.0)
+    check("the outline uses the brush's own placement arithmetic",
+          rect.x() == expect_x * 8,
+          "-- outline at %d, dab at %d" % (rect.x(), expect_x * 8))
+
+    canvas._move_hover(None, None)
+    check("the footprint disappears when the pointer leaves",
+          canvas._footprint_rect() is None,
+          "-- otherwise it is left stranded on the canvas")
+
+    ctl.set_tool("bucket")
+    canvas._move_hover(5.0, 5.0)
+    check("a tool with no footprint draws none",
+          canvas._footprint_rect() is None)
+
+    # ---- layers: reordering ---------------------------------------------
+    doc = ctl.doc
+    while len(doc.layers()) > 1:
+        ctl.remove_layer(doc.layers()[-1])
+    bottom = doc.layers()[0]
+    bottom.name = "bottom"
+    middle = ctl.add_layer("middle")
+    top = ctl.add_layer("top")
+    check("three layers, bottom-first",
+          [l.name for l in doc.layers()] == ["bottom", "middle", "top"])
+
+    ctl.move_layer(top, doc.root, 0)
+    check("REORDERING RESTACKS THE IMAGE",
+          [l.name for l in doc.layers()] == ["top", "bottom", "middle"],
+          "-- got %s" % [l.name for l in doc.layers()])
+    # Counting entries would be wrong here: pushing after an undo discards
+    # the redo branch, so the total can stay flat. What matters is that the
+    # CURRENT entry is the reorder.
+    current = ctl.history.entries[ctl.history.position]
+    check("reordering is undoable", current.label == "Reorder layer",
+          "-- a drag that cannot be undone is a trap; current entry is %r"
+          % current.label)
+    ctl.undo()
+    check("...and undo puts it back",
+          [l.name for l in doc.layers()] == ["bottom", "middle", "top"],
+          "-- got %s" % [l.name for l in doc.layers()])
+    ctl.redo()
+    check("...and redo re-applies it",
+          [l.name for l in doc.layers()] == ["top", "bottom", "middle"])
+    ctl.undo()
+
+    check("a no-op move pushes no history",
+          ctl.move_layer(bottom, doc.root, 0) is False)
+
+    # An empty group is FALSY (it defines __len__), so `parent or root` sends
+    # a drop into an empty group to the root instead. This is the same trap
+    # that bit the layer tree before; it must not come back through the dock.
+    group = ctl.add_group("empty group")
+    ctl.move_layer(middle, group, 0)
+    check("a layer can be dropped INTO AN EMPTY GROUP",
+          middle.parent is group,
+          "-- landed in %r; empty groups are falsy, so `parent or root` "
+          "silently retargets the drop" % getattr(middle.parent, "name", "?"))
+
+    # ---- layers: duplicate ----------------------------------------------
+    plain = ctl.add_layer("plain")
+    cell = doc.cell(plain)
+    cell.fill(Rect(0, 0, 4, 4), (9, 8, 7, 255))
+    copy = ctl.duplicate_layer(plain)
+    check("duplicate makes a new layer", copy is not None and copy is not plain)
+    check("duplicate copies the PIXELS, not a reference",
+          np.array_equal(doc.cell(copy).pixels, cell.pixels))
+    doc.cell(copy).fill(Rect(0, 0, 4, 4), (1, 1, 1, 255))
+    check("...and the two are independent afterwards",
+          not np.array_equal(doc.cell(copy).pixels, cell.pixels))
+
+    # Duplicating an INDEX-LOCKED layer must carry the indices, not just the
+    # colours derived from them. Copying into a plain RGBA layer would lose
+    # exactly what the indexed model exists to protect.
+    indexed = doc.add_layer("indexed", planes=("index", "rgba"),
+                            authoritative=("index",))
+    src = doc.cell(indexed)
+    src.plane("index")[0:4, 0:4] = 17
+    src.refresh_derived()
+    icopy = ctl.duplicate_layer(indexed)
+    check("DUPLICATE PRESERVES AUTHORITATIVE INDICES",
+          icopy is not None and "index" in icopy.authoritative
+          and np.array_equal(doc.cell(icopy).plane("index"),
+                             src.plane("index")),
+          "-- an indexed layer duplicated into an RGBA one loses the indices")
+
+    # ---- layers: the context menu ----------------------------------------
+    win.layers_dock.sync()
+    menu_labels = _context_labels(win.layers_dock, doc.layers()[0])
+    check("right-click offers Delete", "Delete" in menu_labels,
+          "-- deleting by right-click is a preference worth keeping")
+    check("right-click offers Duplicate", "Duplicate" in menu_labels)
+    check("the delete BUTTON still exists too",
+          any(b.text() == "Delete"
+              for b in win.layers_dock.findChildren(QPushButton)),
+          "-- both routes, since which one you reach for is personal")
+
     print("\nall UI smoke checks passed")
+
+
+def _context_labels(dock, node):
+    """The layer context menu's entries, without showing it."""
+    return [a.text() for a in dock.build_context_menu(node).actions()]
 
 
 if __name__ == "__main__":

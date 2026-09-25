@@ -96,6 +96,20 @@ class LayersDock(QDockWidget):
         self.list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemChanged.connect(self._item_changed)
+
+        # Drag to restack. InternalMove lets Qt animate the drop, but the
+        # model underneath is the layer TREE, not this flat list -- so the
+        # view's own reordering is undone on the next sync() and the real
+        # move goes through the controller, where it becomes one undo entry.
+        self.list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list.setDefaultDropAction(Qt.MoveAction)
+        self.list.model().rowsMoved.connect(self._rows_moved)
+
+        # Right-click, because reaching for a button to delete something is
+        # a preference and not a law. Everything here is also on the buttons
+        # or the menu bar; nothing is only reachable this way.
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._context_menu)
         box.addWidget(self.list, 1)
 
         buttons = QHBoxLayout()
@@ -171,6 +185,94 @@ class LayersDock(QDockWidget):
         name = self.blend.currentData()
         if name:
             self.ctl.set_layer_property(self.ctl.active_layer, "blend", name)
+
+    def _rows_moved(self, _parent, start, _end, _dest, row):
+        """A drag finished. Translate list position into a tree position."""
+        if self._syncing:
+            return
+        node = self._node_at_pre_move(start)
+        if node is None:
+            self.sync()
+            return
+
+        # The list is a FLATTENED tree, so "row 3" is not "index 3". The node
+        # now above the drop point decides both the parent and the index:
+        # dropping onto a group's contents means joining that group.
+        target = row - 1 if row > start else row
+        parent, index = self._tree_position(target, node)
+        if parent is not None:
+            self.ctl.move_layer(node, parent, index)
+        self.sync()
+
+    def _node_at_pre_move(self, row):
+        """The node that WAS at `row` before Qt reordered its own view."""
+        if not hasattr(self, "_rows") or not (0 <= row < len(self._rows)):
+            return None
+        return self._rows[row][1]
+
+    def _tree_position(self, target_row, moving):
+        """(parent, index) for a node dropped at flattened row `target_row`."""
+        root = self.ctl.doc.root
+        rows = [n for _d, n in getattr(self, "_rows", []) if n is not moving]
+        if not rows or target_row <= 0:
+            return root, 0
+        anchor = rows[min(target_row, len(rows)) - 1]
+
+        # Dropping just under a group header puts the node INSIDE the group,
+        # which is what the indentation implies and what every other editor
+        # does. Otherwise it becomes the anchor's sibling, just above it.
+        if anchor.is_group:
+            return anchor, len(anchor.children)
+        parent = anchor.parent or root
+        if moving.parent is parent and parent.children.index(moving) < \
+                parent.children.index(anchor):
+            return parent, parent.children.index(anchor)
+        return parent, parent.children.index(anchor) + 1
+
+    def _context_menu(self, point):
+        item = self.list.itemAt(point)
+        node = self._node_at(self.list.row(item)) if item is not None else None
+        menu = self.build_context_menu(node)
+        menu.exec(self.list.viewport().mapToGlobal(point))
+
+    def build_context_menu(self, node):
+        """The right-click menu for `node`, built but not shown.
+
+        Separate from showing it so a test can inspect the entries. Calling
+        exec() in a test hangs -- the menu really does open and really does
+        wait for a click that is never coming.
+        """
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        if node is not None and node is not self.ctl.active_layer:
+            self.ctl.set_active_layer(node)
+            self.sync()
+
+        menu.addAction("Add Layer", self._add)
+        menu.addAction("Add Group", self._group)
+        if node is not None:
+            menu.addAction("Duplicate", self._duplicate).setEnabled(
+                not node.is_group)
+            menu.addSeparator()
+            visible = menu.addAction("Visible", self._toggle_visible)
+            visible.setCheckable(True)
+            visible.setChecked(bool(node.visible))
+            menu.addSeparator()
+            # Delete is last and separated, so a stray click near the edge of
+            # the menu does not destroy a layer.
+            delete = menu.addAction("Delete", self._delete)
+            delete.setEnabled(len(self.ctl.doc.layers()) > 1)
+        return menu
+
+    def _toggle_visible(self):
+        node = self.ctl.active_layer
+        if node is not None:
+            self.ctl.set_layer_property(node, "visible", not node.visible)
+            self.sync()
+
+    def _duplicate(self):
+        self.ctl.duplicate_layer()
 
     def _add(self):
         self.ctl.add_layer()

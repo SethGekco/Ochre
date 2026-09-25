@@ -65,12 +65,19 @@ class MainWindow(QMainWindow):
         bus.subscribe("history.changed", lambda **k: self.history_dock.sync())
         bus.subscribe("colour.changed", lambda **k: self.colors_dock.sync())
         bus.subscribe("palette.changed", lambda **k: self.palette_dock.sync())
-        bus.subscribe("tool.changed", lambda **k: self.tools_dock.sync())
+        bus.subscribe("tool.changed", lambda **k: self._on_tool())
         bus.subscribe("frames.changed", lambda **k: self.frames_dock.sync())
         bus.subscribe("frame.changed", lambda **k: self._on_frame())
         bus.subscribe("document.opened", lambda **k: self._sync_all())
         self.canvas.cursor_moved.connect(self._on_cursor)
         self.canvas.zoom_changed.connect(self.zoom_label.setText)
+
+    def _on_tool(self, **_):
+        self.tools_dock.sync()
+        # The pointer belongs to the tool, so it changes with it -- including
+        # the size of the footprint, since changing brush size is a tool
+        # change too.
+        self.canvas.apply_tool_cursor()
 
     def _on_frame(self, **_):
         self.frames_dock.sync()
