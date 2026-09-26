@@ -86,7 +86,13 @@ class CloneStampTool(Tool):
             max_blocks=512 if s is None else s.get("History", "MaxStrokeBlocks"),
             level=1 if s is None else s.get("History", "CompressLevel"),
             label=self.label)
-        self._snapshot = cell.plane("rgba").copy()
+        # Sample the AUTHORITATIVE plane. On an index-locked layer the rgba
+        # plane is a cache, and cloning through it would put every copied
+        # pixel back through colour matching -- the exact round trip the
+        # indexed model exists to avoid, and the one that loses reserved
+        # entries whose colours duplicate others.
+        self._plane = "index" if cell.index_locked else "rgba"
+        self._snapshot = cell.plane(self._plane).copy()
         self._last = (event.x, event.y)
         return self._dab(ctx, event, event.x, event.y)
 
@@ -160,7 +166,8 @@ class CloneStampTool(Tool):
                      dest.x - ox:dest.x - ox + dest.w]
         self._session.touch(dest)
         patch = self._snapshot[src_clipped.slice()]
-        cell.apply_masked(dest, patch, ctx.coverage(window, dest))
+        cell.apply_masked(dest, patch, ctx.coverage(window, dest),
+                          name=self._plane)
         return dest
 
     def reset_source(self):

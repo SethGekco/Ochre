@@ -38,7 +38,7 @@ without touching the compositor, the tools or the history.
 
 import numpy as np
 
-from .arith import apply_coverage, blend_over, expand_palette
+from .arith import apply_coverage, blend_over, expand_palette, mul255
 from .geometry import DirtyRegion, Rect
 
 # Channels per plane. Anything not listed is a scalar (single-channel) plane.
@@ -212,6 +212,16 @@ class Surface:
         r = rect.clipped_to(self.width, self.height)
         if r is None:
             return None
+
+        # On an index-locked surface the rgba plane is a CACHE. Writing
+        # colour into it shows the right thing on screen and is discarded on
+        # save, because only authoritative planes are written -- so a tool
+        # that paints here has to paint indices instead. Doing that at this
+        # one call is what gives every tool indexed support at once; doing it
+        # per tool is how six of them came to be silently broken.
+        if name == RGBA and self.index_locked:
+            return self._apply_indexed(r, src, mask)
+
         plane = self.plane(name)
         dst = plane[r.slice()]
         src = np.asarray(src, dtype=np.uint8)
@@ -227,10 +237,84 @@ class Surface:
                 dst[...] = src            # fully opaque: skip the blend entirely
             else:
                 dst[...] = blend_over(dst, src, mask)
+        elif name == INDEX and mask is not None:
+            # Indices are labels, not quantities. apply_coverage would lerp
+            # them, and halfway between index 5 and index 200 is not a
+            # blend of two colours -- it is a third, unrelated one. Scalar
+            # planes that ARE quantities (height, z-data) still lerp below.
+            dst[np.asarray(mask, dtype=np.uint8) >= 128] = \
+                np.broadcast_to(src, dst.shape)[np.asarray(mask, dtype=np.uint8) >= 128]
         else:
             dst[...] = src if mask is None else apply_coverage(dst, src, mask)
 
         self._after_write(r, name)
+        return r
+
+    def _apply_indexed(self, r, src, mask):
+        """Paint colour onto an index plane.
+
+        COVERAGE BECOMES A THRESHOLD, and that is deliberate rather than a
+        shortcut. Indices cannot be interpolated -- half of index 5 and half
+        of index 200 is not index 102, it is a different colour entirely, and
+        on a C&C palette it is frequently the shadow or a remap entry. So a
+        pixel is either painted or it is not, which is also exactly what a
+        pixel artist wants: an antialiased edge on a 60x60 sprite is a defect.
+
+        The consequence worth stating: a soft brush behaves as a hard one
+        here. That is the honest translation of a soft brush into a medium
+        with no partial coverage.
+        """
+        from .quantize import index_for
+
+        src = np.asarray(src, dtype=np.uint8)
+        if src.ndim == 1:
+            src = np.broadcast_to(src, (r.h, r.w, src.shape[-1]))
+        dst = self.plane(INDEX)[r.slice()]
+
+        alpha = src[..., 3]
+        cover = alpha if mask is None else mul255(alpha, mask)
+        write = cover >= 128
+        if not write.any():
+            return None
+
+        idx = index_for(src[..., :3], self.palette)
+        dst[write] = np.asarray(idx, dtype=np.uint8)[write]
+        self._after_write(r, INDEX)
+        return r
+
+    def erase_masked(self, rect, mask=None):
+        """Remove coverage. The counterpart to apply_masked, and its equal.
+
+        The eraser used to reach past apply_masked and multiply the rgba
+        alpha itself, which worked on a normal layer and did nothing
+        whatsoever on an index-locked one -- the cache it edited was
+        regenerated from indices it never touched. Erasing to an index plane
+        means writing the palette's TRANSPARENT entry, which is a different
+        operation, not a variation on the same one, so it gets its own call
+        rather than a flag on the other.
+        """
+        r = rect.clipped_to(self.width, self.height)
+        if r is None:
+            return None
+
+        if self.index_locked:
+            clear = 0 if self.palette is None or self.palette.transparent is None \
+                else int(self.palette.transparent)
+            dst = self.plane(INDEX)[r.slice()]
+            if mask is None:
+                dst[...] = clear
+            else:
+                dst[np.asarray(mask, dtype=np.uint8) >= 128] = clear
+            self._after_write(r, INDEX)
+            return r
+
+        dst = self.plane(RGBA)[r.slice()]
+        if mask is None:
+            dst[..., 3] = 0
+        else:
+            keep = (255 - np.asarray(mask, dtype=np.uint8)).astype(np.uint8)
+            dst[..., 3] = mul255(dst[..., 3], keep)
+        self._after_write(r, RGBA)
         return r
 
     def _after_write(self, r, name):

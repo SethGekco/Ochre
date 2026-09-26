@@ -465,8 +465,22 @@ def main():
         # Paint a value the block does not already contain, or the assertion
         # would pass without the stroke ever having happened.
         ink = next(v for v in range(1, 256) if not (before == v).any())
-        cell.plane("index")[ey:ey + 4, ex:ex + 6] = ink
-        cell.refresh_derived()
+
+        # THROUGH A TOOL, not by assigning to the plane. The earlier version
+        # of this test wrote plane("index") directly, which proved the path
+        # from the plane to the file and never asked whether any tool could
+        # reach the plane -- and none could. Every paint tool wrote only the
+        # rgba cache, so real edits were discarded on save while this test
+        # stayed green.
+        ctl.doc.current = doc.frames.index(frame)
+        ctl.active_layer = elayer
+        ctl.primary = tuple(int(v) for v in doc.palette.entries[ink, :3]) + (255,)
+        ctl.set_tool("pencil")
+        ctl.tool.set_option("size", 1)
+        for px in range(ex, ex + 6):
+            for py in range(ey, ey + 4):
+                ctl.begin_stroke(px, py, 1.0, 0, 1)
+                ctl.end_stroke(px, py, 1.0, 0)
 
         out = os.path.join(work, "painted_" + os.path.basename(p))
         ctl.save_path(out)

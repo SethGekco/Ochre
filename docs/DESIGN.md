@@ -318,7 +318,9 @@ Every phase is verifiable headlessly, in the house idiom: standalone scripts in 
 Load-bearing tests, beyond the per-module ones:
 
 - **`test_no_qt.py`** — AST-walks every `ochre/engine/**/*.py` and fails on any `PySide6`/`shiboken`/`PyQt` import. The house rule, mechanised. Also asserts every engine source decodes as ASCII — during design, one agent's own output contained a stray CJK character inside an identifier, and that class of glitch should fail a test rather than reach a reviewer.
-- **`test_indexlock.py`** — round-trip preserves indices **exactly** through save, load, and undo, *including duplicate-RGB entries and the remap ramp*; a palette edit changes zero authoritative bytes; an index-locked layer composites byte-identically to a normal layer holding the expanded RGBA. This is the test that proves the whole hybrid colour model works.
+- **`test_indexlock.py`** — round-trip preserves indices **exactly** through save, load, and undo, *including duplicate-RGB entries and reserved ranges*; a palette edit changes zero authoritative bytes; an index-locked layer composites byte-identically to a normal layer holding the expanded RGBA. This is the test that proves the whole hybrid colour model works.
+
+  *[Written late, and that delay cost real correctness — see "The bug the byte-exact tests were hiding". Its first job is now the one it should always have had: driving every tool in the registry against an indexed layer and asserting the AUTHORITATIVE plane changed.]*
 - **`test_planes.py`** — a height plane shares one dirty rect and one delta with its colour plane; composite output is byte-identical with and without the extra plane present (proving the compositor really does ignore it for free).
 - **`test_frames.py`** — per-frame dirty isolation; undo switches frames; cold→warm→cold round-trips bit-exactly; `MaxWarmBytes` is respected under a 100-frame batch operation.
 - **`test_accel_parity.py`** — compiled vs numpy over a seeded corpus plus edge cases (alpha 0 and 255, 1-pixel rects, odd widths that defeat SIMD tails, non-contiguous views, every blend mode, every opacity). Asserts `array_equal`, not `allclose`. Skips cleanly when the extension isn't built.
@@ -439,6 +441,54 @@ undo entry, the rubber-band preview came for free and cannot disagree with
 what is committed. Their outlines are also composed from the *selection*
 rasterisers — `coverage(grown)` minus `coverage(shrunk)` — so they inherited
 the supersampling symmetry fix rather than needing their own.
+
+## The bug the byte-exact tests were hiding
+
+Worth its own section, because the lesson generalises past this project.
+
+For most of the addon's life **every paint tool wrote only the derived rgba
+cache and left the authoritative index plane untouched.** You could open a
+real sprite, draw across it, save, and get a byte-identical file: the stroke
+was visible the entire time, because the screen shows the cache, and it was
+discarded on save, because only authoritative planes are written. Pencil,
+brush, eraser, bucket, line, rectangle, ellipse, freeform, gradient, text
+and clone — all of them, silently.
+
+Some of the byte-exactness this document is pleased about above was
+therefore partly an artefact of edits never landing.
+
+**Nothing caught it because the tests wrote the plane directly.**
+`test_corpus.py` asserted that painting a tile's overhang reached the file
+by assigning to `cell.plane("index")`. That proved the path from the plane
+to the file and never asked whether anything could reach the plane. The same
+shape of mistake as testing the preservation path and missing the encoder —
+testing the layer *beneath* the one users touch. Twice is a pattern in how
+these tests get written, not bad luck, so the new `test_indexlock.py`
+iterates the tool REGISTRY rather than a hand-written list: a tool added
+later is covered whether or not anyone remembers.
+
+The fix is smaller than the bug, because `Surface.apply_masked` was already
+the documented single chokepoint. Teaching that one method to redirect
+colour writes onto the index plane fixed every tool at once. Three
+consequences had to be decided rather than inherited:
+
+- **Coverage becomes a threshold.** Indices are labels, not quantities;
+  halfway between index 5 and index 200 is not a blend but a third,
+  unrelated colour. So a pixel is painted or it is not, and a soft brush
+  behaves as a hard one on an indexed layer. That is the honest translation
+  of a soft brush into a medium with no partial coverage, and it is what a
+  pixel artist wants anyway.
+- **An exact colour match beats protection.** Protection exists to stop a
+  resampler wandering into a reserved range whose entries are near-duplicates
+  in RGB. But a user picking a reserved entry out of the palette dock means
+  it, so `index_for()` matches exactly over *all* entries first and only the
+  fuzzy fallback stays protected.
+- **Erasing is a different operation, not a flag.** On rgba it multiplies
+  alpha; on an index plane it writes the palette's transparent entry — which
+  is per-document, not the constant 0. Hence `Surface.erase_masked()`. The
+  eraser had been reaching past the chokepoint to edit rgba directly, which
+  is why it needed fixing separately; the clone stamp likewise sampled the
+  cache, and now samples whichever plane is authoritative.
 
 ## What the real files taught us
 

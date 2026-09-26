@@ -209,12 +209,10 @@ class EraserTool(BrushTool):
         cov = ctx.coverage(cov, clipped)
         self._session.touch(clipped)
 
-        plane = cell.plane("rgba")[clipped.slice()]
-        keep = (255 - (cov if cov is not None else 255)).astype(np.uint8)
-        plane[..., 3] = accel.spec._mul(plane[..., 3].astype(np.uint32),
-                                        keep.astype(np.uint32)).astype(np.uint8)
-        cell._touched(clipped)
-        return clipped
+        # Through erase_masked, not by editing the rgba plane directly: on an
+        # index-locked layer that plane is a cache regenerated from indices,
+        # so erasing it erased nothing that survived.
+        return cell.erase_masked(clipped, cov)
 
 
 class BucketFillTool(Tool):

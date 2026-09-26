@@ -9,7 +9,7 @@ selections, tools, undo, adjustments and effects, a native document format,
 an optional C accelerator, an addon system, and a Command & Conquer addon
 that reads and writes SHP sprites and TMP terrain templates.
 
-    ./tests/run_all.sh      # 49 checks, both backends
+    ./tests/run_all.sh      # 51 checks, both backends
     python -m ochre.ui      # the editor
 
 ## The rules

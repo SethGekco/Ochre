@@ -85,6 +85,43 @@ def quantize(rgba, palette, dither=NONE, bits=5, strength=1.0, force=False,
     return _apply_transparency(indices, rgba, palette)
 
 
+def index_for(rgb, palette, bits=5):
+    """Palette index for painted colour. Exact match first, else nearest.
+
+    The difference from _snap_exact_first, and it is the whole reason this
+    exists separately: the EXACT pass here considers protected entries too.
+
+    Protection stops a resampler or a blur from wandering into a reserved
+    range, which is the right default: such ranges are typically
+    near-duplicates of other entries in RGB, so arriving there by accident
+    is both easy and destructive. But a user picking a reserved entry out of
+    the palette dock means it, and refusing to paint the very range the
+    document set aside would be absurd. An exact hit is a deliberate
+    choice; only the fuzzy fallback stays protected.
+    """
+    rgb = np.asarray(rgb, dtype=np.uint8)
+    flat = rgb.reshape(-1, 3)
+    packed = (flat[:, 0].astype(np.uint32) << 16
+              | flat[:, 1].astype(np.uint32) << 8
+              | flat[:, 2].astype(np.uint32))
+
+    entries = palette.entries[:, :3].astype(np.uint32)
+    pal_packed = (entries[:, 0] << 16) | (entries[:, 1] << 8) | entries[:, 2]
+    # Lowest index wins among duplicates, so a palette carrying the same
+    # colour twice resolves the same way every time.
+    order = np.argsort(pal_packed, kind="stable")
+    sorted_values = pal_packed[order]
+
+    out = np.asarray(palette.snap(rgb, bits), dtype=np.uint8).reshape(-1)
+    pos = np.clip(np.searchsorted(sorted_values, packed),
+                  0, len(sorted_values) - 1)
+    hit = sorted_values[pos] == packed
+    if hit.any():
+        out = out.copy()
+        out[hit] = order[pos][hit].astype(np.uint8)
+    return out.reshape(rgb.shape[:-1])
+
+
 def _snap_exact_first(rgb, palette, bits):
     """Snap, but resolve colours already in the palette EXACTLY.
 
