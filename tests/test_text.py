@@ -351,6 +351,40 @@ def main():
           np.array_equal(typed, d2.cell(lay2).pixels),
           "-- deleted characters left pixels behind")
 
+    # ---- reported from real use: the box must start EMPTY ----------------
+    # One tool instance serves every placement, so a string left in its
+    # options is not merely prefilled next time -- on_begin renders
+    # immediately, so the old text gets stamped down at the new spot.
+    d, lay_, sel, hist, ctx = setup()
+    tool = reg.create("text", size=28)
+    tool.begin(ctx, ToolEvent(10, 30))
+    for ch in "Hello":
+        tool.insert(ctx, ch)
+    tool.commit_text(ctx)
+    check("committing clears the string", tool.option("text") == "")
+    check("...and the caret with it", tool.caret == 0)
+
+    quiet = d.cell(lay_).pixels.copy()
+    tool.begin(ctx, ToolEvent(10, 90))
+    check("A NEW PLACEMENT STARTS BLANK", tool.option("text") == "",
+          "-- got %r" % tool.option("text"))
+    check("...and paints nothing until something is typed",
+          np.array_equal(d.cell(lay_).pixels, quiet),
+          "-- clicking re-stamped the previous string")
+    tool.insert(ctx, "X")
+    check("typing into the new box still works", tool.option("text") == "X")
+    tool.cancel(ctx)
+    check("cancelling clears the string too", tool.option("text") == "")
+
+    # Scripted use is unaffected, which is why this clears on FINISH rather
+    # than on begin: a caller that passes text=... must get to use it once.
+    d2, lay2, _s, _h, ctx2 = setup()
+    scripted = reg.create("text", text="Scripted", size=20)
+    scripted.begin(ctx2, ToolEvent(10, 40))
+    check("a scripted string survives to its first placement",
+          scripted.option("text") == "Scripted")
+    check("...and actually drew", int((d2.cell(lay2).pixels[..., 0] > 0).sum()) > 0)
+
     print("\nall text checks passed")
 
 

@@ -175,6 +175,14 @@ class CanvasView(QAbstractScrollArea):
         return tool if tool.active else None
 
     def _blink(self):
+        # The session can end without the canvas being told -- undo now
+        # cancels a live tool directly on the controller. Self-stopping
+        # here beats wiring a signal for it, and means any future path that
+        # ends an edit cannot leave a timer running.
+        if self._text_tool() is None:
+            self._caret_timer.stop()
+            self._caret_on = False
+            return
         self._caret_on = not self._caret_on
         rect = self._caret_widget_rect()
         if rect is not None:

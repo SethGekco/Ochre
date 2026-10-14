@@ -558,6 +558,61 @@ def main():
     ctl.set_tool("brush")
     win.canvas.apply_tool_cursor()
 
+    # ---- reported from real use: Ctrl+Z skipped the last thing ----------
+    # The text tool deliberately stays active after mouse-up so typing can
+    # continue, which left live edits outside history. Undo then rolled back
+    # the entry BEFORE the one on screen -- and worse, the open session still
+    # held a checkpoint of pixels from before that rollback, so committing
+    # afterwards wrote them back. Undoing everything left pixels behind that
+    # had never existed in any state the user visited.
+    ctl.new_document(200, 120)
+    win.canvas.bind()
+    paint_layer = ctl.doc.layers()[0]
+    ctl.doc.cell(paint_layer).fill(ctl.doc.bounds, (0, 0, 0, 255))
+    pixels = lambda: ctl.doc.cell(paint_layer).pixels.copy()
+
+    ctl.set_primary((255, 0, 0, 255))
+    ctl.set_tool("brush")
+    ctl.tool.set_option("size", 20)
+    ctl.begin_stroke(20, 60, 1.0, 0, 1)
+    ctl.motion_stroke(160, 60, 1.0, 0)
+    ctl.end_stroke(160, 60, 1.0, 0)
+    after_stroke = pixels()
+
+    # Text placed so it OVERLAPS the stroke: that overlap is what made the
+    # old behaviour corrupt rather than merely surprising.
+    ctl.set_tool("text")
+    ctl.tool.set_option("size", 40)
+    ctl.begin_stroke(20, 45, 1.0, 0, 1)
+    ctl.end_stroke(20, 45, 1.0, 0)
+    for ch in "Hi":
+        ctl.tool.insert(ctl._context(), ch)
+    check("typing changed the canvas", not np.array_equal(pixels(), after_stroke))
+    check("the text tool is still live", ctl.tool.active)
+
+    ctl.undo()
+    check("CTRL+Z UNDOES THE LIVE EDIT FIRST",
+          np.array_equal(pixels(), after_stroke),
+          "-- it must restore exactly the state before typing began, not "
+          "roll back the stroke underneath it")
+    check("...and the session is closed", not ctl.tool.active)
+
+    ctl.undo()
+    check("the next Ctrl+Z removes the stroke",
+          int((pixels()[..., 0] > 0).sum()) == 0)
+    check("NO PIXELS SURVIVE THAT NEVER EXISTED",
+          np.array_equal(pixels(), np.dstack([
+              np.zeros((120, 200, 3), np.uint8),
+              np.full((120, 200), 255, np.uint8)])),
+          "-- the canvas must be back to the fill it started from")
+
+    # Redo has the same hazard in the other direction.
+    ctl.redo()
+    ctl.redo()
+    check("redo still reaches the stroke", int((pixels()[..., 0] > 0).sum()) > 0)
+
+    ctl.set_tool("brush")
+
     print("\nall UI smoke checks passed")
 
 

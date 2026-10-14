@@ -497,6 +497,19 @@ class Controller:
     # ---- history ---------------------------------------------------------
 
     def undo(self):
+        # An open tool session IS the most recent thing the user did, and it
+        # is not in history yet -- the text tool deliberately stays active
+        # after mouse-up so typing can continue. Undoing past it was wrong
+        # twice over: it rolled back the edit BEFORE the one on screen, and
+        # the session still held a checkpoint of pixels from before that
+        # rollback, so committing afterwards wrote them back. Undoing
+        # everything then left pixels on the canvas that had never existed in
+        # any state the user visited.
+        if self.tool is not None and self.tool.active:
+            rect = self.cancel_stroke()
+            self.emit("history.changed")
+            return rect
+
         rect = self.history.undo(self.doc)
         if rect is not None:
             self.compositor.invalidate()
@@ -506,6 +519,13 @@ class Controller:
         return rect
 
     def redo(self):
+        # Same hazard in the other direction: redoing with a live session
+        # open would reapply pixels underneath a checkpoint taken before it.
+        # Discard the session first, then redo normally -- there is nothing
+        # uncommitted to redo.
+        if self.tool is not None and self.tool.active:
+            self.cancel_stroke()
+
         rect = self.history.redo(self.doc)
         if rect is not None:
             self.compositor.invalidate()

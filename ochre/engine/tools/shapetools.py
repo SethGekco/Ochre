@@ -460,7 +460,28 @@ class TextTool(_DragTool):
         self.active = False
         if cmd is not None and ctx.history is not None:
             ctx.history.push(cmd, self.label, frame_id=ctx.frame.id)
+        self._clear()
         return cmd
+
+    def on_cancel(self, ctx):
+        rect = super().on_cancel(ctx)
+        self._clear()
+        return rect
+
+    def _clear(self):
+        """Forget the string once the edit is over.
+
+        The tool instance is reused for every placement, so without this the
+        NEXT click starts holding the last thing typed -- and because
+        on_begin renders immediately, it does not merely prefill the box, it
+        stamps the old text down at the new spot.
+
+        Cleared when the edit FINISHES rather than when one starts, so that
+        a script can still do create("text", text="...") and have the first
+        placement use it.
+        """
+        self.set_option("text", "")
+        self._caret = 0
 
     def _render(self, ctx, event):
         from .. import text as textmod
