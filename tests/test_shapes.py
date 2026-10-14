@@ -322,6 +322,56 @@ def main():
           reg.create("gradient").option("kind") == "linear")
     check("overrides beat INI", reg.create("line", stroke=9).option("stroke") == 9)
 
+    # ---- regular polygons and stars --------------------------------------
+    box = (4.0, 4.0, 60.0, 60.0)
+    for name in shapes.POLYGONS:
+        cov = shapes.coverage(64, 64, name, box, shapes.FILL, 2.0, True)
+        check("%s fills something" % name, int((cov > 0).sum()) > 0)
+        check("...and stays inside its box",
+              int(cov[:3, :].sum()) == 0 and int(cov[62:, :].sum()) == 0,
+              "-- %s leaked past the drag rectangle" % name)
+
+    # A star must enclose less than the polygon it is cut from: if the inner
+    # radius were wrong the limbs would bulge and this would not hold.
+    pent = shapes.coverage(64, 64, "pentagon", box, shapes.FILL, 2.0, True)
+    star = shapes.coverage(64, 64, "star5", box, shapes.FILL, 2.0, True)
+    check("a star encloses less than its polygon",
+          int((star > 0).sum()) < int((pent > 0).sum()))
+
+    areas = [int((shapes.coverage(64, 64, n, box, shapes.FILL, 2.0, True) > 0).sum())
+             for n in ("triangle", "pentagon", "hexagon", "octagon")]
+    check("more sides enclose more area", areas == sorted(areas),
+          "-- %s" % areas)
+
+    # The four-sided entry stands on a point. A flat-topped one would just
+    # be the rectangle the tool already offers.
+    dia = shapes.coverage(64, 64, "diamond", box, shapes.FILL, 1.0, False)
+    mid = dia.shape[0] // 2
+    check("DIAMOND IS NOT A SQUARE",
+          int(dia[5, :].sum()) < int(dia[mid, :].sum()) // 2,
+          "-- its top row is as wide as its middle, so it is axis-aligned")
+
+    # Inscribed in the drag rect, so a wide drag gives a wide shape.
+    wide = shapes.coverage(80, 40, "hexagon", (2.0, 2.0, 78.0, 38.0),
+                           shapes.FILL, 1.0, True)
+    cols = np.nonzero((wide > 0).any(axis=0))[0]
+    rows = np.nonzero((wide > 0).any(axis=1))[0]
+    check("a polygon follows the drag rectangle's aspect",
+          (cols.max() - cols.min()) > (rows.max() - rows.min()) * 1.5,
+          "-- it stayed circular instead of filling the box")
+
+    # ---- one tool, many shapes -------------------------------------------
+    tool = reg.create("shape")
+    check("the shape tool defaults to a rectangle", tool.shape == "rectangle")
+    tool.set_option("shape", "circle")
+    check("friendly aliases resolve", tool.shape == "ellipse")
+    tool.set_option("shape", "not-a-shape")
+    check("an unknown shape falls back rather than raising",
+          tool.shape == "rectangle")
+    check("every offered choice is drawable",
+          all(c in shapes.POLYGONS or c in ("rectangle", "ellipse")
+              for c in tool.choices()))
+
     print("\nall shape and gradient checks passed")
 
 

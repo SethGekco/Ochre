@@ -131,6 +131,70 @@ def polyline_coverage(width, height, points, stroke=1.0, antialias=True):
     return out
 
 
+# Regular shapes, as (sides, star points skipped). `skip` of 0 means a plain
+# polygon; 2 gives the classic five-pointed star, 3 a sharper six-pointed one.
+# Expressed this way because a star is not a special case of anything -- it is
+# the same ring of vertices visited in a different order, so one generator
+# covers both and there is no second code path to get wrong.
+POLYGONS = {
+    "triangle": (3, 0),
+    "diamond": (4, 0),
+    "pentagon": (5, 0),
+    "hexagon": (6, 0),
+    "heptagon": (7, 0),
+    "octagon": (8, 0),
+    "star5": (5, 2),
+    "star6": (6, 2),
+    "star8": (8, 3),
+}
+
+
+def polygon_points(rect, sides, skip=0, rotation=None):
+    """Vertices of a regular polygon or star inscribed in `rect`.
+
+    Inscribed in the drag rectangle rather than in a circle, so dragging a
+    wide box gives a wide pentagon. That is what every other shape tool in
+    the editor does and what a user dragging a box expects; a shape that
+    refused to be anything but circular would be the odd one out.
+
+    `rotation` defaults to putting a vertex at the top, which is the
+    orientation people picture for a triangle, a pentagon or a star. An even
+    polygon gets a half-step extra so it sits flat rather than on a point.
+    """
+    x0, y0, x1, y1 = rect
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    rx, ry = abs(x1 - x0) / 2.0, abs(y1 - y0) / 2.0
+    sides = max(3, int(sides))
+
+    if rotation is None:
+        rotation = -math.pi / 2.0
+        # Even polygons look settled sitting on an edge rather than a point.
+        # Four sides is the exception: a flat-topped quadrilateral is just a
+        # rectangle, which the tool already offers, so the four-sided entry
+        # is the one standing on its point -- which is what "diamond" means.
+        if skip == 0 and sides % 2 == 0 and sides != 4:
+            rotation += math.pi / sides
+
+    if skip:
+        # A star is the outer ring with an inner ring interleaved. The inner
+        # radius is derived from the skip rather than picked by eye, so the
+        # limbs stay straight -- choosing it by hand produces points that
+        # visibly bend where the edges meet.
+        inner = math.cos(math.pi * skip / sides) / math.cos(math.pi * (skip - 1) / sides)
+        inner = min(max(inner, 0.05), 0.95)
+        points = []
+        for i in range(sides * 2):
+            angle = rotation + math.pi * i / sides
+            scale = 1.0 if i % 2 == 0 else inner
+            points.append((cx + math.cos(angle) * rx * scale,
+                           cy + math.sin(angle) * ry * scale))
+        return points
+
+    return [(cx + math.cos(rotation + 2.0 * math.pi * i / sides) * rx,
+             cy + math.sin(rotation + 2.0 * math.pi * i / sides) * ry)
+            for i in range(sides)]
+
+
 def coverage(width, height, kind, geometry, style=BOTH, stroke=1.0,
              antialias=True):
     """Dispatch by shape name. `geometry` is a rect tuple or a point list."""
@@ -141,16 +205,24 @@ def coverage(width, height, kind, geometry, style=BOTH, stroke=1.0,
     if kind == "line":
         x0, y0, x1, y1 = geometry
         return line_coverage(width, height, x0, y0, x1, y1, stroke, antialias)
-    if kind == "freeform":
+    if kind in ("freeform", "polygon"):
         return polygon_coverage(width, height, geometry, style, stroke,
-                                antialias, closed=(style != OUTLINE))
+                                antialias,
+                                closed=(kind == "polygon" or style != OUTLINE))
+    if kind in POLYGONS:
+        sides, skip = POLYGONS[kind]
+        return polygon_coverage(width, height,
+                                polygon_points(geometry, sides, skip),
+                                style, stroke, antialias, closed=True)
     raise ValueError("unknown shape %r" % (kind,))
 
 
 def bounds_for(width, height, kind, geometry, stroke=1.0):
     """The dirty rect a shape will touch, padded for stroke and antialiasing."""
     pad = int(math.ceil(stroke / 2.0)) + 2
-    if kind in ("rectangle", "ellipse", "line"):
+    if kind in ("rectangle", "ellipse", "line") or kind in POLYGONS:
+        # A polygon is inscribed in the drag rect, so the rect already bounds
+        # it -- no need to generate the vertices just to measure them.
         x0, y0, x1, y1 = geometry
     else:
         if not geometry:

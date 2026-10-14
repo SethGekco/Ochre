@@ -18,14 +18,15 @@ from .movetools import (CloneStampTool, MovePixelsTool,
 from .select import (EllipseSelectTool, LassoTool, MagicWandTool,
                      RectSelectTool)
 from .shapetools import (EllipseTool, FreeformTool, GradientTool, LineTool,
-                         RectangleTool, TextTool)
+                         RectangleTool, ShapeTool, TextTool)
 from .viewtools import PanTool, ViewRequest, ZoomTool
 
 BUILTIN = {
     cls.name: cls for cls in (
         PencilTool, BrushTool, EraserTool, BucketFillTool, EyedropperTool,
         RectSelectTool, EllipseSelectTool, LassoTool, MagicWandTool,
-        LineTool, RectangleTool, EllipseTool, FreeformTool, GradientTool,
+        LineTool, ShapeTool, RectangleTool, EllipseTool, FreeformTool,
+        GradientTool,
         TextTool, CloneStampTool, MovePixelsTool, MoveSelectionTool,
         ZoomTool, PanTool,
     )
@@ -104,7 +105,11 @@ class ToolRegistry:
         return self._labels.get(name, getattr(self._classes.get(name), "label", name))
 
     def names(self):
-        return sorted(self._classes, key=lambda n: (self._order.get(n, 999), n))
+        """Tools to OFFER, in toolbox order. Hidden aliases are resolvable
+        by create() and by `in`, but are not listed."""
+        return sorted((n for n in self._classes
+                       if not getattr(self._classes[n], "hidden", False)),
+                      key=lambda n: (self._order.get(n, 999), n))
 
     def __contains__(self, name):
         return name in self._classes

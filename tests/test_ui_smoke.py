@@ -613,6 +613,49 @@ def main():
 
     ctl.set_tool("brush")
 
+    # ---- the frame strip belongs to documents that HAVE frames ----------
+    # A permanent one-cell strip along the bottom is a band of wasted height
+    # telling you there is one frame. Keyed on the frame count, not the file
+    # type, so an addon format gets it without the window knowing the format.
+    ctl.new_document(120, 90)
+    win._sync_all()
+    check("a plain image hides the frame strip", win.frames_dock.isHidden())
+
+    import tempfile as _tf
+    from PIL import Image as _Image
+    gif = os.path.join(_tf.mkdtemp(), "anim.gif")
+    _frames = []
+    for i in range(4):
+        a = np.zeros((32, 32, 3), np.uint8)
+        a[:, i * 8:(i + 1) * 8] = (255, 0, 0)
+        _frames.append(_Image.fromarray(a))
+    _frames[0].save(gif, save_all=True, append_images=_frames[1:],
+                    duration=120, loop=0)
+
+    ctl.open_path(gif)
+    win._sync_all()
+    check("AN ANIMATED GIF IMPORTS EVERY FRAME", len(ctl.doc.frames) == 4,
+          "-- got %d; reading only the first is data loss at open"
+          % len(ctl.doc.frames))
+    check("...and the frames differ from one another",
+          not np.array_equal(
+              ctl.doc.cell(ctl.doc.layers()[0], ctl.doc.frames[0]).pixels,
+              ctl.doc.cell(ctl.doc.layers()[0], ctl.doc.frames[3]).pixels))
+    check("...and the strip appears for it", not win.frames_dock.isHidden())
+
+    ctl.new_document(64, 64)
+    win._sync_all()
+    check("and goes away again for a still image", win.frames_dock.isHidden())
+
+    win.frames_dock.toggleViewAction().trigger()
+    check("a user toggle pins it", win.frames_pinned is True)
+    ctl.new_document(48, 48)
+    win._sync_all()
+    check("...and the pin outlives the next document",
+          not win.frames_dock.isHidden(),
+          "-- once someone has an opinion, stop having one for them")
+    win.frames_pinned = None
+
     print("\nall UI smoke checks passed")
 
 

@@ -18,6 +18,8 @@ import os
 import numpy as np
 from PIL import Image
 
+from ..geometry import Rect
+
 DEFAULTS = {
     "PNG": {"alpha": True, "extensions": ["png"]},
     "BMP": {"alpha": False, "extensions": ["bmp"]},
@@ -82,21 +84,59 @@ def supported_extensions(table=None):
 # ---- import -------------------------------------------------------------
 
 def import_flat(path, settings=None):
-    """Any Pillow-readable image becomes a single-layer document."""
+    """Any Pillow-readable image becomes a single-layer document.
+
+    A MULTI-FRAME source -- an animated GIF, a multi-page TIFF, an APNG --
+    becomes one document frame per source frame on the one layer, which is
+    exactly the shape the frame axis exists for. Reading only the first one
+    is silent data loss at the moment of opening, and the frames would be
+    gone for good the first time the file was saved back.
+
+    Pillow composites GIF frames for us as it seeks, so disposal methods and
+    partial inter-frame rectangles are already resolved; what arrives here
+    is always a full canvas.
+    """
     from ..document import Document
+    from ..frame import Frame
 
     img = Image.open(path)
     img.load()
-    if img.mode != "RGBA":
-        img = img.convert("RGBA")
-    arr = np.asarray(img, dtype=np.uint8)
-    h, w = arr.shape[:2]
+    count = max(1, int(getattr(img, "n_frames", 1)))
 
-    doc = Document(w, h, settings=settings)
-    layer = doc.add_layer(os.path.splitext(os.path.basename(path))[0] or "Layer")
-    cell = doc.cell(layer)
-    cell.write(doc.bounds, arr)
+    doc = None
+    layer = None
+    for index in range(count):
+        if count > 1:
+            img.seek(index)
+        frame_img = img if img.mode == "RGBA" else img.convert("RGBA")
+        arr = np.asarray(frame_img, dtype=np.uint8)
+        h, w = arr.shape[:2]
+
+        if doc is None:
+            doc = Document(w, h, settings=settings)
+            layer = doc.add_layer(
+                os.path.splitext(os.path.basename(path))[0] or "Layer")
+            if count > 1:
+                doc.frames = []
+        if count > 1:
+            frame = Frame(name="Frame %d" % (index + 1))
+            duration = frame_img.info.get("duration")
+            if duration:
+                frame.meta["duration_ms"] = str(int(duration))
+            doc.frames.append(frame)
+            cell = doc.cell(layer, frame)
+        else:
+            cell = doc.cell(layer)
+        # Frames after the first can be smaller than the canvas on some
+        # encoders; write what fits rather than refusing the file.
+        region = doc.bounds if (w, h) == (doc.width, doc.height) \
+            else Rect(0, 0, min(w, doc.width), min(h, doc.height))
+        cell.write(region, arr[:region.h, :region.w])
+
+    doc.current = 0
     doc.meta["source"] = os.path.basename(path)
+    if count > 1:
+        doc.meta["frames"] = str(count)
     return doc
 
 

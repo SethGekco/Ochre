@@ -45,6 +45,14 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.frames_dock)
         self.tabifyDockWidget(self.palette_dock, self.history_dock)
 
+        # None = decide from the document; True/False = the user has said.
+        # Only an explicit toggle sets it, never our own show and hide, so
+        # auto behaviour survives until somebody actually disagrees with it.
+        self.frames_pinned = None
+        self.frames_dock.toggleViewAction().triggered.connect(
+            lambda shown: setattr(self, "frames_pinned", bool(shown)))
+        self.frames_dock.setVisible(False)
+
         self._build_menus()
         self._build_status()
         self._subscribe()
@@ -66,7 +74,8 @@ class MainWindow(QMainWindow):
         bus.subscribe("colour.changed", lambda **k: self.colors_dock.sync())
         bus.subscribe("palette.changed", lambda **k: self.palette_dock.sync())
         bus.subscribe("tool.changed", lambda **k: self._on_tool())
-        bus.subscribe("frames.changed", lambda **k: self.frames_dock.sync())
+        bus.subscribe("frames.changed", lambda **k: (self.frames_dock.sync(),
+                                                     self._update_frames_visible()))
         bus.subscribe("frame.changed", lambda **k: self._on_frame())
         bus.subscribe("document.opened", lambda **k: self._sync_all())
         self.canvas.cursor_moved.connect(self._on_cursor)
@@ -81,6 +90,7 @@ class MainWindow(QMainWindow):
 
     def _on_frame(self, **_):
         self.frames_dock.sync()
+        self._update_frames_visible()
         self.canvas.refresh()
         self.canvas.viewport().update()
 
@@ -92,7 +102,28 @@ class MainWindow(QMainWindow):
         for dock in (self.tools_dock, self.layers_dock, self.colors_dock,
                      self.palette_dock, self.history_dock, self.frames_dock):
             dock.sync()
+        self._update_frames_visible()
         self._update_title()
+
+    def _update_frames_visible(self):
+        """Show the frame strip only for documents that HAVE frames.
+
+        A sprite sheet or an animated GIF needs it; a photograph does not,
+        and a permanent one-cell strip along the bottom of the window is
+        just a band of wasted height telling you there is one frame.
+
+        Deliberately keyed on the frame count rather than on the file type,
+        so an addon format with frames gets the strip without the window
+        learning anything about that format -- and so a single-frame sprite
+        is treated like what it is. `frames_pinned` lets the View menu
+        override either way; once a user has an opinion, stop having one for
+        them.
+        """
+        if getattr(self, "frames_pinned", None) is not None:
+            self.frames_dock.setVisible(bool(self.frames_pinned))
+            return
+        doc = self.ctl.doc
+        self.frames_dock.setVisible(bool(doc is not None and len(doc.frames) > 1))
 
     def _update_title(self):
         base = self.cfg.get("Window", "Title") or "Ochre"

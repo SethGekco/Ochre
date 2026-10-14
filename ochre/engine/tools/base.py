@@ -106,6 +106,11 @@ class Tool:
     # dirty rect and never touches the document; the canvas routes on this
     # attribute rather than on a list of names, so an addon can ship one.
     affects = "pixels"
+    # Resolvable by name but not offered in the toolbox. For compatibility
+    # aliases of a tool that has absorbed them, so an old tools.ini or a
+    # script naming the old tool keeps working without the chooser growing
+    # duplicate entries.
+    hidden = False
 
     def __init__(self, **options):
         self.options = dict(options)

@@ -104,14 +104,36 @@ def event_none():
 
 
 class _ShapeTool(_DragTool):
-    """Rectangle, ellipse and line share everything but their geometry."""
+    """Every closed shape, plus the line, share all but their geometry."""
 
     kind = "rectangle"
     default_stroke = 2
 
+    @property
+    def shape(self):
+        """Which shape to draw. One TOOL with a choice, not nine tools.
+
+        Paint.NET settled on this and it is the right call: rectangle,
+        pentagon and star differ by one dropdown, not by anything a user
+        thinks of as a different activity, and nine near-identical toolbar
+        buttons push everything else off the strip. The INI default keeps
+        rectangle as what you get without choosing.
+        """
+        name = str(self.option("shape", self.kind) or self.kind).lower()
+        if name in ("circle", "oval"):
+            name = "ellipse"
+        if name in ("square", "rect"):
+            name = "rectangle"
+        if name in ("star",):
+            name = "star5"
+        if name != "rectangle" and name != "ellipse" and name != "line" \
+                and name not in shapes.POLYGONS:
+            return self.kind          # unknown name: fall back, never raise
+        return name
+
     def _geometry(self, event):
         # Live modifiers: Shift constrains, Alt draws from the centre.
-        if self.kind == "line":
+        if self.shape == "line":
             x0, y0 = self._start.x, self._start.y
             x1, y1 = event.x, event.y
             if event.has(1):
@@ -122,11 +144,12 @@ class _ShapeTool(_DragTool):
 
     def _render(self, ctx, event):
         cell = ctx.cell
+        kind = self.shape
         geometry = self._geometry(event)
         stroke = float(self.option("stroke", self.default_stroke))
-        style = self.option("style", shapes.BOTH if self.kind != "line"
+        style = self.option("style", shapes.BOTH if kind != "line"
                             else shapes.OUTLINE)
-        rect = shapes.bounds_for(cell.width, cell.height, self.kind,
+        rect = shapes.bounds_for(cell.width, cell.height, kind,
                                  geometry, stroke)
         if rect is None:
             return None
@@ -134,18 +157,18 @@ class _ShapeTool(_DragTool):
         colour = ctx.colour_for(event)
         antialias = bool(self.option("antialias", True))
 
-        if style == shapes.BOTH and self.kind != "line":
+        if style == shapes.BOTH and kind != "line":
             # Fill with the secondary colour and stroke with the primary, so
             # a two-colour shape is one drag rather than two.
-            fill = shapes.coverage(cell.width, cell.height, self.kind,
+            fill = shapes.coverage(cell.width, cell.height, kind,
                                    geometry, shapes.FILL, stroke, antialias)
             self._paint_region(ctx, fill, rect, ctx.secondary)
-            edge = shapes.coverage(cell.width, cell.height, self.kind,
+            edge = shapes.coverage(cell.width, cell.height, kind,
                                    geometry, shapes.OUTLINE, stroke, antialias)
             self._paint_region(ctx, edge, rect, colour)
             return rect
 
-        cov = shapes.coverage(cell.width, cell.height, self.kind, geometry,
+        cov = shapes.coverage(cell.width, cell.height, kind, geometry,
                               style, stroke, antialias)
         self._paint_region(ctx, cov, rect, colour)
         return rect
@@ -166,16 +189,34 @@ class LineTool(_ShapeTool):
     default_stroke = 2
 
 
-class RectangleTool(_ShapeTool):
+class ShapeTool(_ShapeTool):
+    """Rectangle by default; ellipse, polygons and stars by option."""
+
+    name = "shape"
+    label = "Shapes"
+    kind = "rectangle"
+
+    @staticmethod
+    def choices():
+        """Offered shapes, in the order a chooser should list them."""
+        return ("rectangle", "ellipse", "triangle", "diamond", "pentagon",
+                "hexagon", "heptagon", "octagon", "star5", "star6", "star8")
+
+
+# Kept so an existing tools.ini or a script naming them still resolves.
+# Both are the same tool with its shape pre-chosen.
+class RectangleTool(ShapeTool):
     name = "rectangle"
     label = "Rectangle"
     kind = "rectangle"
+    hidden = True
 
 
-class EllipseTool(_ShapeTool):
+class EllipseTool(ShapeTool):
     name = "ellipse"
     label = "Ellipse"
     kind = "ellipse"
+    hidden = True
 
 
 class FreeformTool(_DragTool):

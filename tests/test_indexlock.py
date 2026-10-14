@@ -125,6 +125,9 @@ DRIVERS = {
                               t.begin(c, ToolEvent(24, 20)),
                               t.motion(c, ToolEvent(30, 24)),
                               t.end(c, ToolEvent(30, 24))),
+    "shape":    lambda t, c: (t.begin(c, ToolEvent(4, 4)),
+                              t.motion(c, ToolEvent(34, 28)),
+                              t.end(c, ToolEvent(34, 28))),
     "text":     lambda t, c: (t.begin(c, ToolEvent(2, 10)), t.commit_text(c)),
 }
 
@@ -166,6 +169,18 @@ def main():
     check("every painting tool in the registry was exercised", not unchecked,
           "-- no driver for %s; add one rather than letting it go unchecked"
           % ", ".join(unchecked))
+
+    # Every SHAPE the one tool offers, not just its default. They share a
+    # render path, but each reaches it through its own geometry, and a
+    # polygon that produced no vertices would silently draw nothing.
+    shape_tool = reg.create("shape")
+    for choice in shape_tool.choices():
+        _doc, _layer, cell, ctx = setup()
+        before = cell.plane("index").copy()
+        tool = reg.create("shape", shape=choice)
+        DRIVERS["shape"](tool, ctx)
+        check("shape=%s paints" % choice,
+              int((before != cell.plane("index")).sum()) > 0)
 
     # ---- the rgba cache must agree with what was painted -----------------
     doc, layer, cell, ctx = setup()
