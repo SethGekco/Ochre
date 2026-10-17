@@ -45,9 +45,13 @@ class ToolsDock(QDockWidget):
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
 
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        self.shortcuts = {}
         for i, name in enumerate(controller.tools.names()):
             btn = QToolButton()
-            btn.setText(controller.tools.label(name))
+            key = controller.tools.shortcut(name)
+            btn.setText(controller.tools.label(name) + ("  (%s)" % key if key else ""))
             btn.setCheckable(True)
             btn.setToolTip(name)
             btn.clicked.connect(lambda _c=False, n=name: self.ctl.set_tool(n))
@@ -55,6 +59,14 @@ class ToolsDock(QDockWidget):
             grid.addWidget(btn, i // 2, i % 2)
             if name == controller.tool_name:
                 btn.setChecked(True)
+            if key:
+                # Owned by the main window so the key works wherever focus
+                # is. The canvas vetoes it (ShortcutOverride) while a text
+                # box is being typed into or a drag is in progress.
+                sc = QShortcut(QKeySequence(key), parent or self)
+                sc.setContext(Qt.WindowShortcut)
+                sc.activated.connect(lambda n=name: self.ctl.set_tool(n))
+                self.shortcuts[name] = sc
         grid.setRowStretch(grid.rowCount(), 1)
         self.setWidget(body)
 
@@ -252,18 +264,36 @@ class LayersDock(QDockWidget):
         menu.addAction("Add Layer", self._add)
         menu.addAction("Add Group", self._group)
         if node is not None:
+            from ..engine import transform
             menu.addAction("Duplicate", self._duplicate).setEnabled(
                 not node.is_group)
+            menu.addSeparator()
+            menu.addAction("Move Up", lambda: self.ctl.move_layer_by(+1))
+            menu.addAction("Move Down", lambda: self.ctl.move_layer_by(-1))
+            menu.addAction("Merge Down", self.ctl.merge_down).setEnabled(
+                transform.layer_below(self.ctl.doc, node) is not None)
+            menu.addAction("Flatten", self.ctl.flatten)
+            menu.addSeparator()
+            menu.addAction("Flip Horizontal", lambda: self.ctl.flip_layer(True))
+            menu.addAction("Flip Vertical", lambda: self.ctl.flip_layer(False))
+            menu.addAction("Rotate 180\u00b0", self.ctl.rotate_layer_180)
             menu.addSeparator()
             visible = menu.addAction("Visible", self._toggle_visible)
             visible.setCheckable(True)
             visible.setChecked(bool(node.visible))
+            menu.addAction("Properties...", self._properties)
             menu.addSeparator()
             # Delete is last and separated, so a stray click near the edge of
             # the menu does not destroy a layer.
             delete = menu.addAction("Delete", self._delete)
             delete.setEnabled(len(self.ctl.doc.layers()) > 1)
         return menu
+
+    def _properties(self):
+        from .dialogs import LayerPropertiesDialog
+        node = self.ctl.active_layer
+        if node is not None:
+            LayerPropertiesDialog(self.ctl, node, self).exec()
 
     def _toggle_visible(self):
         node = self.ctl.active_layer

@@ -44,6 +44,7 @@ class ToolRegistry:
         self._order = {}
         self._labels = {}
         self._appearance = {}
+        self._shortcuts = {}
         if db is not None:
             self.load(db)
 
@@ -54,7 +55,7 @@ class ToolRegistry:
         # become tool options and end up passed to a tool's constructor --
         # the engine has no business knowing what a cursor is.
         reserved = {"Class", "Label", "Order", "TargetPlane",
-                    "Cursor", "Footprint"}
+                    "Cursor", "Footprint", "Shortcut"}
         for name in db.sections("Tool"):
             section = "Tool:" + name
             cls_name = db.get(section, "Class", name)
@@ -77,7 +78,19 @@ class ToolRegistry:
             self._appearance[key] = (
                 (db.get(section, "Cursor") or "cross").lower(),
                 (db.get(section, "Footprint") or "none").lower())
+            key_seq = db.get(section, "Shortcut")
+            if key_seq:
+                self._shortcuts[key] = key_seq.strip()
         return self
+
+    def shortcut(self, name):
+        """The key that selects a tool, as a string the UI can parse, or None.
+
+        Configuration rather than code for the same reason as the cursor: an
+        addon's tool declares its own key in its own INI, and a user who
+        hates a default changes one line.
+        """
+        return self._shortcuts.get(name)
 
     def appearance(self, name):
         """(cursor, footprint) for a tool -- how the POINTER should look.

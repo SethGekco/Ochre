@@ -442,6 +442,79 @@ what is committed. Their outlines are also composed from the *selection*
 rasterisers — `coverage(grown)` minus `coverage(shrunk)` — so they inherited
 the supersampling symmetry fix rather than needing their own.
 
+## Everyday editing, and the two undo bugs it exposed
+
+Once the tool list was complete the gap was no longer tools but the
+everyday operations around them -- the things a user reaches for in the
+first ten minutes of real work and that no test suite flags because they
+are absences rather than defects. This batch adds them, and in doing so
+found the second half of a bug Rex had already reported.
+
+**Add Layer and Delete Layer were not in history.** The first cause of
+"Ctrl+Z did not undo the last thing I did" was the live text session; this
+was the other. Pixels were preserved on deletion (`CellSnapshot`) but the
+node itself was not, so undo after deleting a layer rolled back the stroke
+*before* it. `StructureDelta` now holds the detached node object, its slot
+in the tree, and every cell it owned across every frame; `FrameDelta` does
+the same for frames. Both are two-state like every other command: `present`
+says what undo should make true, and each generates its opposite.
+
+**Whole-document geometry gets the one command that is allowed to be big.**
+Resize, canvas size, crop, flip and rotate touch every cell and may change
+the canvas dimensions, which nothing rectangular can express. `GeometryDelta`
+snapshots every authoritative plane of every cell (cropped to content, zlib
+level 1) plus the selection mask -- a mask drawn on a 400-wide canvas means
+nothing on a 200-wide one, so it travels with the geometry and comes back on
+undo. The display buffer's "replace contents, never identity" contract has
+one sanctioned exception here, and `document.resized` tells the canvas to
+re-alias without resetting the zoom.
+
+Two consequences had to be measured rather than assumed:
+
+- **Resampling is alpha-weighted**, per the invariant mined from Paint.NET:
+  premultiply in float, filter each channel through Pillow's Lanczos /
+  bicubic / bilinear / box, divide back out. A half-alpha blue block
+  downscaled stays pure blue; without the premultiply it goes dark at every
+  transparent edge. Index planes are *always* nearest-neighbour -- halfway
+  between two palette entries is a third, unrelated colour -- and an indexed
+  document defaults the dialog to nearest for the same reason.
+- **Content bounds are measured after a rebuild, not predicted.** A filter's
+  footprint spreads a pixel past the scaled rectangle; the first version
+  scaled the old bbox and was one pixel too tight on one side. Every history
+  snapshot is cropped to `content_bbox`, so that lost the edge on the next
+  undo -- caught by the "redo re-applies exactly" check, which exists for
+  precisely this.
+
+**Clipboard in document terms.** A `Clip` is straight-alpha RGBA with the
+selection folded into its alpha, plus -- from an index-locked layer -- the
+indices too, because pasting sprite art between two documents sharing a
+palette must move indices, not colours. The UI mirrors every clip to the
+system clipboard as an image and reads foreign images back, recognising its
+own by content so the richer internal clip wins when both are present.
+Paste lands on the active layer (or a new one), selects what it pasted, and
+switches to Move Selected Pixels, so "paste, then put it where I meant" is
+one gesture. Delete erases the selection; Backspace fills it with the
+primary colour, as in Paint.NET.
+
+**Merge down and flatten** composite with the real blend path
+(`accel.blend_rect`, so the C and numpy backends agree), honour the upper
+layer's own opacity and mode, and land on an indexed layer by snapping with
+a coverage threshold. Merging *into a group* is refused rather than guessed
+at: the group's own opacity and mode would have to be baked in, and
+Paint.NET and GIMP disagree about the answer.
+
+**Tool shortcuts are configuration.** `Shortcut=` in `tools.ini`, Paint.NET's
+letters where it has them, so an addon's tool declares its own key and a
+user who hates a default edits one line. The non-obvious part is Qt's
+delivery order: shortcuts see a keystroke *before* the focused widget does,
+so the canvas accepts `ShortcutOverride` while a text box is open or a drag
+is in progress -- otherwise typing a P mid-sentence selects the pencil.
+Checking inside each shortcut's handler would be too late; the key is gone.
+
+Also: a Layer Properties dialog (F4), move layer up/down, layer flip and
+rotate, Open Recent (a plain text file in the state directory, readable
+with `cat`), and drag-and-drop of files onto the window.
+
 ## The bug the byte-exact tests were hiding
 
 Worth its own section, because the lesson generalises past this project.

@@ -53,6 +53,11 @@ class MainWindow(QMainWindow):
             lambda shown: setattr(self, "frames_pinned", bool(shown)))
         self.frames_dock.setVisible(False)
 
+        from .recent import RecentFiles
+        state_dir = getattr(controller.addons, "state_dir", None)
+        self.recent = RecentFiles(state_dir) if state_dir else None
+        self.setAcceptDrops(True)
+
         self._build_menus()
         self._build_status()
         self._subscribe()
@@ -78,6 +83,11 @@ class MainWindow(QMainWindow):
                                                      self._update_frames_visible()))
         bus.subscribe("frame.changed", lambda **k: self._on_frame())
         bus.subscribe("document.opened", lambda **k: self._sync_all())
+        # A resize, crop or rotate -- or an undo of one -- replaced the
+        # display buffer; the canvas must alias the new one.
+        bus.subscribe("document.resized", lambda **k: (self.canvas.bind(keep_view=True),
+                                                        self.canvas.refresh()))
+        bus.subscribe("selection.changed", lambda **k: self.canvas.viewport().update())
         self.canvas.cursor_moved.connect(self._on_cursor)
         self.canvas.zoom_changed.connect(self.zoom_label.setText)
 
@@ -145,6 +155,8 @@ class MainWindow(QMainWindow):
         file_menu = bar.addMenu("&File")
         self._act(file_menu, "&New", self.do_new, "Ctrl+N")
         self._act(file_menu, "&Open...", self.do_open, "Ctrl+O")
+        self.recent_menu = file_menu.addMenu("Open &Recent")
+        self._rebuild_recent()
         self._act(file_menu, "&Save", self.do_save, "Ctrl+S")
         self._act(file_menu, "Save &As...", self.do_save_as, "Ctrl+Shift+S")
         file_menu.addSeparator()
@@ -153,6 +165,17 @@ class MainWindow(QMainWindow):
         edit_menu = bar.addMenu("&Edit")
         self._act(edit_menu, "&Undo", self.do_undo, "Ctrl+Z")
         self._act(edit_menu, "&Redo", self.do_redo, "Ctrl+Y")
+        edit_menu.addSeparator()
+        self._act(edit_menu, "Cu&t", self.do_cut, "Ctrl+X")
+        self._act(edit_menu, "&Copy", self.do_copy, "Ctrl+C")
+        self._act(edit_menu, "Copy &Merged", lambda: self.do_copy(merged=True), "Ctrl+Shift+C")
+        self._act(edit_menu, "&Paste", self.do_paste, "Ctrl+V")
+        self._act(edit_menu, "Paste Into New &Layer",
+                  lambda: self.do_paste(new_layer=True), "Ctrl+Shift+V")
+        self._act(edit_menu, "Paste Into New &Image", self.do_paste_new_image, "Ctrl+Alt+V")
+        edit_menu.addSeparator()
+        self._act(edit_menu, "&Erase Selection", lambda: self.ctl.erase_selection(), "Del")
+        self._act(edit_menu, "&Fill Selection", lambda: self.ctl.fill_selection(), "Backspace")
         edit_menu.addSeparator()
         self._act(edit_menu, "Select &All", self.do_select_all, "Ctrl+A")
         self._act(edit_menu, "&Deselect", self.do_deselect, "Ctrl+D")
@@ -177,11 +200,24 @@ class MainWindow(QMainWindow):
                           lambda _c=False, n=name: self.run_effect(n))
 
         image_menu = bar.addMenu("&Image")
+        self._act(image_menu, "&Crop to Selection", self.do_crop, "Ctrl+Shift+X")
+        self._act(image_menu, "&Resize...", self.do_resize, "Ctrl+R")
+        self._act(image_menu, "Canvas &Size...", self.do_canvas_size, "Ctrl+Shift+R")
+        image_menu.addSeparator()
+        self._act(image_menu, "Flip &Horizontal", lambda: self._geometry(self.ctl.flip_image, True))
+        self._act(image_menu, "Flip &Vertical", lambda: self._geometry(self.ctl.flip_image, False))
+        self._act(image_menu, "Rotate 90\u00b0 Clock&wise",
+                  lambda: self._geometry(self.ctl.rotate_image, 1), "Ctrl+H")
+        self._act(image_menu, "Rotate 90\u00b0 Counter-Clockwise",
+                  lambda: self._geometry(self.ctl.rotate_image, 3), "Ctrl+G")
+        self._act(image_menu, "Rotate &180\u00b0", lambda: self._geometry(self.ctl.rotate_image, 2), "Ctrl+J")
+        image_menu.addSeparator()
         self._act(image_menu, "Bind &Grayscale Palette", self.do_bind_palette)
         self._act(image_menu, "Convert Layer to &Indexed...", self.do_convert_indexed)
         image_menu.addSeparator()
         self._act(image_menu, "Add &Frame", lambda: self.ctl.add_frame())
         self._act(image_menu, "&Duplicate Frame", lambda: self.ctl.add_frame(True))
+        self._act(image_menu, "Delete Fra&me", lambda: self.ctl.remove_frame())
 
         addon_menu = bar.addMenu("A&ddons")
         self._act(addon_menu, "&Load Addons", self.do_load_addons)
@@ -192,7 +228,19 @@ class MainWindow(QMainWindow):
         layer_menu = bar.addMenu("&Layers")
         self._act(layer_menu, "&Add Layer", lambda: self.ctl.add_layer(), "Ctrl+Shift+N")
         self._act(layer_menu, "Add &Group", lambda: self.ctl.add_group())
+        self._act(layer_menu, "D&uplicate Layer", lambda: self.ctl.duplicate_layer(), "Ctrl+Shift+D")
         self._act(layer_menu, "&Delete Layer", lambda: self.ctl.remove_layer())
+        layer_menu.addSeparator()
+        self._act(layer_menu, "Move Layer &Up", lambda: self.ctl.move_layer_by(+1), "Alt+Up")
+        self._act(layer_menu, "Move Layer Do&wn", lambda: self.ctl.move_layer_by(-1), "Alt+Down")
+        self._act(layer_menu, "&Merge Layer Down", lambda: self.ctl.merge_down(), "Ctrl+M")
+        self._act(layer_menu, "&Flatten", lambda: self.ctl.flatten(), "Ctrl+Shift+F")
+        layer_menu.addSeparator()
+        self._act(layer_menu, "Flip &Horizontal", lambda: self.ctl.flip_layer(True))
+        self._act(layer_menu, "Flip &Vertical", lambda: self.ctl.flip_layer(False))
+        self._act(layer_menu, "&Rotate 180\u00b0", lambda: self.ctl.rotate_layer_180())
+        layer_menu.addSeparator()
+        self._act(layer_menu, "&Properties...", self.do_layer_properties, "F4")
 
     def _build_status(self):
         bar = QStatusBar()
@@ -225,13 +273,7 @@ class MainWindow(QMainWindow):
             self, "Open", "", "Images (*.ochre %s);;All files (*)" % exts)
         if not path:
             return
-        try:
-            self.ctl.open_path(path)
-        except Exception as exc:                            # noqa: BLE001
-            QMessageBox.warning(self, "Open failed", str(exc))
-            return
-        self.canvas.bind()
-        self._sync_all()
+        self.open_file(path)
 
     def do_save(self):
         if self.ctl.path is None:
@@ -252,6 +294,10 @@ class MainWindow(QMainWindow):
             self.ctl.save_path(path)
         except Exception as exc:                            # noqa: BLE001
             QMessageBox.warning(self, "Save failed", str(exc))
+            return
+        if self.recent:
+            self.recent.add(path)
+            self._rebuild_recent()
         self._update_title()
 
     def run_effect(self, name):
@@ -364,6 +410,171 @@ class MainWindow(QMainWindow):
             self, "Converted to indexed",
             "Converted %d cell(s).\nMean channel error %.1f, worst %d."
             % (len(report), mean, worst))
+
+    # ---- clipboard -------------------------------------------------------
+
+    def _system_clipboard_set(self, clip):
+        """Mirror a clip to the system clipboard as an image."""
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QApplication
+        if clip is None:
+            return
+        h, w = clip.rgba.shape[:2]
+        buf = clip.rgba.tobytes()
+        image = QImage(buf, w, h, w * 4, QImage.Format_RGBA8888).copy()
+        self._clip_key = image.cacheKey()
+        QApplication.clipboard().setImage(image)
+        # setImage re-wraps the data, so remember the pixels we put there.
+        self._clip_bytes = buf
+
+    def _system_clipboard_get(self):
+        """A Clip from the system clipboard, if it holds a FOREIGN image.
+
+        Our own copy is recognised by its bytes and left alone, so the
+        internal clip -- which may carry indices -- is what gets pasted.
+        """
+        from PySide6.QtGui import QImage
+        from PySide6.QtWidgets import QApplication
+        from ..engine.clipboard import Clip
+        import numpy as np
+        image = QApplication.clipboard().image()
+        if image.isNull():
+            return None
+        rgba = image.convertToFormat(QImage.Format_RGBA8888)
+        w, h = rgba.width(), rgba.height()
+        ptr = rgba.constBits()
+        arr = np.frombuffer(ptr, dtype=np.uint8, count=rgba.sizeInBytes())
+        stride = rgba.bytesPerLine()
+        arr = arr.reshape(h, stride)[:, :w * 4].reshape(h, w, 4).copy()
+        if getattr(self, "_clip_bytes", None) == arr.tobytes():
+            return None
+        return Clip.from_rgba(arr)
+
+    def do_copy(self, merged=False):
+        clip = self.ctl.copy(merged=merged)
+        self._system_clipboard_set(clip)
+        return clip
+
+    def do_cut(self):
+        clip = self.ctl.cut()
+        self._system_clipboard_set(clip)
+        self.canvas.refresh()
+        return clip
+
+    def _paste_target(self):
+        """Where a paste lands: the top-left of what is on screen, so a
+        paste is always visible, not off in a corner the user scrolled
+        away from."""
+        vp = self.canvas.viewport()
+        rect = self.canvas.view.visible_doc_rect(vp.width(), vp.height())
+        return rect
+
+    def do_paste(self, new_layer=False):
+        foreign = self._system_clipboard_get()
+        clip = foreign or self.ctl.clip
+        if clip is None:
+            return None
+        at = None
+        if foreign is not None:
+            vis = self._paste_target()
+            at = (max(0, int(vis.x)), max(0, int(vis.y)))
+        landed = self.ctl.paste(clip, at=at, new_layer=new_layer)
+        self.canvas.refresh()
+        self.canvas.viewport().update()
+        return landed
+
+    def do_paste_new_image(self):
+        foreign = self._system_clipboard_get()
+        clip = foreign or self.ctl.clip
+        if clip is None:
+            return None
+        self.ctl.paste_new_image(clip)
+        self.canvas.bind()
+        self._sync_all()
+
+    # ---- image geometry --------------------------------------------------
+
+    def _geometry(self, fn, *args):
+        done = fn(*args)
+        if done:
+            self.canvas.bind(keep_view=True)
+            self.canvas.refresh()
+            self.canvas.viewport().update()
+        return done
+
+    def do_crop(self):
+        return self._geometry(self.ctl.crop_to_selection)
+
+    def do_resize(self):
+        from .dialogs import ResizeDialog
+        dlg = ResizeDialog(self.ctl, self)
+        if dlg.exec():
+            w, h, method = dlg.result()
+            self._geometry(self.ctl.resize_image, w, h, method)
+
+    def do_canvas_size(self):
+        from .dialogs import CanvasSizeDialog
+        dlg = CanvasSizeDialog(self.ctl, self)
+        if dlg.exec():
+            w, h, anchor = dlg.result()
+            self._geometry(self.ctl.resize_canvas, w, h, anchor)
+
+    def do_layer_properties(self):
+        from .dialogs import LayerPropertiesDialog
+        node = self.ctl.active_layer
+        if node is None:
+            return
+        LayerPropertiesDialog(self.ctl, node, self).exec()
+
+    # ---- recent files ----------------------------------------------------
+
+    def _rebuild_recent(self):
+        self.recent_menu.clear()
+        items = self.recent.existing() if self.recent else []
+        for path in items:
+            self._act(self.recent_menu, path.replace("&", "&&"),
+                      lambda _c=False, p=path: self.open_file(p))
+        if items:
+            self.recent_menu.addSeparator()
+            self._act(self.recent_menu, "&Clear List", self._clear_recent)
+        self.recent_menu.setEnabled(bool(items))
+
+    def _clear_recent(self):
+        if self.recent:
+            self.recent.items = []
+            self.recent.save()
+        self._rebuild_recent()
+
+    def open_file(self, path):
+        """Open a path with error reporting. Shared by Open, Recent and drop."""
+        try:
+            self.ctl.open_path(path)
+        except Exception as exc:                            # noqa: BLE001
+            QMessageBox.warning(self, "Open failed", str(exc))
+            if self.recent:
+                self.recent.remove(path)
+                self._rebuild_recent()
+            return False
+        if self.recent:
+            self.recent.add(path)
+            self._rebuild_recent()
+        self.canvas.bind()
+        self._sync_all()
+        return True
+
+    # ---- drag and drop ---------------------------------------------------
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(
+                u.isLocalFile() for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                self.open_file(url.toLocalFile())
+                event.acceptProposedAction()
+                return
 
     def do_undo(self):
         self.ctl.undo()

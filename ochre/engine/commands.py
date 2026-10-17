@@ -309,3 +309,215 @@ class CellSnapshot(Command):
 
     def nbytes(self):
         return 0 if self._delta is None else self._delta.nbytes()
+
+
+# ---- structure --------------------------------------------------------------
+#
+# Adding or deleting a layer was not undoable at all for most of this
+# project's life. The pixels were preserved (CellSnapshot) but the NODE was
+# not, so Ctrl+Z after deleting a layer undid the stroke before it instead --
+# one of the two causes of "undo did not undo the last thing I did". These
+# commands hold the node object itself, detached, plus every cell it owned.
+
+class StructureDelta(Command):
+    """A layer node present or absent in the tree, with all its cells.
+
+    Two-state, like every command here: `present` says what undo() should
+    make true. A removal is captured BEFORE the node is detached, so it can
+    put the node back exactly where it was; its opposite is an insertion
+    whose undo detaches the node again, capturing the cells first.
+    """
+
+    __slots__ = ("label", "node", "parent_id", "index", "_cells", "present")
+
+    def __init__(self, node, parent_id, index, cells, present, label="Layer"):
+        self.label = label
+        self.node = node
+        self.parent_id = parent_id          # None means the document root
+        self.index = index
+        self._cells = cells                 # {(layer_id, frame_id): PixelDelta|None}
+        self.present = present
+
+    @staticmethod
+    def _leaf_ids(node):
+        if node.is_group:
+            return [n.id for n in node.walk(include_self=False) if not n.is_group]
+        return [node.id]
+
+    @staticmethod
+    def removal(doc, node, label="Delete layer", level=1):
+        """Capture a node that is ABOUT to be removed."""
+        parent = node.parent
+        parent_id = None if parent is None or parent is doc.root else parent.id
+        index = parent.index_of(node) if parent is not None else 0
+        cells = {}
+        for layer_id in StructureDelta._leaf_ids(node):
+            for frame in doc.frames:
+                doc.ensure_warm(frame)
+                key = (layer_id, frame.id)
+                surface = doc.cells.get(key)
+                if surface is None or surface.content_bbox is None:
+                    continue
+                box = surface.content_bbox
+                cells[key] = PixelDelta(layer_id, frame.id, box,
+                                        surface.read(box), label, level)
+        return StructureDelta(node, parent_id, index, cells, True, label)
+
+    @staticmethod
+    def insertion(doc, node, label="Add layer"):
+        """The opposite of a removal: undo() takes the node OUT."""
+        parent = node.parent
+        parent_id = None if parent is None or parent is doc.root else parent.id
+        index = parent.index_of(node) if parent is not None else 0
+        return StructureDelta(node, parent_id, index, {}, False, label)
+
+    def undo(self, doc):
+        if self.present:
+            parent = doc.root if self.parent_id is None else doc.root.find(self.parent_id)
+            if parent is None or not parent.is_group:
+                parent = doc.root
+            parent.add(self.node, self.index)
+            for (layer_id, frame_id), delta in self._cells.items():
+                layer = doc.layer(layer_id)
+                frame = doc.frame_by_id(frame_id)
+                if layer is None or frame is None:
+                    continue
+                surface = doc.cell(layer, frame)
+                for name, arr in delta._decompress().items():
+                    surface.plane(name)[delta.rect.slice()] = arr
+                surface.content_bbox = delta.rect
+                surface.refresh_derived(delta.rect)
+                surface.dirty.add(delta.rect)
+            return StructureDelta.insertion(doc, self.node, self.label), doc.bounds
+
+        opposite = StructureDelta.removal(doc, self.node, self.label)
+        doc.remove_layer(self.node)
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return sum(d.nbytes() for d in self._cells.values())
+
+
+class FrameDelta(Command):
+    """A frame present or absent on the axis, with every cell in it."""
+
+    __slots__ = ("label", "frame", "index", "_cells", "present")
+
+    def __init__(self, frame, index, cells, present, label="Frame"):
+        self.label = label
+        self.frame = frame
+        self.index = index
+        self._cells = cells
+        self.present = present
+
+    @staticmethod
+    def removal(doc, frame, label="Delete frame", level=1):
+        doc.ensure_warm(frame)
+        cells = {}
+        for (layer_id, frame_id), surface in doc.cells.items():
+            if frame_id != frame.id or surface.content_bbox is None:
+                continue
+            box = surface.content_bbox
+            cells[(layer_id, frame_id)] = PixelDelta(layer_id, frame_id, box,
+                                                     surface.read(box), label, level)
+        return FrameDelta(frame, doc.frame_index(frame.id) or 0, cells, True, label)
+
+    @staticmethod
+    def insertion(doc, frame, label="Add frame"):
+        return FrameDelta(frame, doc.frame_index(frame.id) or 0, {}, False, label)
+
+    def undo(self, doc):
+        if self.present:
+            at = max(0, min(self.index, len(doc.frames)))
+            doc.frames.insert(at, self.frame)
+            self.frame.residency = "warm"
+            for (layer_id, frame_id), delta in self._cells.items():
+                layer = doc.layer(layer_id)
+                if layer is None:
+                    continue
+                surface = doc.cell(layer, self.frame)
+                for name, arr in delta._decompress().items():
+                    surface.plane(name)[delta.rect.slice()] = arr
+                surface.content_bbox = delta.rect
+                surface.refresh_derived(delta.rect)
+            doc.current = at
+            return FrameDelta.insertion(doc, self.frame, self.label), doc.bounds
+
+        opposite = FrameDelta.removal(doc, self.frame, self.label)
+        doc.remove_frame(self.frame)
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return sum(d.nbytes() for d in self._cells.values())
+
+
+class GeometryDelta(Command):
+    """The whole document's pixels and size. Backs resize, crop, flip, rotate.
+
+    These operations touch every cell of every frame and may change the
+    canvas dimensions, which nothing rectangular can express. So this is the
+    one command that is allowed to be big: every authoritative plane of
+    every cell, compressed, plus the selection mask -- a selection drawn on
+    a 400-wide canvas means nothing on a 200-wide one. They are rare
+    operations and the budget in history.ini bounds the damage.
+    """
+
+    __slots__ = ("label", "width", "height", "_cells", "_selection",
+                 "_sel_blob", "_sel_shape")
+
+    def __init__(self, width, height, cells, selection=None, label="Transform"):
+        self.label = label
+        self.width = width
+        self.height = height
+        self._cells = cells             # {(layer_id, frame_id): (PixelDelta|None, bbox)}
+        self._selection = selection
+        self._sel_blob = None
+        self._sel_shape = None
+        if selection is not None and selection.mask is not None:
+            self._sel_blob = zlib.compress(selection.mask.tobytes(), 1)
+            self._sel_shape = selection.mask.shape
+
+    @staticmethod
+    def capture(doc, selection=None, label="Transform", level=1):
+        cells = {}
+        for frame in doc.frames:
+            doc.ensure_warm(frame)
+        for (layer_id, frame_id), surface in doc.cells.items():
+            box = surface.content_bbox
+            delta = None
+            if box is not None:
+                delta = PixelDelta(layer_id, frame_id, box, surface.read(box),
+                                   label, level)
+            cells[(layer_id, frame_id)] = (delta, box)
+        return GeometryDelta(doc.width, doc.height, cells, selection, label)
+
+    def undo(self, doc):
+        opposite = GeometryDelta.capture(doc, self._selection, self.label)
+
+        doc.width, doc.height = self.width, self.height
+        doc.cells.clear()
+        for (layer_id, frame_id), (delta, box) in self._cells.items():
+            layer = doc.layer(layer_id)
+            frame = doc.frame_by_id(frame_id)
+            if layer is None or frame is None:
+                continue
+            surface = doc.cell(layer, frame)       # fresh, at the restored size
+            if delta is not None:
+                for name, arr in delta._decompress().items():
+                    surface.plane(name)[delta.rect.slice()] = arr
+                surface.content_bbox = box
+                surface.refresh_derived(box)
+
+        if self._selection is not None:
+            self._selection.width, self._selection.height = self.width, self.height
+            if self._sel_blob is None:
+                self._selection.mask = None
+            else:
+                arr = np.frombuffer(zlib.decompress(self._sel_blob), dtype=np.uint8)
+                self._selection.mask = arr.reshape(self._sel_shape).copy()
+            self._selection._bbox = None
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return sum(d.nbytes() for d, _ in self._cells.values() if d is not None) \
+            + (len(self._sel_blob) if self._sel_blob else 0)

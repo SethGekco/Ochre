@@ -381,6 +381,39 @@ class Surface:
 
     # ---- whole-surface operations ----------------------------------------
 
+    def recompute_content_bbox(self):
+        """Measure content_bbox from the data instead of trusting a guess.
+
+        Used after whole-plane rewrites -- resample, rotate -- where the
+        footprint cannot be predicted exactly: a bilinear or Lanczos filter
+        spreads a pixel or two past the scaled rectangle, and every history
+        snapshot is cropped to content_bbox, so a bbox that is one pixel too
+        tight silently drops the edge on undo. Opaque alpha counts for rgba;
+        for an index plane anything that is not the transparent entry; for
+        any other plane anything non-zero.
+        """
+        mask = None
+        for name in self.authoritative:
+            arr = self.planes.get(name)
+            if arr is None:
+                continue
+            if name == RGBA:
+                here = arr[..., 3] > 0
+            elif name == INDEX:
+                clear = 0 if self.palette is None or self.palette.transparent is None \
+                    else int(self.palette.transparent)
+                here = arr != clear
+            else:
+                here = arr != 0
+            mask = here if mask is None else (mask | here)
+        if mask is None or not mask.any():
+            self.content_bbox = None
+            return None
+        ys, xs = np.nonzero(mask)
+        self.content_bbox = Rect.from_points(int(xs.min()), int(ys.min()),
+                                             int(xs.max()), int(ys.max()))
+        return self.content_bbox
+
     def clear(self):
         """Drop every plane and reset tracking. Cheaper than zero-filling."""
         for name in self.planes:

@@ -5,11 +5,14 @@ for Linux, with an addon system capable enough that format support ships
 separately from the editor.
 
 Status: **working editor with C&C support.** Layers, groups, blend modes,
-selections, tools, undo, adjustments and effects, a native document format,
-an optional C accelerator, an addon system, and a Command & Conquer addon
-that reads and writes SHP sprites and TMP terrain templates.
+selections, the full Paint.NET tool set, cut/copy/paste (system clipboard
+too), resize / canvas size / crop / flip / rotate, merge and flatten, undo of
+everything including layer and frame structure, adjustments and effects, a
+native document format, an optional C accelerator, an addon system, and a
+Command & Conquer addon that reads and writes SHP sprites and TMP terrain
+templates.
 
-    ./tests/run_all.sh      # 51 checks, both backends
+    ./tests/run_all.sh      # 53 checks, both backends
     python -m ochre.ui      # the editor
 
 ## The rules

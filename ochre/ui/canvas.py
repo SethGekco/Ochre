@@ -26,7 +26,7 @@ import math
 from fractions import Fraction
 
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QImage, QPainter, QPen, QPixmap,
                            QTransform)
 from PySide6.QtWidgets import QAbstractScrollArea
@@ -125,16 +125,26 @@ class CanvasView(QAbstractScrollArea):
 
     # ---- document binding ------------------------------------------------
 
-    def bind(self):
-        """(Re)attach to the controller's current document."""
+    def bind(self, keep_view=False):
+        """(Re)attach to the controller's current document.
+
+        keep_view is for a resize or crop of the SAME document: the display
+        buffer is new but the user is mid-task, so the zoom stays and only
+        the document size behind it changes.
+        """
         doc = self.ctl.doc
         if doc is None:
             self.surface.detach()
             return
         self.surface.attach(self.ctl.display)
-        self.view = ViewState(doc.width, doc.height)
-        self.view.fit(max(1, self.viewport().width()),
-                      max(1, self.viewport().height()), margin=16)
+        if keep_view:
+            zoom, ox, oy = self.view.zoom, self.view.offset_x, self.view.offset_y
+            self.view = ViewState(doc.width, doc.height, zoom=zoom)
+            self.view.offset_x, self.view.offset_y = ox, oy
+        else:
+            self.view = ViewState(doc.width, doc.height)
+            self.view.fit(max(1, self.viewport().width()),
+                          max(1, self.viewport().height()), margin=16)
         self.ctl.invalidate()
         self.refresh()
         self.zoom_changed.emit(format_zoom(self.view.zoom))
@@ -595,6 +605,19 @@ class CanvasView(QAbstractScrollArea):
         self.viewport().update()
         event.accept()
 
+    def event(self, event):
+        # Qt offers every keystroke to the window's shortcuts BEFORE the
+        # focused widget sees it. Accepting ShortcutOverride claims the key
+        # back, which is how a text box gets to type a "P" instead of
+        # switching to the pencil. This is the sanctioned mechanism; checking
+        # inside each shortcut's handler would be too late, the key would be
+        # consumed already.
+        if event.type() == QEvent.ShortcutOverride:
+            if self._text_tool() is not None or self._drawing:
+                event.accept()
+                return True
+        return super().event(event)
+
     def keyPressEvent(self, event):
         # Text editing owns the keyboard while a text tool is mid-edit.
         tool = self._text_tool()
@@ -606,6 +629,16 @@ class CanvasView(QAbstractScrollArea):
             self.ctl.cancel_stroke()
             self.refresh()
             self.viewport().update()
+            return
+        # Paint.NET's two selection keys: Delete clears, Backspace fills
+        # with the primary colour. Both are undoable edits on the controller.
+        if event.key() == Qt.Key_Delete and not event.modifiers():
+            self.ctl.erase_selection()
+            self.refresh()
+            return
+        if event.key() == Qt.Key_Backspace and not event.modifiers():
+            self.ctl.fill_selection()
+            self.refresh()
             return
         super().keyPressEvent(event)
 

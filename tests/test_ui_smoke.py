@@ -656,6 +656,111 @@ def main():
           "-- once someone has an opinion, stop having one for them")
     win.frames_pinned = None
 
+    # ---- the modern-editor batch: menus, dialogs, shortcuts, clipboard ----
+    from PySide6.QtGui import QImage
+
+    def menu_texts(title):
+        for action in win.menuBar().actions():
+            if action.text() == title and action.menu() is not None:
+                return [a.text().replace("&", "") for a in action.menu().actions() if a.text()]
+        return []
+
+    edit = menu_texts("&Edit")
+    for entry in ("Cut", "Copy", "Copy Merged", "Paste", "Paste Into New Layer",
+                  "Paste Into New Image", "Erase Selection", "Fill Selection"):
+        check("Edit menu offers %s" % entry, entry in edit, "-- have %s" % edit)
+    image = menu_texts("&Image")
+    for entry in ("Crop to Selection", "Resize...", "Canvas Size...", "Flip Horizontal",
+                  "Flip Vertical", "Rotate 90\u00b0 Clockwise", "Rotate 180\u00b0", "Delete Frame"):
+        check("Image menu offers %s" % entry, entry in image, "-- have %s" % image)
+    layers = menu_texts("&Layers")
+    for entry in ("Duplicate Layer", "Merge Layer Down", "Flatten", "Move Layer Up",
+                  "Properties..."):
+        check("Layers menu offers %s" % entry, entry in layers, "-- have %s" % layers)
+    check("File menu has Open Recent", "Open Recent" in menu_texts("&File"))
+
+    # Tool shortcuts come from tools.ini and switch tools...
+    ctl.set_tool("brush")
+    win.tools_dock.shortcuts["pencil"].activated.emit()
+    check("the P shortcut selects the pencil", ctl.tool_name == "pencil")
+    check("shortcut keys are declared in tools.ini", ctl.tools.shortcut("pencil") == "P"
+          and ctl.tools.shortcut("zoom") == "Z")
+    # ...but a text box being typed into must keep its letters.
+    ctl.set_tool("text")
+    win.canvas.mousePressEvent(press(QMouseEvent.Type.MouseButtonPress, 100, 100))
+    win.canvas.mouseReleaseEvent(press(QMouseEvent.Type.MouseButtonRelease, 100, 100))
+    check("a text session is open", ctl.tool.active)
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    override = QKeyEvent(QEvent.ShortcutOverride, Qt.Key_P, Qt.NoModifier, "P")
+    win.canvas.event(override)
+    check("THE CANVAS CLAIMS KEYS WHILE TEXT IS BEING TYPED", override.isAccepted(),
+          "-- otherwise typing a P switches to the pencil mid-sentence")
+    win.canvas.cancel_text()
+    ctl.set_tool("brush")
+
+    # Clipboard round trip through the SYSTEM clipboard.
+    ctl.selection.select_rect((10, 10, 16, 16))
+    ctl.doc.cell(ctl.active_layer).fill(Rect(10, 10, 6, 6), (11, 22, 33, 255))
+    win.do_copy()
+    img = QApplication.clipboard().image()
+    check("copy puts an image on the system clipboard", not img.isNull()
+          and (img.width(), img.height()) == (6, 6))
+    check("...and the engine clip is kept", ctl.clip is not None)
+    # A foreign image pasted in lands on the active layer.
+    foreign = QImage(3, 3, QImage.Format_RGBA8888)
+    foreign.fill(0xFF00FF00)
+    QApplication.clipboard().setImage(foreign)
+    ctl.selection.select_all()
+    landed = win.do_paste()
+    check("a FOREIGN clipboard image pastes", landed is not None and landed.w == 3 and landed.h == 3)
+    ctl.undo()
+
+    # Dialogs construct, report, and apply.
+    from ochre.ui.dialogs import CanvasSizeDialog, LayerPropertiesDialog, ResizeDialog
+    dlg = ResizeDialog(ctl, win)
+    dlg.width.setValue(ctl.doc.width // 2)
+    w, h, method = dlg.result()
+    check("resize dialog keeps aspect by default", h == ctl.doc.height // 2)
+    dlg.percent.setValue(200)
+    check("...and percent drives both", dlg.result()[0] == ctl.doc.width * 2)
+    cdlg = CanvasSizeDialog(ctl, win)
+    cdlg.set_anchor("bottom-right")
+    check("canvas dialog reports its anchor", cdlg.result()[2] == "bottom-right")
+    ldlg = LayerPropertiesDialog(ctl, ctl.active_layer, win)
+    ldlg.name.setText("Renamed")
+    ldlg.opacity.setValue(100)
+    # position, not len(): an earlier undo left a redo-able tail, and the
+    # next push truncates it, so len() can stay flat while one entry lands.
+    n = ctl.history.position
+    ldlg.apply()
+    check("layer properties apply as one undo entry",
+          ctl.active_layer.name == "Renamed" and ctl.active_layer.opacity == 100
+          and ctl.history.position == n + 1)
+    ctl.undo()
+    check("...and undo reverts both fields", ctl.active_layer.opacity == 255)
+
+    # A geometry change through the window re-aliases the canvas. (Paste
+    # left its landing rect selected; start from a clean selection.)
+    ctl.selection.select_all()
+    # Relative to whatever document the earlier checks left current: a rect
+    # covering the whole canvas collapses to select-all and crops nothing.
+    half_w, half_h = max(1, ctl.doc.width // 2), max(1, ctl.doc.height // 2)
+    ctl.selection.select_rect((0, 0, half_w, half_h))
+    size_before = (ctl.doc.width, ctl.doc.height)
+    cropped = win.do_crop()
+    check("crop via the window keeps the canvas aliased to the new buffer",
+          win.canvas.surface.array is ctl.display and ctl.display.shape[:2] == (half_h, half_w),
+          "-- do_crop returned %r, doc was %s now %dx%d, display %s, aliased %s, bus errors %s"
+          % (cropped, size_before, ctl.doc.width, ctl.doc.height, ctl.display.shape,
+             win.canvas.surface.array is ctl.display, ctl.bus.errors[-2:] if ctl.bus else None))
+    win.canvas.repaint()
+    ctl.undo()
+    check("...and undoing the crop re-aliases again",
+          win.canvas.surface.array is ctl.display and ctl.display.shape[:2] == size_before[::-1])
+    win.canvas.repaint()
+    check("painting after a size change does not crash", True)
+
     print("\nall UI smoke checks passed")
 
 

@@ -56,6 +56,7 @@ class Controller:
         self.history = None
         self.selection = None
         self.display = None
+        self.clip = None
         self.path = None
         self.dirty_since_save = False
         self.active_layer = None
@@ -200,6 +201,7 @@ class Controller:
         self.history = HistoryStack(self.settings)
         self.selection = Selection(doc.width, doc.height)
         self.compositor = Compositor(doc)
+        self.blends = self.compositor.blends
         self.display = np.zeros((doc.height, doc.width, 4), dtype=np.uint8)
         self.path = path
         self.dirty_since_save = False
@@ -279,28 +281,58 @@ class Controller:
         """(depth, node) top-most first, which is how a panel lists them."""
         return self.doc.root.flat()
 
-    def add_layer(self, name=None, parent=None, index=None):
+    def add_layer(self, name=None, parent=None, index=None, planes=None,
+                  authoritative=None):
+        from ..engine.commands import StructureDelta
+        kw = {}
+        if planes is not None:
+            kw["planes"] = tuple(planes)
+            kw["authoritative"] = tuple(authoritative or (planes[0],))
         layer = self.doc.add_layer(name or "Layer %d" % (len(self.doc.layers()) + 1),
-                                   parent=parent, index=index)
+                                   parent=parent, index=index, **kw)
         self.doc.cell(layer)
+        # Adding a layer is an edit. For most of this project's life it was
+        # not in history, so Ctrl+Z after "Add Layer" undid the stroke
+        # before it -- the second cause of "undo skipped what I just did".
+        self.history.push(StructureDelta.insertion(self.doc, layer, "Add layer"),
+                          "Add layer")
         self.set_active_layer(layer)
         self._after_structure_change()
         return layer
 
     def add_group(self, name=None):
+        from ..engine.commands import StructureDelta
         group = self.doc.add_group(name or "Group")
+        self.history.push(StructureDelta.insertion(self.doc, group, "Add group"),
+                          "Add group")
         self._after_structure_change()
         return group
 
     def remove_layer(self, layer=None):
+        from ..engine.commands import StructureDelta
         target = layer or self.active_layer
         if target is None or len(self.doc.layers()) <= 1:
             return False
+        # Captured BEFORE removal: the node, its slot, and every cell.
+        cmd = StructureDelta.removal(self.doc, target, "Delete layer")
         self.doc.remove_layer(target)
+        self.history.push(cmd, "Delete layer")
         leaves = self.doc.layers()
         self.active_layer = leaves[-1] if leaves else None
         self._after_structure_change()
         return True
+
+    def move_layer_by(self, delta, layer=None):
+        """Nudge a layer up (+1, towards the top) or down within its group."""
+        target = layer or self.active_layer
+        if target is None or target.parent is None:
+            return False
+        parent = target.parent
+        i = parent.index_of(target)
+        j = max(0, min(i + int(delta), len(parent.children) - 1))
+        if j == i:
+            return False
+        return self.move_layer(target, parent, j)
 
     def set_active_layer(self, layer):
         self.active_layer = layer
@@ -363,9 +395,323 @@ class Controller:
                     target.plane(name)[...] = plane
             target.content_bbox = cell.content_bbox
             target.refresh_derived()
+        from ..engine.commands import StructureDelta
+        self.history.push(StructureDelta.insertion(self.doc, copy, "Duplicate layer"),
+                          "Duplicate layer")
         self.set_active_layer(copy)
         self._after_structure_change()
         return copy
+
+    # ---- merging ---------------------------------------------------------
+
+    def merge_down(self, layer=None):
+        """Composite the layer onto the one beneath it; one undo entry."""
+        from ..engine import transform
+        from ..engine.commands import PixelDelta, StructureDelta
+        upper = layer or self.active_layer
+        if upper is None:
+            return False
+        lower = transform.layer_below(self.doc, upper)
+        if lower is None:
+            return False
+        rects = transform.merge_rects(self.doc, upper, lower)
+        self.history.begin_group()
+        for frame_id, rect in rects.items():
+            self.doc.cell(lower, self.doc.frame_by_id(frame_id))
+            delta = PixelDelta.capture(self.doc, lower.id, frame_id, rect, "Merge down")
+            if delta is not None:
+                self.history.push(delta, "Merge down", frame_id=frame_id)
+        self.history.push(StructureDelta.removal(self.doc, upper, "Merge down"), "Merge down")
+        self.history.end_group("Merge down")
+        transform.merge_down(self.doc, upper, lower, self.blends)
+        self.set_active_layer(lower)
+        self._after_structure_change()
+        return True
+
+    def flatten(self):
+        """Every visible layer into one. Indexed stays indexed when it can."""
+        from ..engine import transform
+        from ..engine.commands import StructureDelta
+        leaves = self.doc.layers()
+        if len(self.doc.root.children) <= 1 and len(leaves) <= 1:
+            return False
+        keep_indexed = (self.doc.palette is not None
+                        and leaves and all(l.index_locked for l in leaves))
+
+        self.history.begin_group()
+        # Removals are pushed TOP-DOWN so that undo, which replays a group in
+        # reverse, re-inserts bottom-up. Each delta stores an absolute slot,
+        # and inserting the top layer first into an emptied group clamps its
+        # index and ends with siblings swapped.
+        for node in reversed(list(self.doc.root.children)):
+            self.history.push(StructureDelta.removal(self.doc, node, "Flatten"), "Flatten")
+        # Composite each frame BEFORE the stack is torn down.
+        flats = {f.id: self.compositor.composite(self.doc.bounds, f) for f in self.doc.frames}
+        for node in list(self.doc.root.children):
+            self.doc.remove_layer(node)
+        if keep_indexed:
+            merged = self.doc.add_layer("Background", planes=("index", "rgba"),
+                                        authoritative=("index",))
+        else:
+            merged = self.doc.add_layer("Background")
+        for frame in self.doc.frames:
+            cell = self.doc.cell(merged, frame)
+            if keep_indexed:
+                transform.composite_onto(cell, flats[frame.id], self.doc.bounds,
+                                         self.blends.opcode("Normal"), 255)
+            else:
+                cell.plane("rgba")[...] = flats[frame.id]
+                cell._after_write(self.doc.bounds, "rgba")
+        self.history.push(StructureDelta.insertion(self.doc, merged, "Flatten"), "Flatten")
+        self.history.end_group("Flatten")
+        self.set_active_layer(merged)
+        self._after_structure_change()
+        return True
+
+    # ---- layer geometry --------------------------------------------------
+
+    def _layer_pixels_op(self, label, fn, layer=None):
+        from ..engine.commands import PixelDelta
+        target = layer or self.active_layer
+        if target is None or target.is_group:
+            return False
+        self.history.begin_group()
+        for frame in self.doc.frames:
+            cell = self.doc.cells.get((target.id, frame.id))
+            if cell is None or cell.content_bbox is None:
+                continue
+            self.doc.ensure_warm(frame)
+            delta = PixelDelta.capture(self.doc, target.id, frame.id, self.doc.bounds, label)
+            if delta is not None:
+                self.history.push(delta, label, frame_id=frame.id)
+        self.history.end_group(label)
+        fn(target)
+        self._after_structure_change()
+        return True
+
+    def flip_layer(self, horizontal=True, layer=None):
+        from ..engine import transform
+        return self._layer_pixels_op(
+            "Flip layer", lambda l: transform.flip_layer(self.doc, l, horizontal), layer)
+
+    def rotate_layer_180(self, layer=None):
+        from ..engine import transform
+        return self._layer_pixels_op(
+            "Rotate layer", lambda l: transform.rotate_layer_180(self.doc, l), layer)
+
+    # ---- document geometry -----------------------------------------------
+
+    def _geometry(self, label, fn):
+        """Run a whole-document geometry change as one undo entry."""
+        from ..engine.commands import GeometryDelta
+        if self.tool is not None and self.tool.active:
+            self.cancel_stroke()
+        cmd = GeometryDelta.capture(self.doc, self.selection, label)
+        result = fn()
+        if result is None:
+            return False
+        self.history.push(cmd, label)
+        self._after_geometry_change()
+        return True
+
+    def resize_image(self, width, height, method="bilinear"):
+        from ..engine import transform
+        if (int(width), int(height)) == (self.doc.width, self.doc.height):
+            return False
+        return self._geometry("Resize image",
+                              lambda: transform.resize_image(self.doc, width, height, method))
+
+    def resize_canvas(self, width, height, anchor="center"):
+        from ..engine import transform
+        if (int(width), int(height)) == (self.doc.width, self.doc.height):
+            return False
+        return self._geometry("Canvas size",
+                              lambda: transform.resize_canvas(self.doc, width, height, anchor))
+
+    def crop_to_selection(self):
+        from ..engine import transform
+        if self.selection.selects_all():
+            return False
+        rect = self.selection.bbox
+        if rect.is_empty:
+            return False
+        done = self._geometry("Crop", lambda: transform.crop(self.doc, rect))
+        if done:
+            self.selection.select_all()
+            self.emit("selection.changed")
+        return done
+
+    def flip_image(self, horizontal=True):
+        from ..engine import transform
+        label = "Flip horizontal" if horizontal else "Flip vertical"
+        return self._geometry(label, lambda: transform.flip_document(self.doc, horizontal))
+
+    def rotate_image(self, quarter_turns):
+        from ..engine import transform
+        return self._geometry("Rotate image",
+                              lambda: transform.rotate_document(self.doc, quarter_turns))
+
+    def _after_geometry_change(self):
+        """The canvas changed size: everything sized to it is rebuilt.
+
+        The display buffer's stability contract is "replace contents, never
+        identity" -- which holds for edits, and cannot for a canvas that is
+        now a different shape. So this is the one sanctioned reallocation,
+        and the signal tells the canvas to re-alias.
+        """
+        if self.display is None or self.display.shape[:2] != (self.doc.height, self.doc.width):
+            self.display = np.zeros((self.doc.height, self.doc.width, 4), dtype=np.uint8)
+        if (self.selection.width, self.selection.height) != (self.doc.width, self.doc.height):
+            self.selection.width, self.selection.height = self.doc.width, self.doc.height
+            self.selection.mask = None
+            self.selection._bbox = None
+        self.compositor.invalidate()
+        self._pending = [self.doc.bounds]
+        self.dirty_since_save = True
+        self.emit("document.resized", width=self.doc.width, height=self.doc.height)
+        self.emit("layers.changed")
+        self.emit("selection.changed")
+
+    # ---- clipboard -------------------------------------------------------
+
+    def copy(self, merged=False):
+        from ..engine import clipboard
+        if self.active_layer is None and not merged:
+            return None
+        self.clip = clipboard.copy_selection(
+            self.doc, self.active_layer, self.doc.frame, self.selection,
+            merged=merged, compositor=self.compositor)
+        if self.clip is not None:
+            self.emit("clipboard.changed", clip=self.clip)
+        return self.clip
+
+    def cut(self):
+        clip = self.copy()
+        if clip is not None:
+            self.erase_selection()
+        return clip
+
+    def _selection_window(self):
+        rect = self.selection.bbox.clipped_to(self.doc.width, self.doc.height)
+        if rect is None or rect.is_empty:
+            return None, None
+        return rect, self.selection.mask_for(rect)
+
+    def erase_selection(self):
+        """Delete key: clear the selected pixels on the active layer."""
+        from ..engine.commands import PixelDelta
+        if self.active_layer is None or self.active_layer.is_group:
+            return None
+        rect, mask = self._selection_window()
+        if rect is None:
+            return None
+        cell = self.doc.cell(self.active_layer)
+        delta = PixelDelta.capture(self.doc, self.active_layer.id, self.doc.frame.id,
+                                   rect, "Erase selection")
+        cell.erase_masked(rect, mask)
+        if delta is not None:
+            self.history.push(delta, "Erase selection", frame_id=self.doc.frame.id)
+        self.invalidate(rect)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return rect
+
+    def fill_selection(self, colour=None):
+        """Backspace: fill the selection with the primary colour."""
+        from ..engine.commands import PixelDelta
+        if self.active_layer is None or self.active_layer.is_group:
+            return None
+        rect, mask = self._selection_window()
+        if rect is None:
+            return None
+        cell = self.doc.cell(self.active_layer)
+        delta = PixelDelta.capture(self.doc, self.active_layer.id, self.doc.frame.id,
+                                   rect, "Fill selection")
+        rgba = np.array(colour or self.primary, dtype=np.uint8)
+        block = np.broadcast_to(rgba, (rect.h, rect.w, 4))
+        cell.apply_masked(rect, block, mask)
+        if delta is not None:
+            self.history.push(delta, "Fill selection", frame_id=self.doc.frame.id)
+        self.invalidate(rect)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return rect
+
+    def paste(self, clip=None, at=None, new_layer=False):
+        """Put a clip on the active layer (or a new one) and select it.
+
+        Afterwards the pasted region is the selection and the tool is Move
+        Selected Pixels, so the next drag positions it -- which is what every
+        editor's users expect a paste to do, and what makes "paste, then
+        move it where I meant" one gesture rather than three.
+        """
+        from ..engine import clipboard
+        from ..engine.commands import PixelDelta
+        clip = clip or self.clip
+        if clip is None or self.doc is None:
+            return None
+        if self.tool is not None and self.tool.active:
+            self.cancel_stroke()
+
+        self.history.begin_group()
+        if new_layer or self.active_layer is None or self.active_layer.is_group:
+            planes = ("index", "rgba") if (clip.index is not None and self.doc.palette is not None
+                                           and clip.palette is not None
+                                           and np.array_equal(self.doc.palette.entries,
+                                                              clip.palette.entries)) else None
+            layer = self.add_layer("Pasted", planes=planes,
+                                   authoritative=("index",) if planes else None)
+        else:
+            layer = self.active_layer
+
+        if at is None:
+            origin = clip.origin
+            fits = origin.clipped_to(self.doc.width, self.doc.height)
+            at = (origin.x, origin.y) if fits is not None and fits.w == clip.width                 and fits.h == clip.height else (0, 0)
+
+        cell = self.doc.cell(layer)
+        target = Rect(int(at[0]), int(at[1]), clip.width, clip.height)
+        landed_guess = target.clipped_to(self.doc.width, self.doc.height)
+        delta = None
+        if landed_guess is not None:
+            delta = PixelDelta.capture(self.doc, layer.id, self.doc.frame.id,
+                                       landed_guess, "Paste")
+        landed = clipboard.paste(self.doc, layer, self.doc.frame, clip, at)
+        if delta is not None and landed is not None:
+            self.history.push(delta, "Paste", frame_id=self.doc.frame.id)
+        self.history.end_group("Paste")
+
+        if landed is not None:
+            self.selection.select_rect((landed.x, landed.y, landed.x1, landed.y1),
+                                       antialias=False)
+            self.emit("selection.changed")
+            self.invalidate(landed)
+            if "move_pixels" in self.tools:
+                self.set_tool("move_pixels")
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return landed
+
+    def paste_new_image(self, clip=None):
+        clip = clip or self.clip
+        if clip is None:
+            return None
+        indexed = clip.index is not None and clip.palette is not None
+        doc = Document(clip.width, clip.height,
+                       palette=clip.palette if indexed else None,
+                       settings=self.settings)
+        if indexed:
+            layer = doc.add_layer("Pasted", planes=("index", "rgba"),
+                                  authoritative=("index",))
+            doc.cell(layer).plane("index")[...] = clip.index
+            doc.cell(layer).content_bbox = doc.bounds
+            doc.cell(layer).refresh_derived()
+        else:
+            layer = doc.add_layer("Pasted")
+            doc.cell(layer).plane("rgba")[...] = clip.rgba
+            doc.cell(layer).content_bbox = doc.bounds
+        self._adopt(doc, path=None)
+        return doc
 
     def _after_structure_change(self):
         """Anything that changes the stack invalidates the composite cache."""
@@ -384,11 +730,29 @@ class Controller:
         return self.doc.current
 
     def add_frame(self, copy_current=False):
+        from ..engine.commands import FrameDelta
         frame = self.doc.add_frame(index=self.doc.current + 1,
                                    copy_from=self.doc.frame if copy_current else None)
+        self.history.push(FrameDelta.insertion(self.doc, frame, "Add frame"), "Add frame")
         self.dirty_since_save = True
         self.emit("frames.changed")
         return frame
+
+    def remove_frame(self, frame=None):
+        from ..engine.commands import FrameDelta
+        target = frame or self.doc.frame
+        if len(self.doc.frames) <= 1:
+            return False
+        cmd = FrameDelta.removal(self.doc, target, "Delete frame")
+        if not self.doc.remove_frame(target):
+            return False
+        self.history.push(cmd, "Delete frame")
+        self.compositor.invalidate()
+        self.invalidate()
+        self.dirty_since_save = True
+        self.emit("frames.changed")
+        self.emit("frame.changed", index=self.doc.current)
+        return True
 
     # ---- palette ---------------------------------------------------------
 
@@ -511,11 +875,7 @@ class Controller:
             return rect
 
         rect = self.history.undo(self.doc)
-        if rect is not None:
-            self.compositor.invalidate()
-            self.invalidate(rect)
-            self.dirty_since_save = True
-        self.emit("history.changed")
+        self._after_history_step(rect)
         return rect
 
     def redo(self):
@@ -527,21 +887,32 @@ class Controller:
             self.cancel_stroke()
 
         rect = self.history.redo(self.doc)
-        if rect is not None:
-            self.compositor.invalidate()
-            self.invalidate(rect)
-            self.dirty_since_save = True
-        self.emit("history.changed")
+        self._after_history_step(rect)
         return rect
+
+    def _after_history_step(self, rect):
+        if rect is not None:
+            resized = self.display.shape[:2] != (self.doc.height, self.doc.width)
+            if resized:
+                self._after_geometry_change()
+            else:
+                self.compositor.invalidate()
+                self.invalidate(rect)
+            self.dirty_since_save = True
+            # Structure may have changed under the active layer.
+            if self.active_layer is not None and self.doc.layer(self.active_layer.id) is None:
+                leaves = self.doc.layers()
+                self.active_layer = leaves[-1] if leaves else None
+            self.emit("layers.changed")
+            self.emit("frames.changed")
+        self.emit("history.changed")
 
     def history_labels(self):
         return self.history.labels()
 
     def history_goto(self, index):
         rect = self.history.goto(index, self.doc)
-        self.compositor.invalidate()
-        self.invalidate()
-        self.emit("history.changed")
+        self._after_history_step(rect if rect is not None else self.doc.bounds)
         return rect
 
     # ---- introspection ---------------------------------------------------
