@@ -1392,6 +1392,23 @@ def main():
     dlg = EffectDialog(gs, ctl2, win2)
     dlg.reject()
 
+    # ---- Export As ----------------------------------------------------------------
+    from ochre.ui.exportdialog import ExportDialog
+    exp = ExportDialog(ctl2, win2)
+    exp.format.setCurrentIndex(exp.format.findData("JPEG"))
+    exp.quality.setValue(30)
+    exp.refresh()
+    small = len(exp.data)
+    exp.quality.setValue(95)
+    exp.refresh()
+    check("Export As shows the REAL encoded size, which follows quality",
+          0 < small < len(exp.data) and "KB" in exp.size.text() or "bytes" in exp.size.text())
+    check("...and previews the decoded file", exp.preview.pixmap() is not None)
+    target = os.path.join(tempfile.mkdtemp(), "out.jpg")
+    exp.write(target)
+    check("...and writes exactly those bytes", os.path.getsize(target) == len(exp.data))
+    exp.reject()
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc

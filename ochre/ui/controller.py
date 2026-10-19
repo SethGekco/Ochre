@@ -161,12 +161,24 @@ class Controller:
                 return self.doc
             if guard.failed:
                 raise ValueError("addon %r failed to open %s" % (owner, path))
+        from ..engine.fileio import ora, psd
         if is_ochre(path):
             doc, mask = load(path, settings=self.settings)
             self._adopt(doc, path=path)
             if mask is not None:
                 self.selection.mask = mask
                 self.selection._bbox = None
+        elif psd.is_psd(path):
+            # Layered formats open as THEMSELVES: Save writes the PSD (or ORA)
+            # back, as Photoshop and GIMP do, rather than demanding Save As.
+            try:
+                doc = psd.load(path, settings=self.settings)
+            except Exception as exc:
+                raise self._unopenable(path, exc) from exc
+            self._adopt(doc, path=path)
+        elif ora.is_ora(path):
+            doc = ora.load(path, settings=self.settings)
+            self._adopt(doc, path=path)
         else:
             try:
                 doc = import_flat(path, settings=self.settings)
@@ -216,8 +228,17 @@ class Controller:
                 return target
             if guard.failed:
                 raise ValueError("addon %r failed to save %s" % (owner, target))
-        if target.lower().endswith(".ochre"):
+        from ..engine.fileio import ora, psd
+        lower = target.lower()
+        self.last_save_warnings = []
+        if lower.endswith(".ochre"):
             save(self.doc, target, selection=self.selection)
+            self.path = target
+        elif lower.endswith((".psd", ".psb")):
+            self.last_save_warnings = psd.save(self.doc, target, self.compositor)
+            self.path = target
+        elif lower.endswith(".ora"):
+            self.last_save_warnings = ora.save(self.doc, target, self.compositor)
             self.path = target
         else:
             export_flat(self.doc, target)

@@ -352,6 +352,7 @@ class MainWindow(QMainWindow):
         self._rebuild_recent()
         self._act(file_menu, "&Save", self.do_save, "Ctrl+S")
         self._act(file_menu, "Save &As...", self.do_save_as, "Ctrl+Shift+S")
+        self._act(file_menu, "&Export As...", self.do_export_as, "Ctrl+Alt+Shift+W")
         self._act(file_menu, "Export S&lices...", self.do_export_slices)
         file_menu.addSeparator()
         self._act(file_menu, "&Close", lambda: self.close_document(), "Ctrl+W")
@@ -762,7 +763,9 @@ class MainWindow(QMainWindow):
     def do_open(self):
         exts = " ".join("*.%s" % e for e in supported_extensions())
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open", "", "Images (*.ochre %s);;All files (*)" % exts)
+            self, "Open", "",
+            "Images (*.ochre *.psd *.psb *.ora %s);;Photoshop (*.psd *.psb);;"
+            "OpenRaster (*.ora);;All files (*)" % exts)
         if not path:
             return
         self.open_file(path)
@@ -774,12 +777,29 @@ class MainWindow(QMainWindow):
             self.ctl.save_path()
         except Exception as exc:                            # noqa: BLE001
             QMessageBox.warning(self, "Save failed", str(exc))
+        self._report_save_warnings()
         self._update_title()
+
+    def _report_save_warnings(self):
+        """Say what a PSD or ORA could not keep, instead of losing it quietly."""
+        warnings = getattr(self.ctl, "last_save_warnings", None)
+        if warnings:
+            QMessageBox.information(
+                self, "Saved, with changes",
+                "The file was saved, but this format cannot hold everything:\n\n  "
+                + "\n  ".join(warnings[:12])
+                + ("\n  ..." if len(warnings) > 12 else "")
+                + "\n\nSave as .ochre to keep it all.")
+
+    def do_export_as(self):
+        from .exportdialog import ExportDialog
+        ExportDialog(self.ctl, self).exec()
 
     def do_save_as(self):
         path, _ = QFileDialog.getSaveFileName(
             self, "Save As", "untitled.ochre",
-            "Ochre document (*.ochre);;PNG (*.png);;JPEG (*.jpg)")
+            "Ochre document (*.ochre);;Photoshop (*.psd);;OpenRaster (*.ora);;"
+            "PNG (*.png);;JPEG (*.jpg);;WebP (*.webp);;AVIF (*.avif);;TIFF (*.tif)")
         if not path:
             return
         try:
@@ -787,6 +807,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:                            # noqa: BLE001
             QMessageBox.warning(self, "Save failed", str(exc))
             return
+        self._report_save_warnings()
         if self.recent:
             self.recent.add(path)
             self._rebuild_recent()

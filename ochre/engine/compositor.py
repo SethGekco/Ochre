@@ -58,7 +58,9 @@ import numpy as np
 from . import accel
 from .blend import DEFAULT as DEFAULT_BLENDS
 from .geometry import Rect
-from .layer import ADJUSTMENT, FILL
+from .layer import ADJUSTMENT, FILL, PASS_THROUGH
+
+GROUP = "group"      # kind of a _Leaf standing for a whole isolated group
 
 _EMPTY = object()      # a clipping base with no pixels: its clipped layers show nothing
 
@@ -96,6 +98,7 @@ class Compositor:
         self._active_leaf = None
         self._cache_frame = None
         self._cache_active = None
+        self._frame_for_group = None
 
     def invalidate(self):
         """Drop the below/above caches. Cheap; they rebuild on next use."""
@@ -142,8 +145,15 @@ class Compositor:
                 continue
             opacity = (node.opacity * scale + 127) // 255
             if node.is_group:
-                out.extend(self._visible_leaves(node, frame, opacity))
-                base = None
+                if self._isolated(node):
+                    # One leaf for the whole group: its children composite
+                    # among themselves, then blend in with the group's mode.
+                    leaf = _Leaf(None, self.blends.opcode(node.blend), opacity, node)
+                    out.append(leaf)
+                    base = leaf
+                else:
+                    out.extend(self._visible_leaves(node, frame, opacity))
+                    base = None
                 continue
             kind = getattr(node, "kind", "raster")
             surface = None
@@ -164,14 +174,45 @@ class Compositor:
             out.append(leaf)
         return out
 
+    def _isolated(self, group):
+        """Does isolating this group change the picture?
+
+        Only a group NOT set to Pass Through is isolated -- and even then,
+        when the group blends Normal and every leaf inside is a plain Normal
+        layer, isolation and pass-through give the same pixels (source-over
+        is associative), so the fast flattened path is used.
+        """
+        if group.blend == PASS_THROUGH:
+            return False
+        if group.blend != "Normal":
+            return True
+        for n in group.walk(include_self=False):
+            if n.is_group:
+                if n.blend not in ("Normal", PASS_THROUGH):
+                    return True
+                continue
+            if (n.blend != "Normal" or getattr(n, "kind", "raster") == ADJUSTMENT
+                    or getattr(n, "clip", False)):
+                return True
+        return False
+
     def _source(self, leaf, r):
-        """The leaf's own pixels over r: stored, or generated for a fill layer."""
+        """The leaf's own pixels over r: stored, generated (a fill layer), or
+        composited (an isolated group)."""
         layer = leaf.layer
+        if layer.is_group:
+            frame = self._frame_for_group or self.doc.frame
+            out = np.zeros((r.h, r.w, 4), np.uint8)
+            for child in self._visible_leaves(layer, frame):
+                self._blend_leaf(out, child, r, frame)
+            return out
         if getattr(layer, "kind", "raster") == FILL:
             return fill_pixels(layer.params, r, self.doc.width, self.doc.height)
         return leaf.surface.view(r, "rgba")
 
     def _layer_mask(self, layer, r, frame):
+        if layer.is_group:
+            return None
         m = getattr(layer, "mask", None)
         if m is None or not getattr(layer, "mask_enabled", True):
             return None
@@ -245,10 +286,12 @@ class Compositor:
 
     def _blend_leaf(self, window, leaf, r, frame):
         """Composite one leaf over window (which covers document rect r)."""
+        self._frame_for_group = frame
         layer = leaf.layer
         mask = self._coverage(leaf, r, frame)
-        styled = self._style_images(leaf, frame) if leaf.surface is not None or \
-            getattr(layer, "kind", "raster") == FILL else None
+        styled = None if layer.is_group else (
+            self._style_images(leaf, frame) if leaf.surface is not None or
+            getattr(layer, "kind", "raster") == FILL else None)
         sub = None
         if styled is not None:
             srect = styled[0].intersect(r)
@@ -331,6 +374,13 @@ class Compositor:
                 split = i
                 break
 
+        if split is None and self.doc.layer(active_id) is not None \
+                and not self.doc.layer(active_id).is_group:
+            # The active layer is inside an isolated group, which composites
+            # as one: nothing can be cached around it. Every composite takes
+            # the full walk -- correct, just slower for that case.
+            self.invalidate()
+            return self
         lower = layers if split is None else layers[:split]
         upper = [] if split is None else layers[split + 1:]
         active = None if split is None else layers[split]

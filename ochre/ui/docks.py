@@ -179,6 +179,9 @@ class LayersDock(QDockWidget):
         self.blend = QComboBox()
         from ..engine.blend import BlendRegistry
         self._blends = BlendRegistry(controller.db)
+        # Pass Through first: offered (enabled) only for groups, where it is
+        # the default -- a group that just organises layers.
+        self.blend.addItem("Pass Through", "PassThrough")
         for mode in self._blends.ordered():
             self.blend.addItem(mode.label, mode.name)
         self.blend.currentIndexChanged.connect(self._blend_changed)
@@ -259,6 +262,9 @@ class LayersDock(QDockWidget):
         active = self.ctl.active_layer
         if active is not None:
             self.opacity.setValue(active.opacity)
+            item = self.blend.model().item(0)
+            if item is not None:
+                item.setEnabled(bool(active.is_group))
             index = self.blend.findData(active.blend)
             self.blend.setCurrentIndex(index if index >= 0 else 0)
         self._syncing = False
@@ -297,6 +303,8 @@ class LayersDock(QDockWidget):
         if self._syncing or self.ctl.active_layer is None:
             return
         name = self.blend.currentData()
+        if name == "PassThrough" and not self.ctl.active_layer.is_group:
+            name = "Normal"
         if name:
             self.ctl.set_layer_property(self.ctl.active_layer, "blend", name)
 

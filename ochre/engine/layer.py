@@ -70,6 +70,7 @@ class LayerNode:
 
 
 MASK_SUFFIX = "~mask"
+PASS_THROUGH = "PassThrough"
 
 # What a leaf layer IS. A raster layer holds pixels; an adjustment layer
 # holds an adjustment (effect name + parameters) applied to everything below
@@ -151,6 +152,13 @@ class LayerGroup(LayerNode):
     """A branch. Owns an ordered list of children, bottom-first."""
 
     def __init__(self, name="", children=(), **kw):
+        # Pass Through by default, as in Photoshop: the group is only an
+        # organiser and its layers blend with everything beneath it. Any
+        # other mode ISOLATES the group -- its layers composite among
+        # themselves first, and the result blends in with the group's mode
+        # and opacity -- which is what GIMP does and what a PSD group marked
+        # anything but "pass" means.
+        kw.setdefault("blend", PASS_THROUGH)
         super().__init__(name=name, **kw)
         self.children = []
         for child in children:

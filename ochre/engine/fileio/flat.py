@@ -27,6 +27,14 @@ DEFAULTS = {
     "GIF": {"alpha": True, "extensions": ["gif"], "frames": True},
     "WEBP": {"alpha": True, "extensions": ["webp"], "frames": True},
     "TIFF": {"alpha": True, "extensions": ["tif", "tiff"]},
+    "AVIF": {"alpha": True, "extensions": ["avif"], "quality": 80},
+    "QOI": {"alpha": True, "extensions": ["qoi"]},
+    "TGA": {"alpha": True, "extensions": ["tga"]},
+    "ICO": {"alpha": True, "extensions": ["ico"]},
+    "JPEG2000": {"alpha": True, "extensions": ["jp2", "j2k"], "quality": 90},
+    "PPM": {"alpha": False, "extensions": ["ppm", "pnm"]},
+    "PCX": {"alpha": False, "extensions": ["pcx"]},
+    "SGI": {"alpha": True, "extensions": ["sgi", "rgb"]},
 }
 
 MATTE = (255, 255, 255)
@@ -181,10 +189,62 @@ def import_indexed(path, settings=None):
 
 # ---- export -------------------------------------------------------------
 
-def export_flat(doc, path, fmt=None, table=None, frame=None, matte=None):
-    """Composite the document and write it as a flat image."""
+def _prepare(doc, name, spec, frame=None, matte=None, scale=1.0, flat=None):
+    """The merged image, scaled and matted as the format needs, as a PIL Image."""
     from ..compositor import Compositor
+    if flat is None:
+        flat = Compositor(doc).composite(frame=frame)
+    if flat is None:
+        raise ValueError("nothing to export")
+    img_rgba = Image.fromarray(flat, "RGBA")
+    if scale and abs(float(scale) - 1.0) > 1e-6:
+        w = max(1, int(round(doc.width * float(scale))))
+        h = max(1, int(round(doc.height * float(scale))))
+        # Resampled premultiplied, so transparent edges do not darken.
+        from ..transform import resample_rgba
+        img_rgba = Image.fromarray(resample_rgba(flat, w, h, "lanczos" if scale < 1 else "bicubic"),
+                                   "RGBA")
+    if not spec.get("alpha", True):
+        arr = flatten_onto(np.asarray(img_rgba), matte or spec.get("matte", MATTE))
+        return Image.fromarray(arr[..., :3], "RGB")
+    return img_rgba
 
+
+def _save_kwargs(name, spec, options):
+    kw = {}
+    quality = options.get("quality", spec.get("quality"))
+    if name in ("JPEG", "WEBP", "AVIF") and quality is not None:
+        kw["quality"] = int(quality)
+    if name == "WEBP" and options.get("lossless"):
+        kw["lossless"] = True
+    if name == "PNG":
+        kw["optimize"] = bool(options.get("optimize", False))
+        kw["compress_level"] = int(options.get("compress_level", 6))
+    if name == "JPEG":
+        kw["optimize"] = True
+        kw["progressive"] = bool(options.get("progressive", False))
+    if name == "ICO":
+        kw["sizes"] = [(s, s) for s in (16, 24, 32, 48, 64, 128, 256)]
+    return kw
+
+
+def encode_flat(doc, fmt, options=None, table=None, flat=None):
+    """The exported file's bytes, without writing it -- what Export As uses
+    to show the real size before you commit to a quality."""
+    import io
+    table = table or DEFAULT_TABLE
+    name = fmt.upper()
+    spec = table.formats.get(name, {})
+    options = options or {}
+    img = _prepare(doc, name, spec, options.get("frame"), options.get("matte"),
+                   options.get("scale", 1.0), flat)
+    buf = io.BytesIO()
+    img.save(buf, format=name, **_save_kwargs(name, spec, options))
+    return buf.getvalue()
+
+
+def export_flat(doc, path, fmt=None, table=None, frame=None, matte=None, options=None):
+    """Composite the document and write it as a flat image."""
     table = table or DEFAULT_TABLE
     ext = os.path.splitext(path)[1]
     name, spec = table.for_extension(ext)
@@ -193,21 +253,10 @@ def export_flat(doc, path, fmt=None, table=None, frame=None, matte=None):
         spec = table.formats.get(name, spec)
     if not name:
         raise ValueError("no known format for %r" % (ext or path))
-
-    flat = Compositor(doc).composite(frame=frame)
-    if flat is None:
-        raise ValueError("nothing to export")
-
-    if not spec.get("alpha", True):
-        flat = flatten_onto(flat, matte or spec.get("matte", MATTE))
-        img = Image.fromarray(flat[..., :3], "RGB")
-    else:
-        img = Image.fromarray(flat, "RGBA")
-
-    kwargs = {}
-    if "quality" in spec:
-        kwargs["quality"] = spec["quality"]
-    img.save(path, format=name, **kwargs)
+    options = dict(options or {})
+    img = _prepare(doc, name, spec, frame, matte or options.get("matte"),
+                   options.get("scale", 1.0))
+    img.save(path, format=name, **_save_kwargs(name, spec, options))
     return path
 
 
