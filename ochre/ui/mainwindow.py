@@ -566,6 +566,7 @@ class MainWindow(QMainWindow):
         self._act(file_menu, "Save &As...", self.do_save_as, "Ctrl+Shift+S")
         self._act(file_menu, "&Export As...", self.do_export_as, "Ctrl+Alt+Shift+W")
         self._act(file_menu, "Export S&lices...", self.do_export_slices)
+        self._act(file_menu, "Export Art&boards...", self.do_export_artboards)
         automate = file_menu.addMenu("A&utomate")
         self._act(automate, "&Batch...", self.do_batch)
         self._act(automate, "Merge to &HDR...", self.do_merge_hdr)
@@ -854,6 +855,11 @@ class MainWindow(QMainWindow):
             fx.ctl.set_layer_styles, fx.ctl.active_layer, {}))
         menu.addAction("Edit Adjustment / Fill...", self.do_edit_layer_content)
         menu.addAction("&Rasterize Layer", lambda: fx._layer_fx(fx.ctl.rasterize_layer))
+        boards = menu.addMenu("Artboards and &Frames")
+        boards.addAction("&Artboard from Layer", lambda: fx._layer_fx(
+            fx.ctl.region_from_layer, "artboard"))
+        boards.addAction("Convert to &Frame", lambda: fx._layer_fx(fx.ctl.region_from_layer, "frame"))
+        boards.addAction("Artboard &Background...", self.do_artboard_background)
         smart = menu.addMenu("Smart O&bject")
         smart.addAction("&Convert to Smart Object", lambda: fx._layer_fx(fx.ctl.convert_to_smart))
         smart.addAction("&Edit Contents", self.do_edit_smart_contents)
@@ -861,6 +867,48 @@ class MainWindow(QMainWindow):
         smart.addAction("&Replace Contents...", self.do_replace_smart_contents)
         smart.addAction("Clear Smart &Filters", lambda: fx._layer_fx(fx.ctl.set_smart_filters, []))
         return menu
+
+    def _active_region(self, kind=None):
+        node = self.ctl.active_layer
+        while node is not None:
+            reg = getattr(node, "region", None)
+            if node.is_group and reg and (kind is None or reg["type"] == kind):
+                return node
+            node = node.parent
+        return None
+
+    def do_artboard_background(self):
+        group = self._active_region("artboard")
+        if group is None:
+            QMessageBox.information(self, "Artboard", "Select an artboard, or a layer on one.")
+            return
+        from PySide6.QtWidgets import QInputDialog
+        choice, ok = QInputDialog.getItem(self, "Artboard Background", "Background:",
+                                          ["White", "Black", "Transparent", "Other..."], 0, False)
+        if not ok:
+            return
+        colours = {"White": (255, 255, 255, 255), "Black": (0, 0, 0, 255), "Transparent": None}
+        if choice == "Other...":
+            from PySide6.QtGui import QColor
+            from PySide6.QtWidgets import QColorDialog
+            c = QColorDialog.getColor(QColor(255, 255, 255), self, "Artboard Background")
+            if not c.isValid():
+                return
+            colour = (c.red(), c.green(), c.blue(), 255)
+        else:
+            colour = colours[choice]
+        self._layer_fx(self.ctl.set_region, group, bg=None if colour is None else list(colour))
+
+    def do_export_artboards(self):
+        from ..engine import regions
+        if not regions.groups(self.ctl.doc, "artboard"):
+            QMessageBox.information(self, "Export Artboards", "This image has no artboards.")
+            return
+        directory = QFileDialog.getExistingDirectory(self, "Export Artboards to")
+        if not directory:
+            return
+        paths = self.ctl.export_artboards(directory)
+        self.statusBar().showMessage("Exported %d artboard(s) to %s" % (len(paths), directory), 6000)
 
     def do_edit_smart_contents(self):
         if self.ctl.edit_smart_contents() is None:

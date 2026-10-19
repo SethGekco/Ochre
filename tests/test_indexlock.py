@@ -240,7 +240,8 @@ NON_PAINTING = {"eyedropper", "select_rect", "select_ellipse", "lasso",
                 "type_mask", "vertical_type_mask",
                 "add_anchor", "delete_anchor", "convert_point",
                 # Marks and measurements (test_utility.py).
-                "measure", "color_sampler", "count", "note", "slice", "slice_select"}
+                "measure", "color_sampler", "count", "note", "slice", "slice_select",
+                "artboard", "frame"}
 
 
 def main():

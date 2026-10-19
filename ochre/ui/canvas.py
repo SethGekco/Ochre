@@ -321,6 +321,7 @@ class CanvasView(QAbstractScrollArea):
         self._draw_selection(painter, target)
         if self.show_guides or self.guide_preview is not None:
             self._draw_guides(painter)
+        self._draw_regions(painter)
         if self.show_extras:
             self._draw_marks(painter)
         self._draw_footprint(painter)
@@ -508,6 +509,46 @@ class CanvasView(QAbstractScrollArea):
             painter.setPen(pen)
             a, b = ((0, pos), (doc.width, pos)) if o == "h" else ((pos, 0), (pos, doc.height))
             painter.drawLine(QPointF(*w2d(*a)), QPointF(*w2d(*b)))
+        painter.restore()
+
+    def _draw_regions(self, painter):
+        """Artboard edges with their names, and frame outlines (an empty frame
+        shows Photoshop's grey cross) -- drawn whatever tool is in hand."""
+        from PySide6.QtCore import QPointF
+        from ..engine import regions
+        groups = regions.groups(self.ctl.doc)
+        if not groups:
+            return
+        w2d = self.view.doc_to_widget
+        active = self.ctl.active_layer
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        for g in groups:
+            if not g.visible:
+                continue
+            x, y, w, h = g.region["rect"]
+            pts = [QPointF(*w2d(px, py)) for px, py in ((x, y), (x + w, y), (x + w, y + h), (x, y + h))]
+            chosen = active is not None and (active is g or regions.frame_of(active) is g
+                                             or g in active.ancestors())
+            colour = QColor(40, 140, 255) if chosen else QColor(150, 150, 150)
+            painter.setBrush(Qt.NoBrush)
+            if g.region["type"] == regions.ARTBOARD:
+                painter.setPen(QPen(colour, 1.0))
+                painter.drawPolygon(pts)
+                painter.setPen(QColor(110, 110, 110) if not chosen else colour)
+                painter.drawText(QPointF(pts[0].x(), pts[0].y() - 4), g.name)
+                continue
+            pen = QPen(colour, 1.0)
+            pen.setDashPattern([4.0, 3.0])
+            painter.setPen(pen)
+            if g.region["shape"] == "ellipse":
+                painter.drawEllipse(QRectF(pts[0], pts[2]))
+            else:
+                painter.drawPolygon(pts)
+            if not g.leaves():
+                painter.setPen(QPen(QColor(160, 160, 160), 1.0))
+                painter.drawLine(pts[0], pts[2])
+                painter.drawLine(pts[1], pts[3])
         painter.restore()
 
     def _draw_marks(self, painter):

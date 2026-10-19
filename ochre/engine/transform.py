@@ -142,6 +142,9 @@ def _map_paths(doc, fn):
     for path in getattr(doc, "paths", ()):
         path.map_points(fn)
     _map_marks(doc, fn)
+    from . import regions
+    for group in regions.groups(doc):
+        group.region = regions.mapped(group.region, fn)
 
 
 def _map_smart(doc, hm):

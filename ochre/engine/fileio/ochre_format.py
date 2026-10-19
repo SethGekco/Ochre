@@ -115,6 +115,9 @@ def save(doc, path, selection=None, thumbnail_max=256):
             add("Opacity = %d" % node.opacity)
             add("Visible = %s" % ("1" if node.visible else "0"))
             add("BlendMode = %s" % _esc(node.blend))
+            if node.is_group and getattr(node, "region", None):
+                from ..regions import encode as encode_region
+                add("Region = %s" % _esc(encode_region(node.region)))
             if not node.is_group:
                 add("Planes = %s" % ",".join(node.planes))
                 add("Authoritative = %s" % ",".join(node.authoritative))
@@ -360,6 +363,9 @@ def load(path, settings=None):
             node.opacity = max(0, min(255, db.getint(section, "Opacity", 255)))
             node.visible = db.getbool(section, "Visible", True)
             node.blend = db.get(section, "BlendMode", "Normal")
+            if is_group and db.get(section, "Region"):
+                from ..regions import decode as decode_region
+                node.region = decode_region(db.get(section, "Region"))
             node.meta = _meta_of(db, section)
             if not is_group:
                 from ..layer import LayerMask

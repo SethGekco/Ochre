@@ -1066,10 +1066,18 @@ class Controller:
         else:
             rgba = np.asarray(path_or_rgba, np.uint8)
         sh, sw = rgba.shape[:2]
-        layer = self.doc.add_layer(name or "Placed")
+        # Placed while a frame (or a layer in one) is active, the image goes
+        # INTO the frame and is scaled to fill it -- Photoshop's Frame tool.
+        from ..engine import regions
+        frame = None if self.active_layer is None else regions.frame_of(self.active_layer)
+        if frame is not None:
+            layer = self.doc.add_layer(name or "Placed", parent=frame)
+            matrix = regions.cover_matrix(sw, sh, frame.region)
+        else:
+            layer = self.doc.add_layer(name or "Placed")
+            matrix = smartobject.fit_matrix(sw, sh, self.doc.width, self.doc.height)
         layer.kind = SMART
-        layer.params = {"matrix": smartobject.fit_matrix(sw, sh, self.doc.width, self.doc.height),
-                        "src_w": sw, "src_h": sh, "filters": []}
+        layer.params = {"matrix": matrix, "src_w": sw, "src_h": sh, "filters": []}
         # The source keeps the image's own size, even when that is larger
         # than the canvas: that is what makes scaling it up again lossless.
         layer.smart_source = SmartSource(layer, (sw, sh))
@@ -2265,10 +2273,33 @@ class Controller:
         req = getattr(self.tool, "request", None)
         if req is not None:
             self.tool.request = None
-            self.emit("tool.request", request=req)
+            if not self._handle_tool_request(req):
+                self.emit("tool.request", request=req)
         self.emit("marks.changed")
         self.emit("history.changed")
         return result
+
+    def _handle_tool_request(self, req):
+        """Requests the controller can carry out itself (no dialog needed),
+        so the tools that make them stay headlessly testable."""
+        kind, arg = req
+        if kind == "add_region":
+            adopt = self.doc.layer(arg.pop("adopt")) if arg.get("adopt") else None
+            arg.pop("adopt", None)
+            self.add_region(adopt=adopt, **arg)
+            return True
+        if kind == "move_region":
+            group = self.doc.layer(arg[0])
+            if group is not None:
+                self.move_region(group, arg[1], arg[2])
+            return True
+        if kind == "select_layer":
+            node = self.doc.layer(arg)
+            if node is not None:
+                self.set_active_layer(node)
+                self._after_structure_change()
+            return True
+        return False
 
     def _record_selection_change(self, label=None):
         """Push the selection as it was before the tool, if the tool changed it."""
@@ -2622,6 +2653,149 @@ class Controller:
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name) or "slice"
             target = os.path.join(directory, "%s.%s" % (safe, fmt))
             Image.fromarray(np.ascontiguousarray(image[y0:y1, x0:x1])).save(target)
+            out.append(target)
+        return out
+
+    # ---- artboards and frames ------------------------------------------------------
+
+    def add_region(self, kind, rect, shape="rect", background=None, name=None, adopt=None):
+        """A new artboard or frame (engine/regions.py) -- one undo step.
+
+        An artboard goes on top of the stack with an empty layer inside, ready
+        to paint. A frame goes above the active layer; with `adopt`, that
+        layer moves into it and is cropped to the frame's shape (Photoshop:
+        drawing a frame over an image layer)."""
+        from ..engine import regions
+        from ..engine.commands import StructureDelta
+        x, y, w, h = (int(round(v)) for v in rect)
+        if w < 1 or h < 1:
+            return None
+        if adopt is not None and (adopt.is_group or regions.frame_of(adopt) is not None):
+            adopt = None
+        parent, index = None, None
+        if kind == regions.ARTBOARD:
+            n = len(regions.groups(self.doc, regions.ARTBOARD)) + 1
+            name = name or "Artboard %d" % n
+            label = "New Artboard"
+        else:
+            name = name or "Frame"
+            label = "New Frame"
+            anchor = adopt or self.active_layer
+            if anchor is not None and anchor.parent is not None:
+                parent = anchor.parent
+                index = parent.children.index(anchor) + 1
+        self.history.begin_group()
+        group = self.doc.add_group(name, parent=parent, index=index)
+        group.region = regions.make(kind, (x, y, w, h), shape, background)
+        self.history.push(StructureDelta.insertion(self.doc, group, label), label)
+        active = group
+        if adopt is not None:
+            self.move_layer(adopt, group, 0)
+            active = adopt
+        elif kind == regions.ARTBOARD:
+            active = self.add_layer(parent=group)
+        self.history.end_group(label)
+        self.set_active_layer(active)
+        self._after_structure_change()
+        return group
+
+    def region_from_layer(self, kind, layer=None, shape="rect"):
+        """Layer > Artboard from Layer / Convert to Frame: a region the size
+        of the layer's content, with the layer moved inside."""
+        from ..engine import regions
+        target = layer or self.active_layer
+        if target is None or target.is_group:
+            return None
+        if getattr(target, "kind", "raster") == "smart":
+            img = self.compositor._smart_image(target)
+            import numpy as _np
+            ys, xs = _np.nonzero(img[..., 3])
+            if not ys.size:
+                return None
+            box = (int(xs.min()), int(ys.min()), int(xs.max()) + 1 - int(xs.min()),
+                   int(ys.max()) + 1 - int(ys.min()))
+        else:
+            cell = self.doc.cells.get((target.id, self.doc.frame.id))
+            b = None if cell is None else cell.tight_bbox()
+            if b is None:
+                return None
+            box = (b.x, b.y, b.w, b.h)
+        bg = (255, 255, 255, 255) if kind == regions.ARTBOARD else None
+        return self.add_region(kind, box, shape, background=None if kind == regions.FRAME else bg,
+                               adopt=target)
+
+    def move_region(self, group, dx, dy):
+        """Move an artboard or frame with everything in it. One undo step."""
+        from ..engine import regions
+        dx, dy = int(round(dx)), int(round(dy))
+        if not getattr(group, "region", None) or (dx == 0 and dy == 0):
+            return False
+        label = "Move %s" % ("Artboard" if group.region["type"] == regions.ARTBOARD else "Frame")
+        self.history.begin_group()
+        self.set_layer_property(group, "region", regions.translated(group.region, dx, dy))
+        for leaf in group.leaves():
+            kind = getattr(leaf, "kind", "raster")
+            if kind == "text":
+                self.set_layer_params(leaf, {"x": float(leaf.params.get("x", 0)) + dx,
+                                             "y": float(leaf.params.get("y", 0)) + dy})
+            elif kind == "smart":
+                m = list(leaf.params["matrix"])
+                m[2] += dx
+                m[5] += dy
+                self.set_layer_params(leaf, {"matrix": m})
+            elif kind == "raster":
+                self.offset_layer(dx, dy, wrap=False, layer=leaf)
+        self.history.end_group(label)
+        self._after_structure_change()
+        return True
+
+    def set_region(self, group, **changes):
+        """Change an artboard's or frame's rect / shape / background."""
+        from ..engine import regions
+        if not getattr(group, "region", None):
+            return False
+        region = dict(group.region)
+        if "rect" in changes:
+            region = regions.make(region["type"], changes.pop("rect"), region["shape"], region["bg"])
+        region.update(changes)
+        self.set_layer_property(group, "region", region)
+        return True
+
+    def render_region(self, group):
+        """An artboard's (or frame's) own picture, cut to its rectangle: what
+        Export Artboards writes. Layers outside it -- on the pasteboard, or on
+        other artboards -- are not in it."""
+        from ..engine.compositor import _Leaf
+        x, y, w, h = group.region["rect"]
+        r = Rect(x, y, w, h).clipped_to(self.doc.width, self.doc.height)
+        if r is None:
+            return None
+        self.compositor._frame_for_group = self.doc.frame
+        leaf = _Leaf(None, self.blends.opcode("Normal"), 255, group)
+        return self.compositor._source(leaf, r)
+
+    def export_artboards(self, directory, fmt="png"):
+        """File > Export > Artboards to Files: one file per artboard."""
+        from PIL import Image
+        from ..engine import regions
+        os.makedirs(directory, exist_ok=True)
+        out, used = [], set()
+        for i, group in enumerate(regions.groups(self.doc, regions.ARTBOARD)):
+            img = self.render_region(group)
+            if img is None:
+                continue
+            base = regions.safe_name(group.name, "artboard_%02d" % (i + 1))
+            name, n = base, 2
+            while name in used:
+                name, n = "%s_%d" % (base, n), n + 1
+            used.add(name)
+            target = os.path.join(directory, "%s.%s" % (name, fmt))
+            pic = Image.fromarray(np.ascontiguousarray(img), "RGBA")
+            if fmt.lower() in ("jpg", "jpeg", "bmp"):
+                flat = Image.new("RGB", pic.size, (255, 255, 255))
+                flat.paste(pic, mask=pic.split()[3])
+                pic = flat
+            pic.save(target)
             out.append(target)
         return out
 

@@ -321,6 +321,19 @@ def i_slice(g):
     g.rect(3, 3, 8, 8, dash=True, w=1.0)
 
 
+def i_artboard(g):
+    g.rect(6, 6, 15, 15, fill=QColor(255, 255, 255), w=1.2)
+    g.line((3, 6), (21, 6), w=1.0)
+    g.line((6, 3), (6, 21), w=1.0)
+    g.rect(9, 9, 9, 4, fill=ACCENT, w=0.8)
+
+
+def i_frame(g):
+    g.rect(4, 4, 16, 16, w=1.4)
+    g.line((4, 4), (20, 20), w=1.0)
+    g.line((20, 4), (4, 20), w=1.0)
+
+
 def i_transform(g):
     g.rect(5, 5, 14, 14, w=1.4)
     for x, y in ((5, 5), (19, 5), (5, 19), (19, 19), (12, 5), (12, 19), (5, 12), (19, 12)):

@@ -212,6 +212,9 @@ class LayerGroup(LayerNode):
         kw.setdefault("blend", PASS_THROUGH)
         super().__init__(name=name, **kw)
         self.children = []
+        # An artboard or a frame: the group's picture cut to a region
+        # (engine/regions.py), or None for an ordinary group.
+        self.region = None
         for child in children:
             self.add(child)
 

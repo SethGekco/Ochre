@@ -190,6 +190,8 @@ class Compositor:
         layer, isolation and pass-through give the same pixels (source-over
         is associative), so the fast flattened path is used.
         """
+        if getattr(group, "region", None):
+            return True              # an artboard or frame: cut to its region
         if group.blend == PASS_THROUGH:
             return False
         if group.blend != "Normal":
@@ -268,7 +270,15 @@ class Compositor:
         if layer.is_group:
             frame = self._frame_for_group or self.doc.frame
             out = np.zeros((r.h, r.w, 4), np.uint8)
-            return self._run(out, self._visible_leaves(layer, frame), r, frame, top=False)
+            region = getattr(layer, "region", None)
+            if region and region.get("bg"):
+                out[...] = region["bg"]            # an artboard's background
+            self._run(out, self._visible_leaves(layer, frame), r, frame, top=False)
+            if region:
+                from . import regions
+                cov = regions.coverage(region, r)
+                out[..., 3] = np.rint(out[..., 3] * cov).astype(np.uint8)
+            return out
         kind = getattr(layer, "kind", "raster")
         if kind == FILL:
             return fill_pixels(layer.params, r, self.doc.width, self.doc.height)

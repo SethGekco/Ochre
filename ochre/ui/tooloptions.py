@@ -98,6 +98,19 @@ class ToolOptionsBar(QToolBar):
 
     # ---- building ----------------------------------------------------------
 
+    def _values(self, name):
+        """What the tool in hand is really using: remembered values, then
+        anything set on the live instance (set_tool's keyword options, from
+        a script or a test) -- so the bar never shows one thing while the
+        tool does another."""
+        values = dict(self.ctl.tool_option_values(name))
+        tool = self.ctl.tool
+        if tool is not None and self.ctl.tool_name == name:
+            live = getattr(tool, "options", None) or {}
+            values.update({k: v for k, v in live.items() if k in values or k in
+                           {o.name for o in self.ctl.tools.spec(name)}})
+        return values
+
     def rebuild(self, **_):
         self.clear()
         self.widgets = {}
@@ -117,7 +130,7 @@ class ToolOptionsBar(QToolBar):
         self.addWidget(head)
         self.addSeparator()
 
-        values = self.ctl.tool_option_values(name)
+        values = self._values(name)
         for opt in tools.spec(name):
             value = values.get(opt.name, opt.default)
             widget = self._make(opt, value)
@@ -206,7 +219,7 @@ class ToolOptionsBar(QToolBar):
             return
         self._syncing = True
         try:
-            values = self.ctl.tool_option_values(self.ctl.tool_name)
+            values = self._values(self.ctl.tool_name)
             for opt_name, (opt, w) in self.widgets.items():
                 if key is not None and opt_name != key:
                     continue

@@ -472,7 +472,7 @@ class GeometryDelta(Command):
     """
 
     __slots__ = ("label", "width", "height", "_cells", "_selection",
-                 "_sel_blob", "_sel_shape", "_paths", "_marks", "_params")
+                 "_sel_blob", "_sel_shape", "_paths", "_marks", "_params", "_regions")
 
     def __init__(self, width, height, cells, selection=None, label="Transform",
                  paths=None):
@@ -482,6 +482,7 @@ class GeometryDelta(Command):
         self._paths = paths
         self._marks = None
         self._params = None       # text layers' params (position and size move too)
+        self._regions = None      # artboards' and frames' regions
         self.width = width
         self.height = height
         self._cells = cells             # {(layer_id, frame_id): (PixelDelta|None, bbox)}
@@ -509,6 +510,8 @@ class GeometryDelta(Command):
         out._marks = {a: list(getattr(doc, a, [])) for a in MARKS}
         out._params = {l.id: dict(l.params) for l in doc.layers()
                        if getattr(l, "kind", "raster") in ("text", "smart")}
+        out._regions = {g.id: dict(g.region) for g in doc.root.walk()
+                        if g.is_group and getattr(g, "region", None)}
         return out
 
     def undo(self, doc):
@@ -546,6 +549,10 @@ class GeometryDelta(Command):
             node = doc.layer(lid)
             if node is not None:
                 node.params = dict(params)
+        for gid, region in (self._regions or {}).items():
+            node = doc.layer(gid)
+            if node is not None:
+                node.region = dict(region)
         return opposite, doc.bounds
 
     def nbytes(self):

@@ -32,6 +32,7 @@ from .inpaint import (ContentAwareMoveTool, PatchTool, RemoveTool,
 from .pathtools import (AddAnchorTool, ConvertPointTool, CurvaturePenTool,
                         DeleteAnchorTool, DirectSelectTool, FreeformPenTool,
                         PathSelectTool, PenTool)
+from .boards import ArtboardTool, FrameTool
 from .utility import (ColorSamplerTool, CountTool, MeasureTool, NoteTool,
                       SliceSelectTool, SliceTool)
 from .retouch import (AirbrushTool, ArtHistoryBrushTool, BackgroundEraserTool, BlurBrushTool, BurnTool,
@@ -60,7 +61,7 @@ BUILTIN = {
         PenTool, CurvaturePenTool, FreeformPenTool, PathSelectTool, DirectSelectTool,
         CurveTool, MeasureTool, ColorSamplerTool, CountTool, NoteTool, SliceTool,
         SliceSelectTool, AddAnchorTool, DeleteAnchorTool, ConvertPointTool, PuppetWarpTool,
-        ArtHistoryBrushTool,
+        ArtHistoryBrushTool, ArtboardTool, FrameTool,
     )
 }
 

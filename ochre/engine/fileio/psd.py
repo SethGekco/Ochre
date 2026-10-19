@@ -495,6 +495,9 @@ def save(doc, path, compositor=None):
 
     def emit(group):
         for node in group.children:
+            if node.is_group and getattr(node, "region", None):
+                warnings.append("%s %r is saved as a plain group (its edges are not kept)"
+                                % (node.region.get("type", "region"), node.name))
             if node.is_group:
                 empty = np.zeros((0, 0), np.uint8)
                 chans = [(-1, empty), (0, empty), (1, empty), (2, empty)]
