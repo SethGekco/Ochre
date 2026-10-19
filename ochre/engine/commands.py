@@ -827,3 +827,22 @@ class SnapshotDelta(Command):
 
     def nbytes(self):
         return sum(c.nbytes() for c in self.state.cells.values())
+
+
+class DocMetaDelta(Command):
+    """The document's meta dict as it was (e.g. its colour profile tag)."""
+
+    __slots__ = ("label", "meta")
+
+    def __init__(self, doc, label="Document"):
+        self.label = label
+        self.meta = dict(doc.meta)
+
+    def undo(self, doc):
+        opposite = DocMetaDelta(doc, self.label)
+        doc.meta.clear()
+        doc.meta.update(self.meta)
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return 64 + sum(len(str(v)) for v in self.meta.values())

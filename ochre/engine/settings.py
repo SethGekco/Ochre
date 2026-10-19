@@ -58,6 +58,11 @@ DEFAULTS = {
         "TileSize": 256,           # small tiles are GIL-bound and scale negatively
         "MaxThreads": 0,           # 0 = os.cpu_count()
     },
+    "Color": {
+        # The monitor's ICC profile (empty = sRGB), and how proofs render.
+        "MonitorProfile": "",
+        "ProofIntent": "perceptual",   # perceptual | relative | saturation | absolute
+    },
     "Planes": {
         # Plane names the core recognises. Addons append to this list, so a
         # typo'd plane name is an error rather than a silently orphaned array.

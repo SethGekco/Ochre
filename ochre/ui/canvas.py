@@ -152,6 +152,7 @@ class CanvasView(QAbstractScrollArea):
             self.surface.detach()
             return
         self.surface.attach(self.ctl.display)
+        self._cm_vt = None                       # rebuild the colour-managed view
         previous = self._bound_doc
         if previous is not None and previous is not doc:
             self._views[id(previous)] = (previous, self.view.copy(), self._needs_fit)
@@ -189,6 +190,8 @@ class CanvasView(QAbstractScrollArea):
     def refresh(self):
         """Composite what is pending and schedule a repaint of those regions."""
         rects = self.ctl.flush()
+        if self._cm_update(rects or []):
+            self.viewport().update()            # the colour view changed wholesale
         if not rects:
             return
         for rect in rects:
@@ -312,7 +315,7 @@ class CanvasView(QAbstractScrollArea):
             # interpolation prevents aliasing when minifying.
             painter.setRenderHint(QPainter.SmoothPixmapTransform,
                                   not self.view.use_nearest)
-            painter.drawImage(target, self._channel_image() or self.surface.image)
+            painter.drawImage(target, self._channel_image() or self._cm_image() or self.surface.image)
 
             if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
                 self._draw_pixel_grid(painter, event.rect(), target)
@@ -647,6 +650,46 @@ class CanvasView(QAbstractScrollArea):
             return False                      # View > Lock Guides
         return getattr(self.ctl, "tool_name", "") in ("move_layer", "move_pixels", "move_selection")
 
+    # ---- colour management -----------------------------------------------------
+
+    _cm_vt = None
+    _cm_buf = None
+
+    def _cm_update(self, rects):
+        """Keep the colour-managed copy of the image current: the document's
+        profile shown through the monitor's, and through the proof profile
+        when Proof Colors is on. Only dirty rects are re-transformed; a new
+        transform (or document) redoes the lot. True when it was redone."""
+        arr = self.surface.array
+        vt = self.ctl.view_transform() if getattr(self.ctl, "doc", None) is not None else None
+        if vt is None or arr is None:
+            changed = self._cm_buf is not None
+            self._cm_buf = None
+            self._cm_vt = None
+            return changed
+        if vt is not self._cm_vt or self._cm_buf is None or self._cm_buf.shape != arr.shape:
+            self._cm_buf = vt.apply(arr)
+            self._cm_vt = vt
+            return True
+        h, w = arr.shape[:2]
+        for r in rects:
+            rr = r.clipped_to(w, h)
+            if rr is not None:
+                self._cm_buf[rr.slice()] = vt.apply(arr[rr.slice()])
+        return False
+
+    def colour_changed(self, **_):
+        """Proof Colors / Gamut Warning / a profile changed: redo the view."""
+        self._cm_vt = None
+        self._cm_update([])
+        self.viewport().update()
+
+    def _cm_image(self):
+        buf = self._cm_buf
+        if buf is None:
+            return None
+        return QImage(buf.data, buf.shape[1], buf.shape[0], buf.shape[1] * 4, QImage.Format_RGBA8888)
+
     def _channel_image(self):
         """One channel of the image as grey, while the Channels panel views it."""
         c = self.view_channel
@@ -873,7 +916,8 @@ class CanvasView(QAbstractScrollArea):
         painter.drawPolygon(corners)
         painter.setTransform(self._view_transform())
         painter.setRenderHint(QPainter.SmoothPixmapTransform, not self.view.use_nearest)
-        painter.drawImage(QRectF(0, 0, w, h), self.surface.image, QRectF(0, 0, w, h))
+        painter.drawImage(QRectF(0, 0, w, h), self._cm_image() or self.surface.image,
+                          QRectF(0, 0, w, h))
         if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
             pen = QPen(QColor(*self.cfg.get("Canvas", "GridColour")))
             pen.setCosmetic(True)

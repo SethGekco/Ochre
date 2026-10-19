@@ -156,6 +156,7 @@ class MainWindow(QMainWindow):
         bus.subscribe("comps.changed", lambda **k: self.comps_dock.sync())
         bus.subscribe("brushes.changed", lambda **k: self.brushes_dock.sync())
         bus.subscribe("tool.request", self._on_tool_request)
+        bus.subscribe("colour.view", lambda **k: self.canvas.colour_changed())
         self.canvas.cursor_moved.connect(self.info_dock.pointer)
         self.canvas.cursor_moved.connect(self._on_cursor)
         self.canvas.zoom_changed.connect(self.zoom_label.setText)
@@ -616,6 +617,8 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "Define &Pattern...", self.do_define_pattern)
         self._act(edit_menu, "Define &Brush Tip", self.do_define_brush_tip)
         edit_menu.addSeparator()
+        self._act(edit_menu, "Assign Profi&le...", self.do_assign_profile)
+        self._act(edit_menu, "Con&vert to Profile...", self.do_convert_profile)
         self._act(edit_menu, "Pre&ferences...", self.do_preferences, "Ctrl+K")
         self._act(edit_menu, "Keyboard S&hortcuts...", self.do_shortcuts, "Ctrl+Alt+Shift+K")
         edit_menu.addSeparator()
@@ -716,6 +719,16 @@ class MainWindow(QMainWindow):
         self.lock_guides_action.setCheckable(True)
         self._act(view_menu, "Grid &Settings...", self.do_grid_settings)
         view_menu.addSeparator()
+        self._act(view_menu, "Proof Set&up...", self.do_proof_setup)
+        self.proof_action = self._act(view_menu, "Pr&oof Colors",
+                                      self.do_toggle_proof,
+                                      "Ctrl+Y")
+        self.proof_action.setCheckable(True)
+        self.gamut_action = self._act(view_menu, "&Gamut Warning",
+                                      lambda: self.ctl.set_proof(gamut=self.gamut_action.isChecked()),
+                                      "Ctrl+Shift+Y")
+        self.gamut_action.setCheckable(True)
+        view_menu.addSeparator()
         self._act(view_menu, "&Full Screen", self.do_full_screen, "F11")
         self._act(view_menu, "Show / Hide &Panels", self.do_toggle_panels, "Shift+F11")
 
@@ -763,6 +776,8 @@ class MainWindow(QMainWindow):
         self._act(image_menu, "Content-Aware Sc&ale...", self.do_content_aware_scale,
                   "Ctrl+Alt+Shift+C")
         self._act(image_menu, "Canvas &Size...", self.do_canvas_size, "Ctrl+Shift+R")
+        mode = image_menu.addMenu("&Mode")
+        mode.addAction("&Grayscale", lambda: (self.ctl.convert_to_grayscale(), self._after_pixels()))
         self._act(image_menu, "&Trim...", self.do_trim)
         self._act(image_menu, "D&uplicate...", self.do_duplicate_image)
         self._act(image_menu, "Appl&y Image...", self.do_apply_image)
@@ -1524,6 +1539,51 @@ class MainWindow(QMainWindow):
                            fill=v["fill"] if v["has_fill"] else None,
                            stroke=v["stroke"] if v["has_stroke"] else None,
                            stroke_width=v["width"], stroke_align=v["align"])
+
+    def _profile_choices(self, space):
+        from ..engine import colormanage as C
+        return [(path, "%s" % desc) for desc, path, cs in C.system_profiles() if cs == space]
+
+    def do_proof_setup(self):
+        from .formdialog import ask
+        choices = self._profile_choices("CMYK") + self._profile_choices("RGB") \
+            + self._profile_choices("GRAY")
+        if not choices:
+            QMessageBox.information(self, "Proof Setup", "No ICC profiles were found on this system.")
+            return
+        v = ask(self, "Proof Setup", [
+            ("profile", "Device to simulate", "choice", self.ctl.proof_profile or choices[0][0], choices),
+            ("bpc", "Black point compensation", "bool", self.ctl.proof_bpc, None),
+            ("on", "Proof colors now", "bool", True, None)])
+        if v is not None:
+            self.ctl.set_proof(v["profile"], on=v["on"], bpc=v["bpc"])
+            self.proof_action.setChecked(self.ctl.proof_on)
+
+    def do_toggle_proof(self):
+        if self.proof_action.isChecked() and not self.ctl.proof_profile:
+            self.do_proof_setup()               # nothing chosen yet: ask what to simulate
+            self.proof_action.setChecked(self.ctl.proof_on)
+            return
+        self.ctl.set_proof(on=self.proof_action.isChecked())
+
+    def do_assign_profile(self):
+        from .formdialog import ask
+        v = ask(self, "Assign Profile", [("profile", "Profile", "choice", "",
+                                          [("", "sRGB (no profile)")] + self._profile_choices("RGB"))])
+        if v is not None:
+            self.ctl.assign_profile(v["profile"] or None)
+            self._update_title()
+
+    def do_convert_profile(self):
+        from .formdialog import ask
+        v = ask(self, "Convert to Profile", [
+            ("profile", "Destination", "choice", "", [("", "sRGB")] + self._profile_choices("RGB")),
+            ("intent", "Intent", "choice", "perceptual",
+             [("perceptual", "Perceptual"), ("relative", "Relative colorimetric"),
+              ("saturation", "Saturation"), ("absolute", "Absolute colorimetric")])])
+        if v is not None:
+            self._busy(self.ctl.convert_to_profile, v["profile"] or None, v["intent"])
+            self._after_pixels()
 
     def do_filter_gallery(self):
         from .gallery import FilterGalleryDialog

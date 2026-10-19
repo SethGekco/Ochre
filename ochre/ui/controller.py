@@ -71,6 +71,12 @@ class Controller:
             self.settings.apply_user(os.path.join(state_dir, "preferences.ini"))
             from . import keymap
             keymap.apply_tools(self.tools, keymap.load(state_dir))
+        # View > Proof Setup / Proof Colors / Gamut Warning.
+        self.proof_profile = None      # path of the proof (e.g. CMYK press) profile
+        self.proof_on = False
+        self.gamut_warning = False
+        self.proof_bpc = True
+        self._vt_cache = (None, None)
         # Effects as non-destructive filters (GIMP 3) instead of baked in.
         self.non_destructive = self.session.flag("NonDestructiveFilters", False)
         self._saved_marker = None
@@ -3627,6 +3633,127 @@ class Controller:
                 or self.doc.active_path is None or not (0 <= self.doc.active_path < len(self.doc.paths)):
             return False
         self.set_layer_params(target, {"path": shapelayer.encode_path(self.doc.paths[self.doc.active_path])})
+        return True
+
+    # ---- colour management ----------------------------------------------------------
+
+    def set_proof(self, path=None, on=None, gamut=None, bpc=None):
+        """View > Proof Setup (the profile), Proof Colors (on), Gamut Warning."""
+        if path is not None:
+            self.proof_profile = path or None
+        if on is not None:
+            self.proof_on = bool(on)
+        if gamut is not None:
+            self.gamut_warning = bool(gamut)
+        if bpc is not None:
+            self.proof_bpc = bool(bpc)
+        self.emit("colour.view")
+        return self.view_transform()
+
+    def view_transform(self):
+        """The document-to-monitor transform the canvas should apply, or None
+        when the numbers can be shown as they are (sRGB, no proof)."""
+        from ..engine import colormanage as C
+        monitor = self.settings.get("Color", "MonitorProfile") or ""
+        proofing = (self.proof_on or self.gamut_warning) and self.proof_profile
+        key = ((self.doc.meta.get("icc_data") or "")[-64:], len(self.doc.meta.get("icc_data") or ""),
+               monitor, self.proof_profile if proofing else None, bool(self.gamut_warning and proofing),
+               self.settings.get("Color", "ProofIntent"), self.proof_bpc)
+        if self._vt_cache[0] == key:
+            return self._vt_cache[1]
+        vt = None
+        try:
+            doc_prof = C.doc_profile(self.doc)
+            mon = C.open_profile(monitor) if monitor else None
+            proof = C.open_profile(self.proof_profile) if proofing else None
+            if not (doc_prof is None and mon is None and proof is None):
+                vt = C.ViewTransform(doc_prof, mon, proof,
+                                     self.settings.get("Color", "ProofIntent") or "perceptual",
+                                     self.proof_bpc, self.gamut_warning and proof is not None)
+                if vt.identity:
+                    vt = None
+        except Exception:                                   # noqa: BLE001
+            vt = None
+        self._vt_cache = (key, vt)
+        return vt
+
+    def assign_profile(self, path=None):
+        """Edit > Assign Profile: say what the numbers mean, without changing
+        them (the picture's look changes). None = sRGB. One undo step."""
+        from ..engine import colormanage as C
+        from ..engine.commands import DocMetaDelta
+        before = DocMetaDelta(self.doc, "Assign Profile")
+        prof = C.open_profile(path) if path else None
+        if prof is not None and C.colour_space(prof) != "RGB":
+            raise ValueError("an RGB document needs an RGB profile")
+        C.set_doc_profile(self.doc, None if prof is None or C.is_srgb(prof) else prof)
+        self.history.push(before, "Assign Profile")
+        self.emit("colour.view")
+        self.emit("history.changed")
+        return True
+
+    def convert_to_profile(self, path=None, intent="perceptual"):
+        """Edit > Convert to Profile: change the numbers so the picture LOOKS
+        the same in the new profile, then tag it. Pixel layers convert;
+        colours inside fill, text and shape layers are settings, left as
+        they are. One undo step."""
+        from ..engine import colormanage as C
+        from ..engine.commands import DocMetaDelta, PixelDelta
+        src = C.doc_profile(self.doc)
+        dst = C.open_profile(path) if path else None
+        if dst is not None and C.colour_space(dst) != "RGB":
+            raise ValueError("convert to an RGB profile; CMYK is an export option")
+        label = "Convert to Profile"
+        self.history.begin_group()
+        self.history.push(DocMetaDelta(self.doc, label), label)
+        for frame in self.doc.frames:
+            self.doc.ensure_warm(frame)
+            for lay in self.doc.layers():
+                if getattr(lay, "kind", "raster") != "raster" or lay.index_locked:
+                    continue
+                cell = self.doc.cells.get((lay.id, frame.id))
+                if cell is None or cell.is_empty():
+                    continue
+                d = PixelDelta.capture(self.doc, lay.id, frame.id, self.doc.bounds, label)
+                if d is not None:
+                    self.history.push(d, label, frame_id=frame.id)
+                px = cell.plane("rgba")
+                px[...] = C.convert(px, src, dst, intent)
+                cell._touched(self.doc.bounds)
+        C.set_doc_profile(self.doc, None if dst is None or C.is_srgb(dst) else dst)
+        self.history.end_group(label)
+        self.compositor.invalidate()
+        self.invalidate()
+        self.emit("colour.view")
+        self.emit("history.changed")
+        return True
+
+    def convert_to_grayscale(self):
+        """Image > Mode > Grayscale: every pixel layer to the grey of its
+        lightness in the document's profile (L* kept). One undo step."""
+        from ..engine import colormanage as C
+        from ..engine.commands import PixelDelta
+        prof = C.doc_profile(self.doc)
+        label = "Grayscale"
+        self.history.begin_group()
+        for frame in self.doc.frames:
+            self.doc.ensure_warm(frame)
+            for lay in self.doc.layers():
+                if getattr(lay, "kind", "raster") != "raster" or lay.index_locked:
+                    continue
+                cell = self.doc.cells.get((lay.id, frame.id))
+                if cell is None or cell.is_empty():
+                    continue
+                d = PixelDelta.capture(self.doc, lay.id, frame.id, self.doc.bounds, label)
+                if d is not None:
+                    self.history.push(d, label, frame_id=frame.id)
+                px = cell.plane("rgba")
+                px[...] = C.to_gray(px, prof)
+                cell._touched(self.doc.bounds)
+        self.history.end_group(label)
+        self.compositor.invalidate()
+        self.invalidate()
+        self.emit("history.changed")
         return True
 
     def straighten(self, line=None):

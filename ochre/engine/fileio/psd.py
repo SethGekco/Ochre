@@ -362,7 +362,64 @@ def _unmatte(rgba):
     return out
 
 
+def read_icc(path):
+    """The embedded ICC profile (image resource 1039), or None."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    r = _Reader(data)
+    if r.take(4) != b"8BPS":
+        return None
+    r.take(2 + 6 + 2 + 4 + 4 + 2 + 2)
+    r.take(r.u32())                       # colour mode data
+    end = r.u32()
+    end += r.p
+    while r.p + 12 <= end:
+        if r.take(4) not in (b"8BIM", b"MeSa"):
+            return None
+        rid = r.u16()
+        n = r.u8()
+        r.take(n + ((n + 1) % 2))         # Pascal name, padded to even
+        size = r.u32()
+        block = r.take(size)
+        if size % 2:
+            r.take(1)
+        if rid == 1039:
+            return bytes(block)
+    return None
+
+
+def _icc_resource(doc):
+    """Image resource 1039 for the document's profile, or b''."""
+    data = (getattr(doc, "meta", {}) or {}).get("icc_data")
+    if not data:
+        return b""
+    import base64
+    icc = base64.b64decode(data)
+    block = b"8BIM" + struct.pack(">H", 1039) + b"\x00\x00" + struct.pack(">I", len(icc)) + icc
+    if len(icc) % 2:
+        block += b"\x00"
+    return block
+
+
 def load(path, settings=None):
+    """A PSD as an Ochre Document, with its colour profile."""
+    doc = _load(path, settings)
+    try:
+        icc = read_icc(path)
+    except (OSError, ValueError, IndexError):
+        icc = None
+    if icc:
+        from .. import colormanage
+        try:
+            prof = colormanage.open_profile(icc)
+            if not colormanage.is_srgb(prof):
+                colormanage.set_doc_profile(doc, prof)
+        except Exception:                                   # noqa: BLE001
+            pass
+    return doc
+
+
+def _load(path, settings=None):
     """A PSD as an Ochre Document: layers, groups, masks and all."""
     from ..document import Document
     from ..layer import LayerGroup, LayerMask
@@ -574,7 +631,8 @@ def save(doc, path, compositor=None):
     emit(doc.root)
 
     head = b"8BPS" + struct.pack(">H6xHIIHH", 1, 4, height, width, 8, 3)
-    body = struct.pack(">I", 0) + struct.pack(">I", 0)        # colour mode data, resources
+    res = _icc_resource(doc)                                  # the colour profile, if any
+    body = struct.pack(">I", 0) + struct.pack(">I", len(res)) + res
     info = struct.pack(">h", -len(records))                   # negative: merged alpha present
     info += b"".join(rec for rec, _ in records) + b"".join(dat for _, dat in records)
     if len(info) % 2:

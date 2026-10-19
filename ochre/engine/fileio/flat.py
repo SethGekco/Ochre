@@ -110,6 +110,12 @@ def import_flat(path, settings=None):
     img = Image.open(path)
     img.load()
     count = max(1, int(getattr(img, "n_frames", 1)))
+    icc = img.info.get("icc_profile")
+    if img.mode == "CMYK" and count == 1:
+        # Through its profile (or the system's CMYK default), not Pillow's
+        # naive formula, which turns every print file's colours to mud.
+        img = _cmyk_to_srgb(img, icc)
+        icc = None
 
     doc = None
     layer = None
@@ -143,9 +149,35 @@ def import_flat(path, settings=None):
 
     doc.current = 0
     doc.meta["source"] = os.path.basename(path)
+    if icc:
+        # The numbers stay as they are; the profile says what they mean
+        # (Photoshop's "use the embedded profile").
+        from .. import colormanage
+        try:
+            prof = colormanage.open_profile(icc)
+            if colormanage.colour_space(prof) == "RGB" and not colormanage.is_srgb(prof):
+                colormanage.set_doc_profile(doc, prof)
+        except Exception:                                   # noqa: BLE001
+            pass
     if count > 1:
         doc.meta["frames"] = str(count)
     return doc
+
+
+def _cmyk_to_srgb(img, icc=None):
+    from .. import colormanage
+    from PIL import ImageCms
+    try:
+        src = colormanage.open_profile(icc) if icc else None
+        if src is None:
+            cmyk = [p for p in colormanage.system_profiles() if p[2] == "CMYK"]
+            src = colormanage.open_profile(cmyk[0][1]) if cmyk else None
+        if src is None:
+            return img.convert("RGB")
+        t = ImageCms.buildTransform(src, colormanage.open_profile(None), "CMYK", "RGB")
+        return ImageCms.applyTransform(img, t)
+    except Exception:                                       # noqa: BLE001
+        return img.convert("RGB")
 
 
 def import_indexed(path, settings=None):
@@ -238,8 +270,9 @@ def encode_flat(doc, fmt, options=None, table=None, flat=None):
     options = options or {}
     img = _prepare(doc, name, spec, options.get("frame"), options.get("matte"),
                    options.get("scale", 1.0), flat)
+    img, extra = _colour_out(doc, name, img, options)
     buf = io.BytesIO()
-    img.save(buf, format=name, **_save_kwargs(name, spec, options))
+    img.save(buf, format=name, **dict(_save_kwargs(name, spec, options), **extra))
     return buf.getvalue()
 
 
@@ -256,8 +289,32 @@ def export_flat(doc, path, fmt=None, table=None, frame=None, matte=None, options
     options = dict(options or {})
     img = _prepare(doc, name, spec, frame, matte or options.get("matte"),
                    options.get("scale", 1.0))
-    img.save(path, format=name, **_save_kwargs(name, spec, options))
+    img, extra = _colour_out(doc, name, img, options)
+    img.save(path, format=name, **dict(_save_kwargs(name, spec, options), **extra))
     return path
+
+
+ICC_FORMATS = ("PNG", "JPEG", "TIFF", "WEBP")
+CMYK_FORMATS = ("JPEG", "TIFF")
+
+
+def _colour_out(doc, name, img, options):
+    """The image as written: embedded profile (the document's, when it has
+    one), or converted to CMYK through a chosen profile. Returns (image,
+    extra save kwargs)."""
+    from .. import colormanage
+    cmyk = options.get("cmyk_profile")
+    if cmyk and name in CMYK_FORMATS:
+        prof = colormanage.open_profile(cmyk)
+        rgba = np.asarray(img.convert("RGBA"))
+        out = colormanage.to_cmyk_image(rgba, prof, colormanage.doc_profile(doc),
+                                        options.get("intent", "perceptual"))
+        return out, {"icc_profile": colormanage.profile_bytes(prof)}
+    prof = colormanage.doc_profile(doc)
+    if name in ICC_FORMATS and (prof is not None or options.get("embed_srgb")):
+        prof = prof or colormanage.open_profile(None)
+        return img, {"icc_profile": colormanage.profile_bytes(prof)}
+    return img, {}
 
 
 def flatten_onto(rgba, matte=MATTE):

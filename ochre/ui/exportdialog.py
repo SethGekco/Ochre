@@ -64,6 +64,18 @@ class ExportDialog(QDialog):
         self.scale.setValue(100)
         self.scale.setSuffix(" %")
         form.addRow("Scale", self.scale)
+        # Colour: embed sRGB when the document has no profile of its own, or
+        # write CMYK through a press profile (JPEG and TIFF).
+        from ..engine import colormanage
+        self.embed = QCheckBox("Embed colour profile")
+        self.embed.setChecked(True)
+        form.addRow("", self.embed)
+        self.cmyk = QComboBox()
+        self.cmyk.addItem("RGB", "")
+        for desc, path, cs in colormanage.system_profiles():
+            if cs == "CMYK":
+                self.cmyk.addItem("CMYK: " + desc, path)
+        form.addRow("Colour", self.cmyk)
         self.dims = QLabel()
         form.addRow("Size", self.dims)
         self.size = QLabel()
@@ -86,13 +98,17 @@ class ExportDialog(QDialog):
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.refresh)
         for sig in (self.format.currentIndexChanged, self.quality.valueChanged,
-                    self.scale.valueChanged, self.lossless.toggled):
+                    self.scale.valueChanged, self.lossless.toggled, self.embed.toggled,
+                    self.cmyk.currentIndexChanged):
             sig.connect(lambda *_: self._timer.start(150))
         self.refresh()
 
     def options(self):
-        return {"quality": self.quality.value(), "scale": self.scale.value() / 100.0,
-                "lossless": self.lossless.isChecked()}
+        out = {"quality": self.quality.value(), "scale": self.scale.value() / 100.0,
+               "lossless": self.lossless.isChecked(), "embed_srgb": self.embed.isChecked()}
+        if self.cmyk.currentData() and self.fmt() in ("JPEG", "TIFF"):
+            out["cmyk_profile"] = self.cmyk.currentData()
+        return out
 
     def fmt(self):
         return self.format.currentData()
@@ -102,6 +118,7 @@ class ExportDialog(QDialog):
         lossy = dict((n, q) for n, _e, q in FORMATS)[fmt]
         self.quality.setEnabled(lossy and not (fmt == "WEBP" and self.lossless.isChecked()))
         self.lossless.setEnabled(fmt == "WEBP")
+        self.cmyk.setEnabled(fmt in ("JPEG", "TIFF"))
         self.quality_label.setText(str(self.quality.value()))
         opts = self.options()
         w = max(1, int(round(self.ctl.doc.width * opts["scale"])))
@@ -116,7 +133,12 @@ class ExportDialog(QDialog):
         self.size.setText(human_size(len(self.data)))
         # Decode what was encoded: the preview IS the file.
         try:
-            img = Image.open(io.BytesIO(self.data)).convert("RGBA")
+            img = Image.open(io.BytesIO(self.data))
+            if img.mode == "CMYK":
+                # Shown through its own profile, as it will print.
+                from ..engine.fileio.flat import _cmyk_to_srgb
+                img = _cmyk_to_srgb(img, img.info.get("icc_profile"))
+            img = img.convert("RGBA")
         except Exception:                                         # noqa: BLE001
             return
         arr = np.ascontiguousarray(np.asarray(img))
