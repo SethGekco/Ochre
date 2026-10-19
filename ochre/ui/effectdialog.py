@@ -25,8 +25,8 @@ from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-                               QHBoxLayout, QLabel, QProgressBar, QPushButton,
-                               QSlider, QSpinBox, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QProgressBar,
+                               QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
 from ..engine.effects import CancelToken, Cancelled
 
@@ -206,6 +206,18 @@ class _Row(QWidget):
             box.addWidget(self.button, 1)
             self.widget = self.button
 
+        elif kind == "text":
+            # Free text; a property named "file" gets a Browse button.
+            self.line = QLineEdit(str(prop.value))
+            self.line.editingFinished.connect(self._from_line)
+            box.addWidget(self.line, 1)
+            if prop.name == "file":
+                browse = QPushButton("...")
+                browse.setFixedWidth(30)
+                browse.clicked.connect(self._browse)
+                box.addWidget(browse)
+            self.widget = self.line
+
         else:
             self.label = QLabel(str(prop.value))
             box.addWidget(self.label, 1)
@@ -249,6 +261,19 @@ class _Row(QWidget):
             return
         self.prop.set(self.curve.points)
         self.changed.emit()
+
+    def _from_line(self):
+        if self._guard() or self.line.text() == self.prop.value:
+            return
+        self.prop.set(self.line.text())
+        self.changed.emit()
+
+    def _browse(self):
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, self.prop.ui.get("label", "File"))
+        if path:
+            self.line.setText(path)
+            self._from_line()
 
     def _pick_colour(self):
         chosen = QColorDialog.getColor(QColor(*self.prop.value), self,
@@ -296,6 +321,9 @@ class _Row(QWidget):
             elif prop.kind == "color":
                 colour = QColor(*prop.value)
                 self.button.setStyleSheet("background-color: %s;" % colour.name())
+            elif prop.kind == "text":
+                if self.line.text() != str(prop.value):
+                    self.line.setText(str(prop.value))
             # Read-only is a fact about the MODEL; the widget only reflects it.
             if self.widget is not None:
                 self.setEnabled(not prop.readonly)

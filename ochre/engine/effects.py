@@ -573,6 +573,11 @@ def _more_builtins():
         out += tuple(PHOTO)
     except ImportError:
         pass
+    try:
+        from .morefilters import MORE
+        out += tuple(MORE)
+    except ImportError:
+        pass
     return out
 
 

@@ -118,11 +118,17 @@ def _warp(src, sx, sy, edge="clamp"):
 
 def _hash01(xx, yy, seed):
     """Positional white noise in [0, 1): the same pixel, the same value."""
-    v = (np.asarray(xx, np.uint64) * np.uint64(73856093)) ^ \
-        (np.asarray(yy, np.uint64) * np.uint64(19349663)) ^ np.uint64((seed * 83492791) & 0xFFFFFFFF)
+    # At least 1-D: numpy warns on (intended) wrap-around in SCALAR uint64
+    # arithmetic but not in array arithmetic.
+    shape = np.broadcast(np.asarray(xx), np.asarray(yy)).shape
+    xx = np.atleast_1d(np.asarray(xx, np.int64)).astype(np.uint64)
+    yy = np.atleast_1d(np.asarray(yy, np.int64)).astype(np.uint64)
+    v = (xx * np.uint64(73856093)) ^ (yy * np.uint64(19349663)) \
+        ^ np.uint64((seed * 83492791) & 0xFFFFFFFF)
     v = (v ^ (v >> np.uint64(13))) * np.uint64(1274126177)
     v = v ^ (v >> np.uint64(16))
-    return (v & np.uint64(0xFFFFFF)).astype(np.float64) / float(0x1000000)
+    out = (v & np.uint64(0xFFFFFF)).astype(np.float64) / float(0x1000000)
+    return out.reshape(shape) if shape else float(out[0])
 
 
 def _value_noise(h, w, scale, seed, octaves=6, roughness=0.5):
