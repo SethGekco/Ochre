@@ -202,6 +202,9 @@ DRIVERS = {
     "warp":       lambda t, c: (_checker(c, 0, 0, 40, 32, 200, 5),
                                 _stroke(t, c, [(10, 16), (16, 16), (22, 16), (28, 16)])),
     "move_layer": lambda t, c: _stroke(t, c, [(20, 16), (30, 22)]),
+    "puppet_warp": lambda t, c: (_ink(c, 4, 12, 30, 8, 200),
+                                 _stroke(t, c, [(6, 16)]),
+                                 _stroke(t, c, [(30, 16), (30, 6)]), t.finish(c)),
     # ---- inpainting: a blemish on texture, removed --------------------------
     "spot_heal":  lambda t, c: (_checker(c, 0, 0, 40, 32, 200, 5), _ink(c, 18, 14, 4, 4, 120),
                                 _stroke(t, c, [(20, 16), (21, 16)])),

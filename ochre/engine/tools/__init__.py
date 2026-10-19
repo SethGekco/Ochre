@@ -21,7 +21,7 @@ from .shapetools import (CurveTool, EllipseTool, FreeformTool, GradientTool, Lin
                          RectangleTool, ShapeTool, TextTool)
 from .viewtools import PanTool, RotateViewTool, ViewRequest, ZoomTool
 from .transform import (CageTool, CropTool, FlipTool, HandleTransformTool,
-                        MoveLayerTool, PerspectiveCropTool, PerspectiveTool,
+                        MoveLayerTool, PerspectiveCropTool, PerspectiveTool, PuppetWarpTool,
                         RotateTool, ScaleTool, ShearTool, Transform3DTool,
                         TransformTool, WarpTool)
 from .select import (ForegroundSelectTool, ObjectSelectTool, PolygonLassoTool,
@@ -59,7 +59,7 @@ BUILTIN = {
         SpotHealTool, RemoveTool, PatchTool, ContentAwareMoveTool,
         PenTool, CurvaturePenTool, FreeformPenTool, PathSelectTool, DirectSelectTool,
         CurveTool, MeasureTool, ColorSamplerTool, CountTool, NoteTool, SliceTool,
-        SliceSelectTool, AddAnchorTool, DeleteAnchorTool, ConvertPointTool,
+        SliceSelectTool, AddAnchorTool, DeleteAnchorTool, ConvertPointTool, PuppetWarpTool,
     )
 }
 

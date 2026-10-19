@@ -1049,3 +1049,132 @@ class MoveLayerTool(Tool):
         rect = self._session.cancel()
         self._session = None
         return rect
+
+
+class PuppetWarpTool(Tool):
+    """Pin the layer and drag the pins: Photoshop's Puppet Warp.
+
+    Click to place pins on what should bend (an arm, a tail, a branch);
+    drag a pin and the image follows as rigidly as the other pins allow --
+    moving least squares deformation, so nothing shears or tears. Alt-click
+    a pin to remove it. Enter, a double-click or switching tools applies;
+    Escape puts everything back.
+    """
+
+    name = "puppet_warp"
+    label = "Puppet Warp"
+    wants_stroke = False
+    multi_click = True
+    commit_on_switch = True
+    snaps = False
+    options_spec = (O.Opt("mode", O.CHOICE, "rigid", "Mode", choices=("rigid", "normal"),
+                          labels={"rigid": "Rigid", "normal": "Normal (allows stretch)"},
+                          tip="Rigid keeps shapes from scaling; Normal lets them stretch "
+                              "between pins."),
+                    _interp())
+
+    def __init__(self, **options):
+        super().__init__(**options)
+        self._reset()
+
+    def _reset(self):
+        self._orig = []
+        self._pins = []
+        self._session = None
+        self._snapshot = None
+        self._snapshot_index = None
+        self._drag = None
+
+    def overlay(self):
+        out = []
+        for (ox, oy), (x, y) in zip(self._orig, self._pins):
+            if (ox, oy) != (x, y):
+                out.append(("line", (ox, oy, x, y)))
+        if self._pins:
+            out.append(("handles", [tuple(p) for p in self._pins]))
+        return out
+
+    def _lift(self, ctx):
+        cell = ctx.cell
+        self._snapshot = cell.plane("rgba").copy()
+        self._snapshot_index = cell.plane("index").copy() if cell.index_locked else None
+        self._session = StrokeSession(ctx.doc, ctx.layer, ctx.frame, label=self.label)
+
+    def on_begin(self, ctx, event):
+        if ctx.cell is None:
+            self.active = False
+            return None
+        if self._session is None:
+            self._lift(ctx)
+        pt = (event.x, event.y)
+        r = max(3.0, float(getattr(ctx, "pick_radius", 4.0)) * 1.4)
+        for i, p in enumerate(self._pins):
+            if math.hypot(pt[0] - p[0], pt[1] - p[1]) <= r:
+                if event.has(4):                       # Alt: remove the pin
+                    del self._pins[i]
+                    del self._orig[i]
+                    return self._render(ctx, final=False)
+                self._drag = {"i": i, "start": pt, "from": tuple(p)}
+                return None
+        self._orig.append(pt)
+        self._pins.append(pt)
+        self._drag = {"i": len(self._pins) - 1, "start": pt, "from": pt}
+        return None
+
+    def on_motion(self, ctx, event):
+        if self._drag is None:
+            return None
+        i = self._drag["i"]
+        self._pins[i] = (self._drag["from"][0] + event.x - self._drag["start"][0],
+                         self._drag["from"][1] + event.y - self._drag["start"][1])
+        return self._render(ctx, final=False)
+
+    def on_end(self, ctx, event):
+        rect = self.on_motion(ctx, event)
+        self._drag = None
+        self.active = True
+        return rect
+
+    def _render(self, ctx, final):
+        cell = ctx.cell
+        bounds = cell.bounds
+        self._session.restore(bounds)
+        self._session.touch(bounds)
+        rigid = self.option("mode", "rigid") == "rigid"
+        sx, sy = warp.mls_field(cell.width, cell.height, self._orig, self._pins, rigid)
+        if cell.index_locked and self._snapshot_index is not None:
+            idx = warp.sample_index(self._snapshot_index, sx, sy)
+            clear = 0 if cell.palette is None or cell.palette.transparent is None \
+                else int(cell.palette.transparent)
+            cell.plane("index")[...] = np.where(idx >= 0, idx, clear).astype(np.uint8)
+            cell._after_write(bounds, "index")
+        else:
+            method = warp.BILINEAR if final and self.option("interpolation", "bilinear") \
+                == "bilinear" else warp.NEAREST
+            cell.plane("rgba")[...] = warp.warp_field(self._snapshot, sx, sy, method)
+            cell._touched(bounds)
+        return bounds
+
+    def finish(self, ctx):
+        if self._session is None:
+            self._reset()
+            self.active = False
+            return None
+        moved = any(a != b for a, b in zip(self._orig, self._pins))
+        if moved:
+            self._render(ctx, final=True)
+            cmd = self._session.commit()
+            if cmd is not None and ctx.history is not None:
+                ctx.history.push(cmd, self.label, frame_id=ctx.frame.id)
+        else:
+            self._session.cancel()
+        self._reset()
+        self.active = False
+        return ctx.doc.bounds
+
+    def on_cancel(self, ctx):
+        rect = None
+        if self._session is not None:
+            rect = self._session.cancel()
+        self._reset()
+        return rect or ctx.doc.bounds

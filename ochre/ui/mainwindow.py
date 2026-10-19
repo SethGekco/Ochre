@@ -313,6 +313,45 @@ class MainWindow(QMainWindow):
         if ok:
             self._busy(self.ctl.match_color, int(label.split(":")[0]) - 1, amount / 100.0)
 
+    def do_liquify(self):
+        self.ctl.set_tool("warp")
+        self.statusBar().showMessage(
+            "Liquify: paint with the Warp tool -- Move pushes, Grow bloats, Shrink "
+            "puckers, Swirl twirls, Erase restores. Set the mode and size above.", 10000)
+
+    def do_content_aware_scale(self):
+        from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
+                                       QSpinBox)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Content-Aware Scale")
+        form = QFormLayout(dlg)
+        w = QSpinBox()
+        w.setRange(1, 20000)
+        w.setValue(self.ctl.doc.width)
+        h = QSpinBox()
+        h.setRange(1, 20000)
+        h.setValue(self.ctl.doc.height)
+        protect = QCheckBox("Protect the selection")
+        protect.setChecked(self.ctl.selection.mask is not None)
+        protect.setEnabled(self.ctl.selection.mask is not None)
+        form.addRow("Width", w)
+        form.addRow("Height", h)
+        form.addRow("", protect)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec():
+            self._busy(self._geometry_done, self.ctl.content_aware_scale,
+                       w.value(), h.value(), protect.isChecked())
+
+    def _geometry_done(self, fn, *args):
+        done = fn(*args)
+        if done:
+            self.canvas.bind(keep_view=True)
+            self.canvas.refresh()
+        return done
+
     def do_export_slices(self):
         if not self.ctl.doc.slices:
             self.statusBar().showMessage(
@@ -484,10 +523,17 @@ class MainWindow(QMainWindow):
             for name in groups[category]:
                 self._act(sub, self.effects.label(name),
                           lambda _c=False, n=name: self.run_effect(n))
+            if category == "Distort":
+                # Liquify is a brush-driven warp, which Ochre has as a tool.
+                sub.addSeparator()
+                self._act(sub, "Liquify (Warp tool)...", self.do_liquify)
+                self._act(sub, "Puppet Warp (tool)...", lambda: self.ctl.set_tool("puppet_warp"))
 
         image_menu = bar.addMenu("&Image")
         self._act(image_menu, "&Crop to Selection", self.do_crop, "Ctrl+Shift+X")
         self._act(image_menu, "&Resize...", self.do_resize, "Ctrl+R")
+        self._act(image_menu, "Content-Aware Sc&ale...", self.do_content_aware_scale,
+                  "Ctrl+Alt+Shift+C")
         self._act(image_menu, "Canvas &Size...", self.do_canvas_size, "Ctrl+Shift+R")
         image_menu.addSeparator()
         self._act(image_menu, "Flip &Horizontal", lambda: self._geometry(self.ctl.flip_image, True))

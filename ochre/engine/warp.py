@@ -264,3 +264,77 @@ def point_in_polygon(px, py, poly):
         xc = (bx - ax) * (py - ay) / (by - ay) + ax
         inside ^= cond & (px < xc)
     return inside
+
+
+# ---- moving least squares (Puppet Warp) ---------------------------------------------
+
+def mls(v, p, q, rigid=True, alpha=1.0):
+    """Moving least squares deformation of points v by handles p -> q.
+
+    Schaefer, McPhail and Warren (2006), in the closed form complex numbers
+    allow in 2-D: at each point, the best similarity (scale x rotation)
+    taking the weighted handles p onto q is
+        M = sum(w q^ conj(p^)) / sum(w |p^|^2)
+    and the RIGID variant keeps only its rotation, M / |M|. v is (N, 2),
+    p and q (k, 2); returns (N, 2). One handle simply translates.
+    """
+    v = np.asarray(v, np.float64)
+    p = np.asarray(p, np.float64).reshape(-1, 2)
+    q = np.asarray(q, np.float64).reshape(-1, 2)
+    if len(p) == 0:
+        return v.copy()
+    if len(p) == 1:
+        return v + (q[0] - p[0])
+    vc = v[:, 0] + 1j * v[:, 1]
+    pc = p[:, 0] + 1j * p[:, 1]
+    qc = q[:, 0] + 1j * q[:, 1]
+    d2 = np.abs(vc[:, None] - pc[None, :]) ** 2
+    exact = d2 < 1e-12
+    w = 1.0 / np.maximum(d2, 1e-12) ** alpha
+    ws = w.sum(axis=1)
+    ps = (w * pc[None, :]).sum(axis=1) / ws
+    qs = (w * qc[None, :]).sum(axis=1) / ws
+    ph = pc[None, :] - ps[:, None]
+    qh = qc[None, :] - qs[:, None]
+    num = (w * qh * np.conj(ph)).sum(axis=1)
+    if rigid:
+        mag = np.abs(num)
+        M = np.where(mag > 1e-12, num / np.where(mag > 1e-12, mag, 1), 1.0)
+    else:
+        den = (w * np.abs(ph) ** 2).sum(axis=1)
+        M = num / np.where(den > 1e-12, den, 1)
+    f = M * (vc - ps) + qs
+    # A point exactly on a handle goes exactly where the handle goes.
+    if exact.any():
+        rows, cols = np.nonzero(exact)
+        f[rows] = qc[cols]
+    return np.stack([f.real, f.imag], axis=1)
+
+
+def mls_field(width, height, p, q, rigid=True, step=8):
+    """Per-pixel source coordinates for an MLS warp of a width x height
+    image, evaluated on a coarse grid and interpolated (MLS is smooth, and
+    a full-resolution evaluation is pins x pixels of complex arithmetic).
+
+    The roles are swapped -- output points are mapped from the MOVED handles
+    back to the original ones -- so the result is an inverse map, ready for
+    warp_field. Returns (sx, sy), each (height, width).
+    """
+    gx = np.arange(0, width + step, step, dtype=np.float64)
+    gy = np.arange(0, height + step, step, dtype=np.float64)
+    GX, GY = np.meshgrid(gx, gy)
+    pts = np.stack([GX.ravel(), GY.ravel()], axis=1)
+    src = mls(pts, q, p, rigid).reshape(len(gy), len(gx), 2)
+    ys, xs = np.mgrid[0:height, 0:width].astype(np.float64)
+    xs += 0.5
+    ys += 0.5
+    fx, fy = xs / step, ys / step
+    x0 = np.clip(np.floor(fx).astype(np.int64), 0, len(gx) - 2)
+    y0 = np.clip(np.floor(fy).astype(np.int64), 0, len(gy) - 2)
+    tx, ty = (fx - x0)[..., None], (fy - y0)[..., None]
+    a = src[y0, x0]
+    b = src[y0, x0 + 1]
+    c = src[y0 + 1, x0]
+    d = src[y0 + 1, x0 + 1]
+    out = (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty
+    return out[..., 0], out[..., 1]

@@ -373,6 +373,13 @@ def i_flip(g):
     g.poly([(14, 5), (21, 19), (14, 19)], w=1.3)
 
 
+def i_puppet_warp(g):
+    # A bent limb with pins: the puppet.
+    g.curve((4, 20), (6, 10), (14, 14), (20, 4), w=3.0, color=ACCENT_SOFT)
+    for x, y in ((4, 20), (11, 12), (20, 4)):
+        g.ellipse(x, y, 2.2, 2.2, fill=ACCENT, w=0.8)
+
+
 def i_cage(g):
     pts = [(4, 6), (11, 3), (20, 6), (21, 15), (14, 21), (5, 18)]
     g.poly(pts, w=1.3)

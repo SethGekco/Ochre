@@ -1053,6 +1053,30 @@ class Controller:
         return self._geometry("Canvas size",
                               lambda: transform.resize_canvas(self.doc, width, height, anchor))
 
+    def content_aware_scale(self, width, height, protect=True):
+        """Image > Content-Aware Scale: resize by seam carving. The seams are
+        found on the merged image (the selection, if any, protected) and the
+        same seams are taken from every layer, mask and frame."""
+        from ..engine import seamcarve, transform
+        from ..engine.geometry import Rect
+        width, height = max(1, int(width)), max(1, int(height))
+        if (width, height) == (self.doc.width, self.doc.height):
+            return False
+        merged = self.merged().copy()
+        prot = self.selection.mask if protect and self.selection.mask is not None else None
+        cols, rows_t = seamcarve.maps(merged, width, height, prot)
+        sx, sy = width / float(self.doc.width), height / float(self.doc.height)
+
+        def run():
+            # Paths, marks and text move proportionally (seams are not
+            # uniform, so this is the honest approximation for outlines).
+            transform._map_paths(self.doc, lambda p: (p[0] * sx, p[1] * sy))
+            transform._map_text(self.doc, lambda p: (p[0] * sx, p[1] * sy), (sx, sy))
+            return transform._rebuild(self.doc, width, height,
+                                      lambda s, n, p: seamcarve.apply_maps(p, cols, rows_t),
+                                      lambda r: Rect(0, 0, width, height))
+        return self._geometry("Content-Aware Scale", run)
+
     def crop_to_selection(self):
         from ..engine import transform
         if self.selection.selects_all():
