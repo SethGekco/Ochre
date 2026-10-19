@@ -155,6 +155,15 @@ class ToolsDock(QDockWidget):
         return self.buttons.get(self.ctl.tools.group(tool))
 
 
+class QMenuProxy:
+    """A submenu inserted before an action, for the layer-effects entries."""
+
+    def __init__(self, menu, before):
+        from PySide6.QtWidgets import QMenu
+        self.menu = QMenu("Mask, Clipping && Effects", menu)
+        menu.insertMenu(before, self.menu)
+
+
 class LayersDock(QDockWidget):
     """Layer list with visibility, opacity and blend mode."""
 
@@ -188,6 +197,7 @@ class LayersDock(QDockWidget):
         self.list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.list.currentRowChanged.connect(self._row_changed)
         self.list.itemChanged.connect(self._item_changed)
+        self.list.itemDoubleClicked.connect(self._edit_layer)
 
         # Drag to restack. InternalMove lets Qt animate the drop, but the
         # model underneath is the layer TREE, not this flat list -- so the
@@ -222,11 +232,23 @@ class LayersDock(QDockWidget):
         self.list.clear()
         self._rows = self.ctl.layer_rows()
         for depth, node in self._rows:
-            text = "%s%s" % ("    " * depth, node.name or node.id)
+            text = "%s%s%s" % ("    " * depth, "\u21b3 " if getattr(node, "clip", False) else "",
+                                 node.name or node.id)
             if node.is_group:
                 text += "  [group]"
-            elif node.index_locked:
-                text += "  [indexed]"
+            else:
+                if node.index_locked:
+                    text += "  [indexed]"
+                kind = getattr(node, "kind", "raster")
+                if kind != "raster":
+                    text += "  [%s]" % kind
+                if getattr(node, "mask", None) is not None:
+                    if self.ctl.editing_mask and node is self.ctl.active_layer:
+                        text += "  [painting mask]"
+                    else:
+                        text += "  [mask%s]" % ("" if node.mask_enabled else " off")
+                if getattr(node, "styles", None):
+                    text += "  [fx]"
             item = QListWidgetItem(text)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if node.visible else Qt.Unchecked)
@@ -367,7 +389,23 @@ class LayersDock(QDockWidget):
             # the menu does not destroy a layer.
             delete = menu.addAction("Delete", self._delete)
             delete.setEnabled(len(self.ctl.doc.layers()) > 1)
+            window = self.parent()
+            if hasattr(window, "build_layer_fx_menu") and not node.is_group:
+                menu.insertSeparator(delete)
+                sub = QMenuProxy(menu, delete)
+                window.build_layer_fx_menu(sub.menu)
         return menu
+
+    def _edit_layer(self, item):
+        """Double-click: an adjustment or fill layer opens its settings,
+        anything else its properties."""
+        window = self.parent()
+        node = self.ctl.active_layer
+        if node is not None and getattr(node, "kind", "raster") != "raster" \
+                and hasattr(window, "do_edit_layer_content"):
+            window.do_edit_layer_content()
+        else:
+            self._properties()
 
     def _properties(self):
         from .dialogs import LayerPropertiesDialog

@@ -56,7 +56,7 @@ class Surface:
     """Pixel storage for one cell. Not thread-safe for writes."""
 
     __slots__ = ("width", "height", "planes", "authoritative", "palette",
-                 "content_bbox", "dirty")
+                 "content_bbox", "dirty", "revision")
 
     def __init__(self, width, height, planes=(RGBA,), authoritative=None,
                  palette=None, max_dirty_rects=8):
@@ -73,6 +73,9 @@ class Surface:
         self.palette = palette
         self.content_bbox = None
         self.dirty = DirtyRegion(max_dirty_rects)
+        # Bumped on every recorded write, so derived results (a layer's
+        # styles) can tell they are stale without comparing pixels.
+        self.revision = 0
 
     # ---- introspection ---------------------------------------------------
 
@@ -172,6 +175,7 @@ class Surface:
         self.content_bbox = rect if self.content_bbox is None \
             else self.content_bbox.union(rect)
         self.dirty.add(rect)
+        self.revision += 1
 
     def write(self, rect, src, name=RGBA):
         """Overwrite a rectangle from src. src must match the clipped shape."""

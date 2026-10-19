@@ -48,6 +48,23 @@ for _op in OPS:
 
 blend_channel = _bound["blend_channel"][0]
 blend_rect = _bound["blend_rect"][0]
+
+if _bound["blend_rect"][1] == "c":
+    # The C extension knows the first NATIVE_OPCODES modes; the newer ones
+    # are served by the specification until it learns them.
+    _c_blend_rect = blend_rect
+    _c_blend_channel = blend_channel
+    _NATIVE = _fallback.NATIVE_OPCODES
+
+    def blend_rect(dst, src, mode=0, opacity=255, mask=None, out=None):
+        if mode >= _NATIVE:
+            return _fallback.blend_rect(dst, src, mode, opacity, mask, out=out)
+        return _c_blend_rect(dst, src, mode, opacity, mask, out=out)
+
+    def blend_channel(mode, a, b):
+        if mode >= _NATIVE:
+            return _fallback.blend_channel(mode, a, b)
+        return _c_blend_channel(mode, a, b)
 composite_stack = _bound["composite_stack"][0]
 flood_fill = _bound["flood_fill"][0]
 
@@ -60,7 +77,8 @@ BACKEND = "c" if HAVE_NATIVE and all(v == "c" for v in BACKENDS.values()) else (
 # Opcodes are ABI, not implementation -- they always come from the spec.
 from .fallback import (OPCODES, NORMAL, MULTIPLY, ADDITIVE, COLORBURN,      # noqa: E402
                        COLORDODGE, REFLECT, GLOW, OVERLAY, DIFFERENCE,
-                       NEGATION, LIGHTEN, DARKEN, SCREEN, XOR)
+                       NEGATION, LIGHTEN, DARKEN, SCREEN, XOR, NATIVE_OPCODES,
+                       NONSEPARABLE)
 
 #: The specification is always importable by name, so the parity test can
 #: compare the two directly rather than through this selector.

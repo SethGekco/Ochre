@@ -23,7 +23,7 @@ apply it across frames, and a palette edit must reach every frame at once.
 
 from .frame import COLD, Frame, UNLOADED, WARM
 from .geometry import Rect
-from .layer import Layer, LayerGroup
+from .layer import MASK_SUFFIX, Layer, LayerGroup
 from .palette import Palette
 from .surface import Surface
 
@@ -97,7 +97,12 @@ class Document:
         return group
 
     def layer(self, layer_id):
-        return self.root.find(layer_id)
+        node = self.root.find(layer_id)
+        if node is None and isinstance(layer_id, str) and layer_id.endswith(MASK_SUFFIX):
+            # Masks are not in the tree; they hang off their owner.
+            owner = self.root.find(layer_id[:-len(MASK_SUFFIX)])
+            node = getattr(owner, "mask", None)
+        return node
 
     def layers(self):
         """Leaf layers, bottom-first."""
@@ -110,6 +115,7 @@ class Document:
             return False
         doomed = [n.id for n in ([node] if not node.is_group
                                  else list(node.walk(include_self=True)))]
+        doomed += [d + MASK_SUFFIX for d in doomed]
         for key in [k for k in self.cells if k[0] in doomed]:
             del self.cells[key]
         return parent.remove(node)

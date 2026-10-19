@@ -64,11 +64,13 @@ def ref(mode, a, b):
 
 def main():
     names = sorted(accel.OPCODES)
-    check("14 blend modes registered", len(names) == 14, "-- got %d" % len(names))
+    check("32 blend modes registered (Paint.NET's 14 + Photoshop's and GIMP's)", len(names) == 32, "-- got %d" % len(names))
 
     # ---- exhaustive per-mode sweep --------------------------------------
     a = np.arange(256, dtype=np.uint32)
-    for name in names:
+    # Paint.NET's set, against its own references; the modes added after it
+    # are held to their formulas in test_blendmodes.py.
+    for name in [n for n in names if accel.OPCODES[n] < accel.NATIVE_OPCODES]:
         opcode = accel.OPCODES[name]
         worst = None
         for b_val in range(0, 256, 1):
@@ -180,7 +182,7 @@ def main():
 
     # ---- registry --------------------------------------------------------
     reg = BlendRegistry()
-    check("registry knows every opcode", len(reg) == 14)
+    check("registry knows every opcode", len(reg) == len(accel.OPCODES))
     check("lookup by name", reg.opcode("Multiply") == accel.MULTIPLY)
     check("unknown name falls back to Normal", reg.opcode("Nonsense") == accel.NORMAL)
     check("membership", "Overlay" in reg and "Nope" not in reg)
@@ -192,7 +194,7 @@ def main():
     reg = BlendRegistry(db)
     check("INI relabels", reg.get("Multiply").label == "Times")
     check("INI reorders", reg.get("Multiply").order == 1)
-    check("INI can hide a mode", "Xor" not in reg and len(reg) == 13)
+    check("INI can hide a mode", "Xor" not in reg and len(reg) == len(accel.OPCODES) - 1)
     check("INI cannot invent a mode", reg.get("Invented") is None)
     check("hidden mode still has no opcode of its own",
           reg.opcode("Xor") == accel.NORMAL)

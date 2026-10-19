@@ -340,9 +340,16 @@ class StructureDelta(Command):
 
     @staticmethod
     def _leaf_ids(node):
-        if node.is_group:
-            return [n.id for n in node.walk(include_self=False) if not n.is_group]
-        return [node.id]
+        leaves = [n for n in node.walk(include_self=False) if not n.is_group] \
+            if node.is_group else [node]
+        out = []
+        for n in leaves:
+            out.append(n.id)
+            # A layer's mask travels with it: its cells are captured too, and
+            # the mask object stays attached to the node while it is out.
+            if getattr(n, "mask", None) is not None:
+                out.append(n.mask.id)
+        return out
 
     @staticmethod
     def removal(doc, node, label="Delete layer", level=1):
@@ -641,3 +648,43 @@ class MarksDelta(Command):
 
     def nbytes(self):
         return 64 + 48 * sum(len(v) for v in self._state.values())
+
+
+class MaskDelta(Command):
+    """A layer's mask present or absent, with its cells.
+
+    Holds the mask object and its Surfaces themselves -- detaching and
+    re-attaching rather than copying -- so a mask's undo history (its own
+    PixelDeltas, keyed by the mask's id) still lines up after the round trip.
+    """
+
+    __slots__ = ("label", "owner_id", "mask", "cells")
+
+    def __init__(self, owner_id, mask, cells, label="Layer Mask"):
+        self.label = label
+        self.owner_id = owner_id
+        self.mask = mask
+        self.cells = cells
+
+    @staticmethod
+    def capture(doc, owner, label="Layer Mask"):
+        mask = getattr(owner, "mask", None)
+        cells = {}
+        if mask is not None:
+            cells = {k: v for k, v in doc.cells.items() if k[0] == mask.id}
+        return MaskDelta(owner.id, mask, cells, label)
+
+    def undo(self, doc):
+        owner = doc.layer(self.owner_id)
+        if owner is None:
+            return None, None
+        opposite = MaskDelta.capture(doc, owner, self.label)
+        if owner.mask is not None:
+            for key in [k for k in doc.cells if k[0] == owner.mask.id]:
+                del doc.cells[key]
+        owner.mask = self.mask
+        doc.cells.update(self.cells)
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return sum(c.nbytes() for c in self.cells.values())

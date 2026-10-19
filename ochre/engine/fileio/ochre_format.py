@@ -118,6 +118,19 @@ def save(doc, path, selection=None, thumbnail_max=256):
             if not node.is_group:
                 add("Planes = %s" % ",".join(node.planes))
                 add("Authoritative = %s" % ",".join(node.authoritative))
+                if getattr(node, "kind", "raster") != "raster":
+                    add("Kind = %s" % node.kind)
+                for key, value in sorted(getattr(node, "params", {}).items()):
+                    add("Param.%s = %s" % (key, _esc(_encode_value(value))))
+                if getattr(node, "clip", False):
+                    add("Clip = 1")
+                if getattr(node, "mask", None) is not None:
+                    add("Mask = 1")
+                    if not node.mask_enabled:
+                        add("MaskEnabled = 0")
+                from ..layerstyles import encode as encode_styles
+                for key, value in sorted(encode_styles(getattr(node, "styles", {})).items()):
+                    add("%s = %s" % (key, _esc(value)))
             for key, value in sorted(node.meta.items()):
                 add("Meta.%s = %s" % (key, _esc(value)))
             add("")
@@ -329,6 +342,18 @@ def load(path, settings=None):
             node.visible = db.getbool(section, "Visible", True)
             node.blend = db.get(section, "BlendMode", "Normal")
             node.meta = _meta_of(db, section)
+            if not is_group:
+                from ..layer import LayerMask
+                from ..layerstyles import decode as decode_styles
+                node.kind = db.get(section, "Kind", "raster")
+                node.params = {k[len("Param."):]: _decode_value(db.get(section, k))
+                               for k in db.keys(section) if k.startswith("Param.")}
+                node.clip = db.getbool(section, "Clip", False)
+                if db.getbool(section, "Mask", False):
+                    node.mask = LayerMask(node)
+                    node.mask_enabled = db.getbool(section, "MaskEnabled", True)
+                node.styles = decode_styles((k, db.get(section, k)) for k in db.keys(section)
+                                            if k.startswith("Style."))
             nodes[lid] = node
             parents[lid] = (db.get(section, "Parent", "") or "",
                             db.getint(section, "Index", 0))
@@ -346,7 +371,7 @@ def load(path, settings=None):
             if "@" not in key:
                 continue
             layer_id, frame_id = key.split("@", 1)
-            node = nodes.get(layer_id)
+            node = nodes.get(layer_id) or doc.layer(layer_id)     # masks resolve via owner
             frame = doc.frame_by_id(frame_id)
             if node is None or frame is None or node.is_group:
                 continue
@@ -423,6 +448,30 @@ def load(path, settings=None):
             selection_mask = _decode_plane(zf.read(SELECTION), "mask")
 
     return doc, selection_mask
+
+
+def _encode_value(value):
+    if isinstance(value, (tuple, list)):
+        return ",".join(str(int(v)) for v in value)
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
+
+def _decode_value(text):
+    """Typed back: comma lists of ints become tuples, numbers numbers."""
+    t = str(text).strip()
+    if "," in t:
+        try:
+            return tuple(int(v) for v in t.split(","))
+        except ValueError:
+            return t
+    for cast in (int, float):
+        try:
+            return cast(t)
+        except ValueError:
+            pass
+    return t
 
 
 def _meta_of(db, section):

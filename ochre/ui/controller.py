@@ -87,6 +87,8 @@ class Controller:
         # attributes above; the others are parked here as state bundles.
         self.documents = []
         self.current_doc = -1
+        # Painting goes to the active layer's MASK rather than its pixels.
+        self.editing_mask = False
 
     # ---- events ----------------------------------------------------------
 
@@ -227,7 +229,8 @@ class Controller:
     # Everything that belongs to ONE open document rather than to the editor.
     _PER_DOC = ("doc", "history", "selection", "compositor", "blends", "display",
                 "path", "dirty_since_save", "_saved_marker", "active_layer",
-                "_pending", "quick_mask", "last_measure", "_history_src")
+                "_pending", "quick_mask", "last_measure", "_history_src",
+                "editing_mask")
 
     def _capture(self):
         return {k: getattr(self, k, None) for k in self._PER_DOC}
@@ -425,8 +428,16 @@ class Controller:
             return []
 
         pending, self._pending = self._pending, []
+        # A layer style draws beyond the pixels that changed -- a stroke or
+        # shadow follows new paint outward -- so repaints grow by the
+        # furthest any style in the document reaches (nearly always zero).
+        from ..engine import layerstyles
+        grow = max([layerstyles.reach(l.styles) for l in self.doc.layers()
+                    if getattr(l, "styles", None) and layerstyles.enabled(l.styles)] + [0])
         merged = []
         for rect in pending:
+            if grow:
+                rect = rect.inflated(grow)
             clipped = rect.clipped_to(self.doc.width, self.doc.height)
             if clipped is not None:
                 merged.append(clipped)
@@ -570,6 +581,8 @@ class Controller:
         return self.move_layer(target, parent, j)
 
     def set_active_layer(self, layer):
+        if layer is not self.active_layer:
+            self.editing_mask = False
         self.active_layer = layer
         self.compositor.set_active(getattr(layer, "id", layer))
         self.emit("layer.active", layer=layer)
@@ -617,6 +630,18 @@ class Controller:
             authoritative=tuple(getattr(source, "authoritative", ("rgba",))))
         copy.opacity, copy.blend = source.opacity, source.blend
         copy.visible = source.visible
+        copy.kind, copy.params = source.kind, dict(source.params)
+        copy.clip, copy.mask_enabled = source.clip, source.mask_enabled
+        copy.styles = {k: dict(v) for k, v in source.styles.items()}
+        if source.mask is not None:
+            from ..engine.layer import LayerMask
+            copy.mask = LayerMask(copy)
+            for (lid, fid), mcell in list(self.doc.cells.items()):
+                if lid != source.mask.id:
+                    continue
+                target = self.doc.cell(copy.mask, self.doc.frame_by_id(fid))
+                target.plane("rgba")[...] = mcell.plane("rgba")
+                target.content_bbox = mcell.content_bbox
         for (layer_id, frame_id), cell in list(self.doc.cells.items()):
             if layer_id != source.id:
                 continue
@@ -637,6 +662,196 @@ class Controller:
         self._after_structure_change()
         return copy
 
+    # ---- masks, clipping, adjustment and fill layers, styles ----------------
+
+    def add_layer_mask(self, mode="reveal", layer=None):
+        """Layer > Layer Mask > Reveal All / Hide All / From Selection / From
+        Transparency. The new mask becomes what you paint on, as in Photoshop."""
+        from ..engine.commands import MaskDelta
+        from ..engine.layer import LayerMask
+        owner = layer or self.active_layer
+        if owner is None or owner.is_group or getattr(owner, "is_mask", False) \
+                or owner.mask is not None:
+            return None
+        before = MaskDelta.capture(self.doc, owner, "Add Layer Mask")
+        owner.mask = LayerMask(owner)
+        for frame in self.doc.frames:
+            if frame is not self.doc.frame and (owner.id, frame.id) not in self.doc.cells:
+                continue
+            cell = self.doc.cell(owner.mask, frame)
+            px = cell.plane("rgba")
+            px[..., 3] = 255
+            if mode == "hide":
+                value = 0
+            elif mode == "selection":
+                value = 255 if self.selection.mask is None else self.selection.mask
+            elif mode == "transparency":
+                src = self.doc.cells.get((owner.id, frame.id))
+                value = 0 if src is None else src.plane("rgba")[..., 3]
+            else:
+                value = 255
+            px[..., 0] = value
+            px[..., 1] = value
+            px[..., 2] = value
+            cell._touched(self.doc.bounds)
+        self.history.push(before, "Add Layer Mask")
+        self.editing_mask = True
+        self._after_structure_change()
+        return owner.mask
+
+    def delete_layer_mask(self, apply=False, layer=None):
+        """Delete the mask -- or Apply it: bake it into the layer's alpha first."""
+        from ..engine.commands import MaskDelta, PixelDelta
+        from ..engine.compositor import mask_value
+        owner = layer or self.active_layer
+        if owner is None or getattr(owner, "mask", None) is None:
+            return False
+        label = "Apply Layer Mask" if apply else "Delete Layer Mask"
+        self.history.begin_group()
+        if apply and getattr(owner, "kind", "raster") == "raster":
+            for frame in self.doc.frames:
+                mcell = self.doc.cells.get((owner.mask.id, frame.id))
+                cell = self.doc.cells.get((owner.id, frame.id))
+                if mcell is None or cell is None or cell.content_bbox is None:
+                    continue
+                delta = PixelDelta.capture(self.doc, owner.id, frame.id, self.doc.bounds, label)
+                m = mask_value(mcell.plane("rgba"))
+                if cell.index_locked:
+                    idx = cell.plane("index")
+                    clear = 0 if cell.palette is None or cell.palette.transparent is None \
+                        else int(cell.palette.transparent)
+                    idx[m < 128] = clear
+                    cell.refresh_derived()
+                else:
+                    px = cell.plane("rgba")
+                    a = px[..., 3].astype(np.uint32)
+                    px[..., 3] = ((a * m + 127) // 255).astype(np.uint8)
+                cell._touched(self.doc.bounds)
+                if delta is not None:
+                    self.history.push(delta, label, frame_id=frame.id)
+        before = MaskDelta.capture(self.doc, owner, label)
+        for key in [k for k in self.doc.cells if k[0] == owner.mask.id]:
+            del self.doc.cells[key]
+        owner.mask = None
+        self.history.push(before, label)
+        self.history.end_group(label)
+        self.editing_mask = False
+        self._after_structure_change()
+        return True
+
+    def set_editing_mask(self, on):
+        layer = self.active_layer
+        self.editing_mask = bool(on) and layer is not None and getattr(layer, "mask", None) is not None
+        self.emit("layer.active", layer=layer)
+        return self.editing_mask
+
+    def set_mask_enabled(self, on, layer=None):
+        owner = layer or self.active_layer
+        if owner is None or getattr(owner, "mask", None) is None:
+            return False
+        self.set_layer_property(owner, "mask_enabled", bool(on))
+        return True
+
+    def toggle_clipping(self, layer=None):
+        """Layer > Create / Release Clipping Mask (Ctrl+Alt+G)."""
+        target = layer or self.active_layer
+        if target is None or target.is_group:
+            return None
+        self.set_layer_property(target, "clip", not target.clip)
+        return target.clip
+
+    def add_adjustment_layer(self, effect, params=None, name=None):
+        """A layer that applies an adjustment to everything beneath it, and
+        stays editable: Photoshop's adjustment layers."""
+        from ..engine.layer import ADJUSTMENT
+        label = "New Adjustment Layer"
+        self.history.begin_group()
+        layer = self.add_layer(name or self._effect_label(effect))
+        layer.kind = ADJUSTMENT
+        layer.params = dict(params or {}, effect=effect)
+        self.add_layer_mask("reveal", layer)
+        self.history.end_group(label)
+        self.editing_mask = False
+        self._after_structure_change()
+        return layer
+
+    def _effect_label(self, effect):
+        from ..engine.effects import EffectRegistry
+        reg = getattr(self, "_effect_reg", None)
+        if reg is None:
+            reg = self._effect_reg = EffectRegistry(self.db)
+        return reg.label(effect)
+
+    def add_fill_layer(self, fill="solid", name=None, **params):
+        """A layer that generates its content: a solid colour or a gradient."""
+        from ..engine.layer import FILL
+        label = "New Fill Layer"
+        self.history.begin_group()
+        layer = self.add_layer(name or ("Color Fill" if fill == "solid" else "Gradient Fill"))
+        layer.kind = FILL
+        p = {"type": fill}
+        if fill == "solid":
+            p["color"] = tuple(params.get("color", self.primary))
+        else:
+            p["start"] = tuple(params.get("start", self.primary))
+            p["end"] = tuple(params.get("end", self.secondary))
+            p["angle"] = float(params.get("angle", 90))
+        layer.params = p
+        if self.selection.mask is not None:
+            self.add_layer_mask("selection", layer)
+        self.history.end_group(label)
+        self.editing_mask = False
+        self._after_structure_change()
+        return layer
+
+    def set_layer_params(self, layer, params):
+        """Re-edit an adjustment or fill layer."""
+        merged = dict(layer.params)
+        merged.update(params)
+        return self.set_layer_property(layer, "params", merged)
+
+    def set_layer_styles(self, layer, styles):
+        """Layer > Layer Style. {name: params}; params may carry enabled=False."""
+        clean = {k: dict(v) for k, v in (styles or {}).items() if v}
+        return self.set_layer_property(layer, "styles", clean)
+
+    def rasterize_layer(self, layer=None):
+        """Bake a layer's styles, mask and generated content into plain pixels."""
+        from ..engine.commands import MaskDelta, PixelDelta, PropertyDelta
+        from ..engine.compositor import _Leaf
+        target = layer or self.active_layer
+        if target is None or target.is_group or getattr(target, "kind", "raster") == "adjustment":
+            return False
+        label = "Rasterize Layer"
+        self.history.begin_group()
+        for frame in self.doc.frames:
+            if getattr(target, "kind", "raster") == "raster" and \
+                    (target.id, frame.id) not in self.doc.cells:
+                continue
+            cell = self.doc.cell(target, frame)
+            leaf = _Leaf(cell if getattr(target, "kind", "raster") == "raster" else None,
+                         self.blends.opcode("Normal"), 255, target)
+            out = np.zeros((self.doc.height, self.doc.width, 4), np.uint8)
+            self.compositor._blend_leaf(out, leaf, self.doc.bounds, frame)
+            delta = PixelDelta.capture(self.doc, target.id, frame.id, self.doc.bounds, label)
+            cell.plane("rgba")[...] = out
+            cell._touched(self.doc.bounds)
+            if delta is not None:
+                self.history.push(delta, label, frame_id=frame.id)
+        for attr, empty in (("styles", {}), ("kind", "raster"), ("params", {})):
+            if getattr(target, attr) != empty:
+                self.history.push(PropertyDelta(target.id, attr, getattr(target, attr)), label)
+                setattr(target, attr, empty)
+        if target.mask is not None:
+            self.history.push(MaskDelta.capture(self.doc, target, label), label)
+            for key in [k for k in self.doc.cells if k[0] == target.mask.id]:
+                del self.doc.cells[key]
+            target.mask = None
+        self.history.end_group(label)
+        self.editing_mask = False
+        self._after_structure_change()
+        return True
+
     # ---- merging ---------------------------------------------------------
 
     def merge_down(self, layer=None):
@@ -649,7 +864,13 @@ class Controller:
         lower = transform.layer_below(self.doc, upper)
         if lower is None:
             return False
+        plain = (getattr(upper, "kind", "raster") == "raster" and upper.mask is None
+                 and not upper.styles and not upper.clip)
         rects = transform.merge_rects(self.doc, upper, lower)
+        if not plain:
+            # An adjustment, a fill or a style reaches past the upper layer's
+            # own pixels, so the whole canvas is captured for undo.
+            rects = {f.id: self.doc.bounds for f in self.doc.frames}
         self.history.begin_group()
         for frame_id, rect in rects.items():
             self.doc.cell(lower, self.doc.frame_by_id(frame_id))
@@ -658,7 +879,27 @@ class Controller:
                 self.history.push(delta, "Merge down", frame_id=frame_id)
         self.history.push(StructureDelta.removal(self.doc, upper, "Merge down"), "Merge down")
         self.history.end_group("Merge down")
-        transform.merge_down(self.doc, upper, lower, self.blends)
+        if plain:
+            transform.merge_down(self.doc, upper, lower, self.blends)
+        else:
+            # Whatever the upper layer LOOKS like -- mask, styles, adjustment,
+            # fill, clipping -- is what lands on the lower one.
+            from ..engine.compositor import _Leaf
+            for frame in self.doc.frames:
+                cell = self.doc.cell(lower, frame)
+                window = cell.plane("rgba").copy()
+                usurf = self.doc.cells.get((upper.id, frame.id))
+                leaf = _Leaf(usurf, self.blends.opcode(upper.blend), upper.opacity, upper)
+                if usurf is None and getattr(upper, "kind", "raster") == "raster":
+                    continue
+                self.compositor._blend_leaf(window, leaf, self.doc.bounds, frame)
+                if cell.index_locked:
+                    transform.composite_onto(cell, window, self.doc.bounds,
+                                             self.blends.opcode("Normal"), 255)
+                else:
+                    cell.plane("rgba")[...] = window
+                    cell._touched(self.doc.bounds)
+            self.doc.remove_layer(upper)
         self.set_active_layer(lower)
         self._after_structure_change()
         return True
@@ -1098,8 +1339,16 @@ class Controller:
         self.emit("tool.changed", name=name, tool=tool)
         return tool
 
+    @property
+    def paint_target(self):
+        """What the tools write to: the active layer, or its mask."""
+        layer = self.active_layer
+        if self.editing_mask and layer is not None and getattr(layer, "mask", None) is not None:
+            return layer.mask
+        return layer
+
     def _context(self):
-        ctx = ToolContext(self.doc, self.active_layer, self.doc.frame,
+        ctx = ToolContext(self.doc, self.paint_target, self.doc.frame,
                           self.selection, self.primary, self.secondary,
                           self.settings, self.history)
         ctx.primary_index = self.primary_index

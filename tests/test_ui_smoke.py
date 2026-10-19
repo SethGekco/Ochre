@@ -1286,6 +1286,58 @@ def main():
     check("File offers Close and Export Slices", "Close" in file_items and "Export Slices..." in file_items)
     check("a Window menu toggles every dock", any(a.text() == "&Window" for a in win2.menuBar().actions()))
 
+    # ---- masks, clipping, adjustment / fill layers, styles in the window ------
+    from ochre.engine.geometry import Rect as _R
+    from ochre.ui.layerdialogs import (AdjustmentLayerDialog, FillLayerDialog,
+                                       LayerStyleDialog)
+    ctl2.new_document(120, 90)
+    win2.canvas.bind()
+    win2._sync_all()
+    for _ in range(3):
+        app.processEvents()
+    lay3 = ctl2.add_layer("shape")
+    ctl2.doc.cell(lay3).fill(_R(30, 20, 40, 40), (0, 0, 255, 255))
+    layer_items = [a.text().replace("&", "") for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&Layers").menu().actions() if a.text()]
+    for entry in ("Layer Mask", "New Adjustment Layer", "New Fill Layer", "Layer Style...",
+                  "Rasterize Layer", "Create / Release Clipping Mask"):
+        check("Layers menu offers %s" % entry, entry in layer_items, "-- %s" % layer_items)
+    win2._layer_fx(ctl2.add_layer_mask, "reveal")
+    app.processEvents()
+    check("the Layers dock marks a layer whose mask is being painted",
+          any("[painting mask]" in win2.layers_dock.list.item(i).text()
+              for i in range(win2.layers_dock.list.count())))
+    menu = win2.layers_dock.build_context_menu(lay3)
+    check("the layer's right-click menu carries the mask and effects entries",
+          any(a.text().startswith("Mask, Clipping") for a in menu.actions()))
+    dlg = LayerStyleDialog(ctl2, lay3, win2)
+    dlg._set("stroke", "size", 4)
+    win2.canvas.repaint()
+    check("the Layer Style dialog previews live", "stroke" in lay3.styles)
+    dlg.accept()
+    check("...and OK records it as one step", lay3.styles["stroke"]["size"] == 4
+          and ctl2.history_labels()[-1] == "Change styles")
+    dlg = LayerStyleDialog(ctl2, lay3, win2)
+    dlg._set("drop_shadow", "distance", 9)
+    dlg.reject()
+    check("...while Cancel puts the styles back exactly", "drop_shadow" not in lay3.styles)
+    adj = ctl2.add_adjustment_layer("brightness_contrast")
+    dlg = AdjustmentLayerDialog(ctl2, adj, win2.effects, win2)
+    for row in dlg.rows:
+        if row.prop.name == "brightness":
+            row.prop.value = 40
+    dlg._changed()
+    dlg.accept()
+    check("the adjustment layer dialog sets its parameters", adj.params.get("brightness") == 40)
+    fill3 = ctl2.add_fill_layer("solid")
+    dlg = FillLayerDialog(ctl2, fill3, win2)
+    dlg.color.set_value((9, 99, 199, 255))
+    dlg.accept()
+    win2.layers_dock.sync()
+    win2.canvas.repaint()
+    check("the fill layer dialog sets its colour, and everything paints",
+          tuple(fill3.params["color"]) == (9, 99, 199, 255))
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc

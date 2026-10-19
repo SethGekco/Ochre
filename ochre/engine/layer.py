@@ -69,11 +69,27 @@ class LayerNode:
         return "%s(id=%r, name=%r)" % (type(self).__name__, self.id, self.name)
 
 
+MASK_SUFFIX = "~mask"
+
+# What a leaf layer IS. A raster layer holds pixels; an adjustment layer
+# holds an adjustment (effect name + parameters) applied to everything below
+# it; a fill layer generates its content (a colour or a gradient) at any
+# size. Adjustment and fill layers are Photoshop's; they keep edits
+# re-editable instead of baked in.
+RASTER, ADJUSTMENT, FILL = "raster", "adjustment", "fill"
+
+
 class Layer(LayerNode):
     """A leaf. Declares which planes its cells carry, and which are truth."""
 
     def __init__(self, name="", planes=("rgba",), authoritative=None, **kw):
         super().__init__(name=name, **kw)
+        self.kind = RASTER
+        self.params = {}          # adjustment / fill settings
+        self.clip = False         # clipped to the layer below (a clipping mask)
+        self.mask = None          # LayerMask, or None
+        self.mask_enabled = True
+        self.styles = {}          # layer styles, engine/layerstyles.py
         self.planes = tuple(planes)
         self.authoritative = tuple(authoritative if authoritative is not None
                                    else (self.planes[0],))
@@ -108,6 +124,27 @@ class Layer(LayerNode):
         if name not in self.authoritative:
             self.authoritative = self.authoritative + (name,)
         return True
+
+
+class LayerMask(Layer):
+    """A layer's mask: greyscale, white shows the layer, black hides it.
+
+    It is a Layer in its own right -- its cells sit in the document's cell
+    map under the owner's id plus MASK_SUFFIX -- so every brush, gradient,
+    fill, filter, undo step and the file format work on a mask with no
+    special case at all. It is never in the tree; Document.layer() finds it
+    through its owner.
+    """
+
+    is_mask = True
+
+    def __init__(self, owner):
+        super().__init__(name=owner.name + " (mask)", planes=("rgba",),
+                         layer_id=owner.id + MASK_SUFFIX)
+        self.owner = owner
+
+    def effectively_visible(self):
+        return False
 
 
 class LayerGroup(LayerNode):

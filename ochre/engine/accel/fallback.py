@@ -32,12 +32,32 @@ BACKEND = "numpy"
 (NORMAL, MULTIPLY, ADDITIVE, COLORBURN, COLORDODGE, REFLECT, GLOW, OVERLAY,
  DIFFERENCE, NEGATION, LIGHTEN, DARKEN, SCREEN, XOR) = range(14)
 
+# Photoshop's and GIMP's modes beyond Paint.NET's set, appended (the ids are
+# ABI). The C extension implements ids below NATIVE_OPCODES; the selector in
+# __init__ routes the rest here, so the extension can catch up one mode at a
+# time without a flag day. Formulas: the W3C Compositing spec (separable and
+# non-separable), GIMP's for grain extract/merge, Pegtop's soft light (GIMP's,
+# continuous where Photoshop's original has a kink) -- all in integers.
+(SOFTLIGHT, HARDLIGHT, VIVIDLIGHT, LINEARLIGHT, PINLIGHT, HARDMIX, LINEARBURN,
+ SUBTRACT, DIVIDE, EXCLUSION, GRAINEXTRACT, GRAINMERGE, DARKERCOLOR,
+ LIGHTERCOLOR, HUE, SATURATION, COLOR, LUMINOSITY) = range(14, 32)
+NATIVE_OPCODES = 14
+# Modes that need all three channels at once (they work on hue, saturation
+# and luminosity, or compare whole colours) rather than channel by channel.
+NONSEPARABLE = frozenset((DARKERCOLOR, LIGHTERCOLOR, HUE, SATURATION, COLOR, LUMINOSITY))
+
 OPCODES = {
     "Normal": NORMAL, "Multiply": MULTIPLY, "Additive": ADDITIVE,
     "ColorBurn": COLORBURN, "ColorDodge": COLORDODGE, "Reflect": REFLECT,
     "Glow": GLOW, "Overlay": OVERLAY, "Difference": DIFFERENCE,
     "Negation": NEGATION, "Lighten": LIGHTEN, "Darken": DARKEN,
     "Screen": SCREEN, "Xor": XOR,
+    "SoftLight": SOFTLIGHT, "HardLight": HARDLIGHT, "VividLight": VIVIDLIGHT,
+    "LinearLight": LINEARLIGHT, "PinLight": PINLIGHT, "HardMix": HARDMIX,
+    "LinearBurn": LINEARBURN, "Subtract": SUBTRACT, "Divide": DIVIDE,
+    "Exclusion": EXCLUSION, "GrainExtract": GRAINEXTRACT, "GrainMerge": GRAINMERGE,
+    "DarkerColor": DARKERCOLOR, "LighterColor": LIGHTERCOLOR, "Hue": HUE,
+    "Saturation": SATURATION, "Color": COLOR, "Luminosity": LUMINOSITY,
 }
 
 
@@ -106,7 +126,118 @@ def blend_channel(mode, a, b):
         lo = _mul(2 * a, b)
         hi = 255 - _mul(2 * (255 - a), 255 - b)
         return np.where(a < 128, lo, hi)
+    if mode == HARDLIGHT:
+        # Overlay with the layers' roles swapped: keys on the UPPER layer.
+        lo = _mul(2 * b, a)
+        hi = 255 - _mul(2 * (255 - b), 255 - a)
+        return np.where(b < 128, lo, hi)
+    if mode == SOFTLIGHT:
+        # Pegtop: a^2 + 2b(a - a^2). a - a^2/255 is never negative.
+        a2 = _mul(a, a)
+        return np.minimum(255, a2 + _mul(2 * b, a - a2))
+    if mode == LINEARBURN:
+        s = a + b
+        return np.where(s > 255, s - 255, 0)
+    if mode == SUBTRACT:
+        return np.where(a > b, a - b, 0)
+    if mode == DIVIDE:
+        return np.where(b == 0, 255, np.minimum(255, _safe_div(a * 255, b)))
+    if mode == EXCLUSION:
+        return a + b - 2 * _mul(a, b)
+    if mode == VIVIDLIGHT:
+        # Colour burn by 2b below the middle, colour dodge by 2(b-128) above.
+        b2 = 2 * b
+        burn = np.where(b2 == 0, 0, 255 - np.minimum(255, _safe_div((255 - a) * 255, b2)))
+        # 2b - 1 in unit terms is 2b - 255 here (not 256): 255 is "one".
+        d = np.where(b >= 128, 2 * b - 255, 0)
+        dodge = np.where(d >= 255, 255, np.minimum(255, _safe_div(a * 255, 255 - d)))
+        return np.where(b < 128, burn, dodge)
+    if mode == LINEARLIGHT:
+        s = a + 2 * b
+        return np.where(s > 255, np.minimum(255, s - 255), 0)
+    if mode == PINLIGHT:
+        return np.where(b < 128, np.minimum(a, 2 * b),
+                        np.maximum(a, np.where(b >= 128, 2 * b - 255, 0)))
+    if mode == HARDMIX:
+        return np.where(a + b >= 255, 255, 0)
+    if mode == GRAINEXTRACT:
+        s = a + 128
+        return np.where(s > b, np.minimum(255, s - b), 0)
+    if mode == GRAINMERGE:
+        s = a + b
+        return np.where(s > 128, np.minimum(255, s - 128), 0)
     raise ValueError("unknown blend mode id %r" % (mode,))
+
+
+# ---- non-separable modes, after the W3C spec, in integers -------------------
+
+def _lum(r, g, b):
+    # 0.30 / 0.59 / 0.11, scaled by 256: the spec's luma weights.
+    return (77 * r + 151 * g + 28 * b + 128) >> 8
+
+
+def _clip_colour(r, g, b):
+    lum = _lum(r, g, b)
+    n = np.minimum(np.minimum(r, g), b)
+    x = np.maximum(np.maximum(r, g), b)
+    out = []
+    for c in (r, g, b):
+        lo_den = lum - n
+        c1 = np.where((n < 0) & (lo_den > 0),
+                      lum + _sdiv((c - lum) * lum, lo_den), c)
+        hi_den = x - lum
+        c2 = np.where((x > 255) & (hi_den > 0),
+                      lum + _sdiv((c1 - lum) * (255 - lum), hi_den), c1)
+        out.append(np.clip(c2, 0, 255))
+    return out
+
+
+def _sdiv(num, den):
+    """Signed integer division rounding toward zero; den > 0 where used."""
+    safe = np.where(den == 0, 1, den)
+    q = np.abs(num) // np.abs(safe)
+    return np.where((num < 0) != (safe < 0), -q, q)
+
+
+def _set_lum(r, g, b, lum):
+    d = lum - _lum(r, g, b)
+    return _clip_colour(r + d, g + d, b + d)
+
+
+def _sat(r, g, b):
+    return np.maximum(np.maximum(r, g), b) - np.minimum(np.minimum(r, g), b)
+
+
+def _set_sat(r, g, b, sat):
+    # (c - min) * sat / (max - min): the max channel becomes sat, the min 0,
+    # the middle scales between -- ties included, with no sorting.
+    mn = np.minimum(np.minimum(r, g), b)
+    span = np.maximum(np.maximum(r, g), b) - mn
+    return [np.where(span > 0, _sdiv((c - mn) * sat, span), 0) for c in (r, g, b)]
+
+
+def blend_colour(mode, a, b):
+    """B(Cb, Cs) for the non-separable modes. a, b: (r, g, b) uint32 tuples.
+
+    Returns three uint32 arrays in 0..255.
+    """
+    ar, ag, ab_ = (x.astype(np.int64) for x in a)
+    br, bg, bb = (x.astype(np.int64) for x in b)
+    if mode in (DARKERCOLOR, LIGHTERCOLOR):
+        la, lb = _lum(ar, ag, ab_), _lum(br, bg, bb)
+        take_b = lb < la if mode == DARKERCOLOR else lb > la
+        out = [np.where(take_b, y, x) for x, y in ((ar, br), (ag, bg), (ab_, bb))]
+    elif mode == HUE:
+        out = _set_lum(*_set_sat(br, bg, bb, _sat(ar, ag, ab_)), _lum(ar, ag, ab_))
+    elif mode == SATURATION:
+        out = _set_lum(*_set_sat(ar, ag, ab_, _sat(br, bg, bb)), _lum(ar, ag, ab_))
+    elif mode == COLOR:
+        out = _set_lum(br, bg, bb, _lum(ar, ag, ab_))
+    elif mode == LUMINOSITY:
+        out = _set_lum(ar, ag, ab_, _lum(br, bg, bb))
+    else:
+        raise ValueError("not a non-separable mode: %r" % (mode,))
+    return [np.clip(c, 0, 255).astype(np.uint32) for c in out]
 
 
 def blend_rect(dst, src, mode=NORMAL, opacity=255, mask=None, out=None):
@@ -160,10 +291,16 @@ def blend_rect(dst, src, mode=NORMAL, opacity=255, mask=None, out=None):
     nonzero = ao > 0
     safe = np.where(nonzero, ao, 1)
 
+    whole = None
+    if mode in NONSEPARABLE:
+        whole = blend_colour(mode, tuple(dst[..., c].astype(np.uint32) for c in range(3)),
+                             tuple(src[..., c].astype(np.uint32) for c in range(3)))
     for c in range(3):
         cb = dst[..., c].astype(np.uint32)
         cs = src[..., c].astype(np.uint32)
-        if mode == NORMAL:
+        if whole is not None:
+            cs_eff = _mul(255 - ab, cs) + _mul(ab, whole[c])
+        elif mode == NORMAL:
             # Cs' = (1-ab)*Cs + ab*B(Cb,Cs), and B is the identity here, so
             # Cs' == Cs exactly. Computing the two scaled halves and adding
             # them back would be slower AND would introduce rounding error

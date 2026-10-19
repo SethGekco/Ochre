@@ -47,7 +47,8 @@ def main():
     # ---- blend_channel, exhaustively ------------------------------------
     a = np.arange(256, dtype=np.uint32)
     worst = None
-    for name, opcode in sorted(spec.OPCODES.items()):
+    NATIVE = {n: o for n, o in spec.OPCODES.items() if o < spec.NATIVE_OPCODES}
+    for name, opcode in sorted(NATIVE.items()):
         for b_val in range(256):
             b = np.full(256, b_val, dtype=np.uint32)
             want = np.asarray(spec.blend_channel(opcode, a, b)).astype(np.int64)
@@ -71,7 +72,7 @@ def main():
     # ---- blend_rect: random corpus across every mode and opacity --------
     rng = np.random.default_rng(20260923)
     mismatches = []
-    for opcode in sorted(spec.OPCODES.values()):
+    for opcode in sorted(NATIVE.values()):
         for trial in range(6):
             h, w = int(rng.integers(1, 9)), int(rng.integers(1, 9))
             dst = rng.integers(0, 256, (h, w, 4), dtype=np.uint8)
@@ -86,6 +87,14 @@ def main():
                 mismatches.append((opcode, trial, diff))
     check("blend_rect matches across every mode, opacity and mask",
           not mismatches, "-- %r" % mismatches[:4])
+
+    # Modes the extension does not know yet go to the specification.
+    d0 = rng.integers(0, 256, (4, 4, 4), dtype=np.uint8)
+    s0 = rng.integers(0, 256, (4, 4, 4), dtype=np.uint8)
+    routed = all(np.array_equal(accel.blend_rect(d0.copy(), s0, op, 200, None),
+                                spec.blend_rect(d0.copy(), s0, op, 200, None))
+                 for op in spec.OPCODES.values() if op >= spec.NATIVE_OPCODES)
+    check("newer modes are routed to the specification", routed)
 
     # ---- the edge cases that break naive implementations ----------------
     def px(*v):
@@ -102,7 +111,7 @@ def main():
     }
     bad = []
     for label, (d, s) in cases.items():
-        for opcode in sorted(spec.OPCODES.values()):
+        for opcode in sorted(NATIVE.values()):
             for opacity in (0, 1, 127, 128, 254, 255):
                 want = spec.blend_rect(d.copy(), s, opcode, opacity)
                 got = native.blend_rect(d.copy(), s, opcode, opacity)

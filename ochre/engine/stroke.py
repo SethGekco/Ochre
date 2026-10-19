@@ -158,6 +158,7 @@ class StrokeSession:
         if touched is not None:
             self.surface.refresh_derived(touched)
             self.surface.dirty.add(touched)
+            self.surface.revision += 1
         return touched
 
     # ---- commit ----------------------------------------------------------

@@ -532,7 +532,119 @@ class MainWindow(QMainWindow):
             self._act(align, label, lambda _c=False, h=how: self._refresh_after(
                 self.ctl.align_layer, h))
         layer_menu.addSeparator()
+        self.build_layer_fx_menu(layer_menu)
+        layer_menu.addSeparator()
         self._act(layer_menu, "&Properties...", self.do_layer_properties, "F4")
+
+    def build_layer_fx_menu(self, menu):
+        """Masks, clipping, adjustment and fill layers, styles. Shared by the
+        Layer menu and the Layers dock's right-click menu."""
+        fx = self
+        mask = menu.addMenu("Layer &Mask")
+        for label, mode in (("&Reveal All", "reveal"), ("&Hide All", "hide"),
+                            ("From &Selection", "selection"),
+                            ("From &Transparency", "transparency")):
+            mask.addAction(label, lambda m=mode: fx._layer_fx(fx.ctl.add_layer_mask, m))
+        mask.addSeparator()
+        layer = self.ctl.active_layer
+        has_mask = layer is not None and getattr(layer, "mask", None) is not None
+        edit = mask.addAction("&Edit Mask (paint on it)",
+                              lambda: fx._layer_fx(fx.ctl.set_editing_mask,
+                                                   not fx.ctl.editing_mask))
+        edit.setCheckable(True)
+        edit.setChecked(bool(self.ctl.editing_mask))
+        edit.setEnabled(has_mask)
+        on = mask.addAction("E&nabled", lambda: fx._layer_fx(
+            fx.ctl.set_mask_enabled, not getattr(fx.ctl.active_layer, "mask_enabled", True)))
+        on.setCheckable(True)
+        on.setChecked(bool(getattr(layer, "mask_enabled", True)))
+        on.setEnabled(has_mask)
+        apply_ = mask.addAction("&Apply Mask", lambda: fx._layer_fx(fx.ctl.delete_layer_mask, True))
+        delete = mask.addAction("&Delete Mask", lambda: fx._layer_fx(fx.ctl.delete_layer_mask))
+        apply_.setEnabled(has_mask)
+        delete.setEnabled(has_mask)
+
+        def refresh():
+            # A menu built once at start-up would show stale states; this
+            # runs every time the menu opens.
+            lay = fx.ctl.active_layer
+            hm = lay is not None and getattr(lay, "mask", None) is not None
+            edit.setChecked(bool(fx.ctl.editing_mask))
+            on.setChecked(bool(getattr(lay, "mask_enabled", True)))
+            for a in (edit, on, apply_, delete):
+                a.setEnabled(hm)
+        menu.aboutToShow.connect(refresh)
+        mask.aboutToShow.connect(refresh)
+        clip = QAction("Create / Release &Clipping Mask", menu)
+        clip.setShortcut(QKeySequence("Ctrl+Alt+G"))
+        clip.triggered.connect(lambda: fx._layer_fx(fx.ctl.toggle_clipping))
+        menu.addAction(clip)
+        adj = menu.addMenu("New Ad&justment Layer")
+        for name in self.effects.names():
+            effect_cls = self.effects._classes.get(name)
+            if getattr(effect_cls, "pointwise", False):
+                adj.addAction(self.effects.label(name),
+                              lambda n=name: fx.do_new_adjustment_layer(n))
+        fill = menu.addMenu("New &Fill Layer")
+        fill.addAction("&Solid Color...", lambda: fx.do_new_fill_layer("solid"))
+        fill.addAction("&Gradient...", lambda: fx.do_new_fill_layer("gradient"))
+        menu.addAction("Layer St&yle...", self.do_layer_style)
+        menu.addAction("Clear Layer Style", lambda: fx._layer_fx(
+            fx.ctl.set_layer_styles, fx.ctl.active_layer, {}))
+        menu.addAction("Edit Adjustment / Fill...", self.do_edit_layer_content)
+        menu.addAction("&Rasterize Layer", lambda: fx._layer_fx(fx.ctl.rasterize_layer))
+        return menu
+
+    def _layer_fx(self, fn, *args):
+        if self.ctl.active_layer is None:
+            return None
+        result = fn(*args)
+        self.layers_dock.sync()
+        self.canvas.refresh()
+        self.canvas.viewport().update()
+        return result
+
+    def do_new_adjustment_layer(self, effect):
+        from .layerdialogs import AdjustmentLayerDialog
+        layer = self.ctl.add_adjustment_layer(effect)
+        self.layers_dock.sync()
+        self.canvas.refresh()
+        dlg = AdjustmentLayerDialog(self.ctl, layer, self.effects, self)
+        dlg.exec()
+        self.canvas.refresh()
+        return layer
+
+    def do_new_fill_layer(self, kind):
+        from .layerdialogs import FillLayerDialog
+        layer = self.ctl.add_fill_layer(kind)
+        self.layers_dock.sync()
+        self.canvas.refresh()
+        FillLayerDialog(self.ctl, layer, self).exec()
+        self.canvas.refresh()
+        return layer
+
+    def do_layer_style(self):
+        from .layerdialogs import LayerStyleDialog
+        layer = self.ctl.active_layer
+        if layer is None or layer.is_group or getattr(layer, "kind", "raster") == "adjustment":
+            self.statusBar().showMessage("Layer styles apply to pixel and fill layers.", 5000)
+            return
+        LayerStyleDialog(self.ctl, layer, self).exec()
+        self.layers_dock.sync()
+        self.canvas.refresh()
+
+    def do_edit_layer_content(self):
+        from .layerdialogs import AdjustmentLayerDialog, FillLayerDialog
+        layer = self.ctl.active_layer
+        kind = getattr(layer, "kind", "raster")
+        if kind == "adjustment":
+            AdjustmentLayerDialog(self.ctl, layer, self.effects, self).exec()
+        elif kind == "fill":
+            FillLayerDialog(self.ctl, layer, self).exec()
+        else:
+            return False
+        self.canvas.refresh()
+        return True
 
     def _build_status(self):
         bar = QStatusBar()
