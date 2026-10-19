@@ -74,7 +74,8 @@ def main():
     check("INI coerces floats", isinstance(brush.option("hardness"), float))
     check("INI coerces booleans", brush.option("pressure_size") is True)
     check("INI supplies labels", reg.label("brush") == "Paintbrush")
-    check("INI orders tools", reg.names()[0] == "pencil",
+    # Photoshop's order: move first, then selections, then painting.
+    check("INI orders tools", reg.names()[0] == "move_pixels",
           "-- got %r" % reg.names()[:3])
     check("overrides beat INI", reg.create("brush", size=99).option("size") == 99)
 

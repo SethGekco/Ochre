@@ -27,6 +27,7 @@ from ..gradient import (CONICAL, DIAMOND, Gradient, LINEAR, RADIAL,
                         REFLECTED, REPEAT_CLAMP)
 from ..stroke import StrokeSession
 from .base import Tool, constrain_angle, drag_rect
+from . import options as O
 
 
 class _DragTool(Tool):
@@ -119,14 +120,10 @@ class _ShapeTool(_DragTool):
         buttons push everything else off the strip. The INI default keeps
         rectangle as what you get without choosing.
         """
+        from .. import shapelib
         name = str(self.option("shape", self.kind) or self.kind).lower()
-        if name in ("circle", "oval"):
-            name = "ellipse"
-        if name in ("square", "rect"):
-            name = "rectangle"
-        if name in ("star",):
-            name = "star5"
-        if name != "rectangle" and name != "ellipse" and name != "line" \
+        name = _SHAPE_ALIASES.get(name, name)
+        if name != "line" and name not in shapelib.CATALOG \
                 and name not in shapes.POLYGONS:
             return self.kind          # unknown name: fall back, never raise
         return name
@@ -160,18 +157,25 @@ class _ShapeTool(_DragTool):
         if style == shapes.BOTH and kind != "line":
             # Fill with the secondary colour and stroke with the primary, so
             # a two-colour shape is one drag rather than two.
+            params = self._shape_params(kind)
             fill = shapes.coverage(cell.width, cell.height, kind,
-                                   geometry, shapes.FILL, stroke, antialias)
+                                   geometry, shapes.FILL, stroke, antialias, **params)
             self._paint_region(ctx, fill, rect, ctx.secondary)
             edge = shapes.coverage(cell.width, cell.height, kind,
-                                   geometry, shapes.OUTLINE, stroke, antialias)
+                                   geometry, shapes.OUTLINE, stroke, antialias, **params)
             self._paint_region(ctx, edge, rect, colour)
             return rect
 
         cov = shapes.coverage(cell.width, cell.height, kind, geometry,
-                              style, stroke, antialias)
+                              style, stroke, antialias, **self._shape_params(kind))
         self._paint_region(ctx, cov, rect, colour)
         return rect
+
+    def _shape_params(self, kind):
+        radius = self.option("radius", 0)
+        if kind in ("rounded_rectangle", "callout_rounded") and radius:
+            return {"radius": float(radius)}
+        return {}
 
     def _paint_region(self, ctx, full_cov, rect, colour):
         cell = ctx.cell
@@ -185,6 +189,7 @@ class _ShapeTool(_DragTool):
 class LineTool(_ShapeTool):
     name = "line"
     label = "Line"
+    options_spec = (O.stroke(2), O.antialias(True))
     kind = "line"
     default_stroke = 2
 
@@ -199,8 +204,27 @@ class ShapeTool(_ShapeTool):
     @staticmethod
     def choices():
         """Offered shapes, in the order a chooser should list them."""
-        return ("rectangle", "ellipse", "triangle", "diamond", "pentagon",
-                "hexagon", "heptagon", "octagon", "star5", "star6", "star8")
+        from .. import shapelib
+        return tuple(shapelib.CATALOG)
+
+    @classmethod
+    def _spec(cls):
+        from .. import shapelib
+        return (O.Opt("shape", O.CHOICE, "rectangle", "Shape",
+                      choices=tuple(shapelib.CATALOG),
+                      labels={k: shapelib.label(k) for k in shapelib.CATALOG},
+                      groups=shapelib.grouped()),
+                O.fill_style("both"), O.stroke(2), O.antialias(True),
+                O.Opt("radius", O.INT, 0, "Corner radius", 0, 2000, suffix=" px",
+                      tip="Rounded shapes only. 0 picks a radius from the size."))
+
+
+ShapeTool.options_spec = ShapeTool._spec()
+
+_SHAPE_ALIASES = {"circle": "ellipse", "oval": "ellipse", "square": "rectangle",
+                  "rect": "rectangle", "star": "star5", "rounded": "rounded_rectangle",
+                  "roundrect": "rounded_rectangle", "arrow_right": "arrow",
+                  "x": "cross", "tick": "check", "bolt": "lightning"}
 
 
 # Kept so an existing tools.ini or a script naming them still resolves.
@@ -224,6 +248,7 @@ class FreeformTool(_DragTool):
 
     name = "freeform"
     label = "Freeform Shape"
+    options_spec = (O.fill_style("outline"), O.stroke(2), O.antialias(True))
 
     def on_begin(self, ctx, event):
         result = super().on_begin(ctx, event)
@@ -276,6 +301,13 @@ class GradientTool(_DragTool):
 
     name = "gradient"
     label = "Gradient"
+    options_spec = (O.Opt("kind", O.CHOICE, "linear", "Type",
+                          choices=("linear", "reflected", "diamond", "radial", "conical")),
+                    O.Opt("repeat", O.CHOICE, "clamp", "Repeat",
+                          choices=("clamp", "repeat", "reflect"),
+                          labels={"clamp": "None", "repeat": "Sawtooth", "reflect": "Triangular"}),
+                    O.Opt("alpha_only", O.BOOL, False, "Transparency mode"),
+                    O.Opt("reverse", O.BOOL, False, "Reverse"))
 
     KINDS = {"linear": LINEAR, "reflected": REFLECTED, "diamond": DIAMOND,
              "radial": RADIAL, "conical": CONICAL}
@@ -332,6 +364,11 @@ class TextTool(_DragTool):
 
     name = "text"
     label = "Text"
+    options_spec = (O.Opt("font", O.FONT, "DejaVu Sans", "Font"),
+                    O.Opt("size", O.INT, 24, "Size", 4, 1000, suffix=" px"),
+                    O.Opt("align", O.CHOICE, "left", "Align", choices=("left", "center", "right")),
+                    O.Opt("line_spacing", O.FLOAT, 1.0, "Line spacing", 0.5, 4.0, 0.1),
+                    O.antialias(True))
 
     def on_begin(self, ctx, event):
         if ctx.cell is None:

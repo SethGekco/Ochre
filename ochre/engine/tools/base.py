@@ -106,6 +106,9 @@ class Tool:
     # dirty rect and never touches the document; the canvas routes on this
     # attribute rather than on a list of names, so an addon can ship one.
     affects = "pixels"
+    # What the user may adjust, as options.Opt descriptors. The options bar
+    # is generated from this; see options.py for why it lives on the tool.
+    options_spec = ()
     # Resolvable by name but not offered in the toolbox. For compatibility
     # aliases of a tool that has absorbed them, so an old tools.ini or a
     # script naming the old tool keeps working without the chooser growing

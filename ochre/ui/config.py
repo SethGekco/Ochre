@@ -36,6 +36,10 @@ UI_DEFAULTS = {
     "Tools": {
         "DefaultTool": "brush",
     },
+    "Toolbox": {
+        # Icon columns. 1 is a slim Photoshop-style strip, 2 GIMP-style.
+        "Columns": 2,
+    },
 }
 
 

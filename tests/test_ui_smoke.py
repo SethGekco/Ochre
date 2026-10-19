@@ -900,6 +900,106 @@ def main():
     win2.close() if not ctl2.is_modified() else None
     win2.hide()
 
+    # ---- compact toolbox, generated options bar ----------------------------
+    from PySide6.QtWidgets import QCheckBox, QComboBox, QSpinBox
+    from ochre.ui.tooloptions import ShapePalette
+
+    td = win2.tools_dock
+    groups = ctl2.tools.groups()
+    check("THE TOOLBOX HAS ONE BUTTON PER GROUP, not one per tool",
+          len(td.buttons) == len(groups) < len(ctl2.tools.names()),
+          "-- %d buttons for %d tools" % (len(td.buttons), len(ctl2.tools.names())))
+    check("...and is narrow", td.widget().sizeHint().width() <= 100,
+          "-- %d px wide" % td.widget().sizeHint().width())
+    unreachable = []
+    for name in ctl2.tools.names():
+        btn = td.button_for(name)
+        menu_items = [a.text().split("\t")[0] for a in btn.menu().actions()] if btn.menu() else []
+        if td.current[ctl2.tools.group(name)] != name and ctl2.tools.label(name) not in menu_items:
+            unreachable.append(name)
+    check("every tool is reachable from its button or that button's flyout",
+          not unreachable, "-- unreachable: %s" % unreachable)
+    check("tool buttons carry icons", all(not b.icon().isNull() for b in td.buttons.values()))
+
+    # Shared letters cycle within a group, as in Paint.NET.
+    seq = []
+    for _ in range(3):
+        td.shortcuts["select_rect"].activated.emit()
+        seq.append(ctl2.tool_name)
+    check("pressing S repeatedly cycles the marquees",
+          seq == ["select_rect", "select_ellipse", "select_rect"], "-- %s" % seq)
+    ctl2.set_tool("select_ellipse")
+    check("the group's button shows the member you last picked",
+          td.current["marquee"] == "select_ellipse")
+
+    # The options bar is generated for EVERY tool from its spec.
+    bar = win2.options_bar
+    missing = []
+    for name in ctl2.tools.names():
+        ctl2.set_tool(name)
+        app.processEvents()
+        want = {o.name for o in ctl2.tools.spec(name)}
+        if set(bar.widgets) != want:
+            missing.append((name, sorted(want - set(bar.widgets))))
+    check("THE OPTIONS BAR SHOWS A CONTROL FOR EVERY DECLARED OPTION, for every tool",
+          not missing, "-- %s" % missing)
+
+    ctl2.set_tool("brush")
+    app.processEvents()
+    spin = bar.widgets["size"][1]
+    spin.setValue(37)
+    check("changing brush size in the bar changes the tool", ctl2.tool.option("size") == 37)
+    ctl2.set_tool("eraser")
+    ctl2.set_tool("brush")
+    app.processEvents()
+    check("...and survives switching tools", ctl2.tool.option("size") == 37
+          and bar.widgets["size"][1].value() == 37)
+    hard = bar.widgets["hardness"][1]
+    hard.setValue(40)
+    check("percent options map 0..100 onto 0..1", abs(ctl2.tool.option("hardness") - 0.4) < 1e-9)
+    ctl6 = Controller(Settings(DATA), DATA, EventBus(), addon_dirs=[], state_dir=state2)
+    ctl6.new_document()
+    ctl6.set_tool("brush")
+    check("TOOL OPTIONS ARE REMEMBERED BETWEEN RUNS", ctl6.tool.option("size") == 37,
+          "-- a fresh controller on the same state dir got %r" % ctl6.tool.option("size"))
+
+    win2.step_size(+1)
+    app.processEvents()
+    check("] grows the brush and the bar follows",
+          ctl2.tool.option("size") > 37 and bar.widgets["size"][1].value() == ctl2.tool.option("size"))
+    win2.step_size(-1)
+    win2.step_size(-1)
+    check("[ shrinks it", ctl2.tool.option("size") < 37)
+
+    ctl2.set_tool("shape")
+    app.processEvents()
+    palette = bar.widgets["shape"][1]
+    check("the shape option is a categorised palette", isinstance(palette, ShapePalette)
+          and len(palette.buttons) == len(ctl2.tools.spec("shape")[0].choices))
+    palette._pick("gear")
+    check("picking a shape in the palette sets it", ctl2.tool.shape == "gear")
+    combo = bar.widgets["style"][1]
+    combo.setCurrentIndex(combo.findData("fill"))
+    check("a choice option is a combo that writes back", ctl2.tool.option("style") == "fill")
+    aa = bar.widgets["antialias"][1]
+    aa.setChecked(False)
+    check("a bool option is a checkbox that writes back", ctl2.tool.option("antialias") is False)
+
+    # Space turns any tool into the hand.
+    ctl2.set_tool("brush")
+    win2.canvas.user_took_view()
+    ox = win2.canvas.view.offset_x
+    vp2 = win2.canvas.viewport()
+    before_px = ctl2.doc.cell(ctl2.active_layer).plane("rgba").copy()
+    QTest.keyPress(win2.canvas, Qt.Key_Space)
+    QTest.mousePress(vp2, Qt.LeftButton, Qt.NoModifier, QPoint(200, 200))
+    QTest.mouseMove(vp2, QPoint(260, 210))
+    QTest.mouseRelease(vp2, Qt.LeftButton, Qt.NoModifier, QPoint(260, 210))
+    QTest.keyRelease(win2.canvas, Qt.Key_Space)
+    app.processEvents()
+    check("HOLDING SPACE PANS WITH ANY TOOL", win2.canvas.view.offset_x != ox)
+    check("...without painting", np.array_equal(before_px, ctl2.doc.cell(ctl2.active_layer).plane("rgba")))
+
     print("\nall UI smoke checks passed")
 
 

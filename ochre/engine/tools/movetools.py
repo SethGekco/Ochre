@@ -34,6 +34,7 @@ import numpy as np
 from ..geometry import Rect
 from ..stroke import StrokeSession
 from .base import Tool, constrain_angle
+from . import options as O
 from .paint import _circle_coverage
 
 
@@ -53,6 +54,9 @@ class CloneStampTool(Tool):
 
     name = "clone"
     label = "Clone Stamp"
+    options_spec = (O.size(24), O.hardness(0.8),
+                    O.Opt("aligned", O.BOOL, True, "Aligned",
+                          tip="Keep the source offset between strokes."))
     default_size = 24
 
     def __init__(self, **options):
@@ -184,6 +188,8 @@ class MovePixelsTool(Tool):
 
     name = "move_pixels"
     label = "Move Selected Pixels"
+    options_spec = (O.Opt("cut", O.BOOL, True, "Leave hole",
+                          tip="Off copies the pixels instead of moving them."),)
 
     def on_begin(self, ctx, event):
         cell = ctx.cell

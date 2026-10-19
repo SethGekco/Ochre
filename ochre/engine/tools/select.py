@@ -17,6 +17,7 @@ import numpy as np
 from .. import accel
 from ..selection import REPLACE, Selection
 from .base import Tool, drag_rect
+from . import options as O
 
 
 class _DragSelectTool(Tool):
@@ -72,12 +73,14 @@ class _DragSelectTool(Tool):
 class RectSelectTool(_DragSelectTool):
     name = "select_rect"
     label = "Rectangle Select"
+    options_spec = (O.selection_mode(), O.antialias(True))
     shape = "rect"
 
 
 class EllipseSelectTool(_DragSelectTool):
     name = "select_ellipse"
     label = "Ellipse Select"
+    options_spec = (O.selection_mode(), O.antialias(True))
     shape = "ellipse"
 
 
@@ -86,6 +89,7 @@ class LassoTool(Tool):
 
     name = "lasso"
     label = "Lasso Select"
+    options_spec = (O.selection_mode(), O.antialias(True))
     wants_stroke = False
 
     def on_begin(self, ctx, event):
@@ -138,6 +142,10 @@ class MagicWandTool(Tool):
 
     name = "magic_wand"
     label = "Magic Wand"
+    options_spec = (O.selection_mode(), O.tolerance(32),
+                    O.Opt("global", O.BOOL, False, "Global",
+                          tip="Select every similar pixel in the layer (GIMP's Select by Color)."),
+                    O.Opt("feather", O.INT, 0, "Feather", 0, 200, suffix=" px"))
     wants_stroke = False
 
     def on_begin(self, ctx, event):

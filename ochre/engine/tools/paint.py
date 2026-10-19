@@ -20,6 +20,7 @@ from .. import accel
 from ..geometry import Rect
 from ..stroke import StrokeSession
 from .base import Tool, constrain_angle
+from . import options as O
 
 
 def _circle_coverage(diameter, hardness=1.0, antialias=True):
@@ -120,6 +121,7 @@ class PencilTool(_StrokeTool):
 
     name = "pencil"
     label = "Pencil"
+    options_spec = (O.size(1, 256),)
     default_size = 1
 
     def _dab(self, ctx, event, x, y):
@@ -159,6 +161,9 @@ class BrushTool(_StrokeTool):
 
     name = "brush"
     label = "Paintbrush"
+    options_spec = (O.size(16), O.hardness(0.85), O.opacity(1.0),
+                    O.Opt("pressure_size", O.BOOL, True, "Pressure size",
+                          tip="Tablet pressure scales the brush."))
     default_size = 16
 
     def _dab(self, ctx, event, x, y):
@@ -194,6 +199,7 @@ class EraserTool(BrushTool):
 
     name = "eraser"
     label = "Eraser"
+    options_spec = (O.size(16), O.hardness(0.85))
 
     def _dab(self, ctx, event, x, y):
         cell = ctx.cell
@@ -220,6 +226,9 @@ class BucketFillTool(Tool):
 
     name = "bucket"
     label = "Paint Bucket"
+    options_spec = (O.tolerance(32),
+                    O.Opt("global", O.BOOL, False, "Global fill",
+                          tip="Fill every similar pixel, not just the connected area."))
 
     def on_begin(self, ctx, event):
         cell = ctx.cell

@@ -34,6 +34,35 @@ class Session:
             return (w, h)
         return None
 
+    # ---- per-tool options --------------------------------------------------
+
+    def tool_options(self, tool):
+        """{option: raw string} the user last chose for a tool."""
+        section = "Tool:" + tool
+        if not self._cp.has_section(section):
+            return {}
+        return dict(self._cp.items(section))
+
+    def remember_tool_option(self, tool, key, value):
+        section = "Tool:" + tool
+        if not self._cp.has_section(section):
+            self._cp.add_section(section)
+        if isinstance(value, bool):
+            value = "on" if value else "off"
+        self._cp.set(section, key, str(value))
+        return self._write()
+
+    def _write(self):
+        if not self.path:
+            return False
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as f:
+                self._cp.write(f)
+            return True
+        except OSError:
+            return False
+
     def remember_size(self, width, height):
         if not self.path:
             return False

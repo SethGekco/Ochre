@@ -61,6 +61,7 @@ class Controller:
         self.state_dir = state_dir
         self.session = Session(state_dir)
         self._saved_marker = None
+        self._tool_overrides = {}
         self.path = None
         self.dirty_since_save = False
         self.active_layer = None
@@ -818,8 +819,39 @@ class Controller:
 
     # ---- tools -----------------------------------------------------------
 
+    def tool_option_values(self, name):
+        """What a tool's options are right now: INI, then the user's choices.
+
+        Kept per tool and remembered between runs, because a tool switch
+        builds a fresh instance -- and losing your brush size every time you
+        pick the eraser is the kind of thing that makes an editor feel broken.
+        """
+        values = self.tools.defaults(name)
+        remembered = self.session.tool_options(name) if self.session else {}
+        for opt in self.tools.spec(name):
+            if opt.name in remembered:
+                values[opt.name] = opt.coerce(remembered[opt.name])
+        values.update(self._tool_overrides.get(name, {}))
+        return values
+
+    def set_tool_option(self, key, value, name=None):
+        """Change one option of the active (or a named) tool. Remembered."""
+        name = name or self.tool_name
+        spec = {o.name: o for o in self.tools.spec(name)}
+        if key in spec:
+            value = spec[key].coerce(value)
+        self._tool_overrides.setdefault(name, {})[key] = value
+        if self.session is not None:
+            self.session.remember_tool_option(name, key, value)
+        if name == self.tool_name and self.tool is not None:
+            self.tool.set_option(key, value)
+        self.emit("tool.options", name=name, key=key, value=value)
+        return value
+
     def set_tool(self, name, **options):
-        tool = self.tools.create(name, **options)
+        values = self.tool_option_values(name) if name in self.tools else {}
+        values.update(options)
+        tool = self.tools.create(name, **values)
         if tool is None:
             return None
         if self.tool is not None and self.tool.active:

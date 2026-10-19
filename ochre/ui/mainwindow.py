@@ -31,7 +31,8 @@ class MainWindow(QMainWindow):
         self.canvas = CanvasView(controller, settings, self)
         self.setCentralWidget(self.canvas)
 
-        self.tools_dock = ToolsDock(controller, self)
+        self.tools_dock = ToolsDock(controller, self,
+                                    columns=settings.get("Toolbox", "Columns") or 2)
         self.layers_dock = LayersDock(controller, self)
         self.colors_dock = ColorsDock(controller, self)
         self.palette_dock = PaletteDock(controller, self)
@@ -58,6 +59,10 @@ class MainWindow(QMainWindow):
         self.recent = RecentFiles(state_dir) if state_dir else None
         self.setAcceptDrops(True)
 
+        from .tooloptions import ToolOptionsBar
+        self.options_bar = ToolOptionsBar(controller, self)
+        self.addToolBar(Qt.TopToolBarArea, self.options_bar)
+
         self._build_menus()
         self._build_status()
         self._subscribe()
@@ -81,6 +86,9 @@ class MainWindow(QMainWindow):
         bus.subscribe("colour.changed", lambda **k: self.colors_dock.sync())
         bus.subscribe("palette.changed", lambda **k: self.palette_dock.sync())
         bus.subscribe("tool.changed", lambda **k: self._on_tool())
+        # Size and other options change the footprint drawn under the cursor.
+        bus.subscribe("tool.options", lambda **k: (self.options_bar.sync_values(**k),
+                                                    self.canvas.apply_tool_cursor()))
         bus.subscribe("frames.changed", lambda **k: (self.frames_dock.sync(),
                                                      self._update_frames_visible()))
         bus.subscribe("frame.changed", lambda **k: self._on_frame())
@@ -95,6 +103,7 @@ class MainWindow(QMainWindow):
 
     def _on_tool(self, **_):
         self.tools_dock.sync()
+        self.options_bar.rebuild()
         # The pointer belongs to the tool, so it changes with it -- including
         # the size of the footprint, since changing brush size is a tool
         # change too.
@@ -220,6 +229,25 @@ class MainWindow(QMainWindow):
         self._act(image_menu, "Add &Frame", lambda: self.ctl.add_frame())
         self._act(image_menu, "&Duplicate Frame", lambda: self.ctl.add_frame(True))
         self._act(image_menu, "Delete Fra&me", lambda: self.ctl.remove_frame())
+
+        tools_menu = bar.addMenu("&Tools")
+        from . import icons as _icons
+        for group, members in self.ctl.tools.groups():
+            for name in members:
+                act = self._act(tools_menu, self.ctl.tools.label(name),
+                                lambda _c=False, n=name: self.ctl.set_tool(n))
+                act.setIcon(_icons.tool_icon(self.ctl.tools.icon(name)))
+                key = self.ctl.tools.shortcut(name)
+                if key:
+                    # Shown, not bound: the toolbox owns the key so that a
+                    # repeated press can cycle tools sharing it.
+                    act.setText(act.text() + "\t" + key)
+            tools_menu.addSeparator()
+        self._act(tools_menu, "&Decrease Size", lambda: self.step_size(-1), "[")
+        self._act(tools_menu, "&Increase Size", lambda: self.step_size(+1), "]")
+        tools_menu.addSeparator()
+        self._act(tools_menu, "S&wap Colors", self.swap_colours, "X")
+        self._act(tools_menu, "Default &Colors", self.default_colours, "D")
 
         addon_menu = bar.addMenu("A&ddons")
         self._act(addon_menu, "&Load Addons", self.do_load_addons)
@@ -620,6 +648,27 @@ class MainWindow(QMainWindow):
                 self.open_file(url.toLocalFile())
                 event.acceptProposedAction()
                 return
+
+    def step_size(self, direction):
+        """[ and ]: change the active tool's size the way Photoshop does --
+        by a step that grows with the size, so it is fine at 3 px and still
+        useful at 300."""
+        spec = {o.name: o for o in self.ctl.tools.spec(self.ctl.tool_name)}
+        for key in ("size", "stroke"):
+            if key in spec:
+                cur = int(self.ctl.tool_option_values(self.ctl.tool_name).get(key, spec[key].default))
+                step = 1 if cur < 10 else (5 if cur < 50 else (10 if cur < 200 else 25))
+                return self.ctl.set_tool_option(key, cur + direction * step)
+        return None
+
+    def swap_colours(self):
+        p, pi = self.ctl.primary, self.ctl.primary_index
+        self.ctl.set_primary(self.ctl.secondary, self.ctl.secondary_index)
+        self.ctl.set_secondary(p, pi)
+
+    def default_colours(self):
+        self.ctl.set_primary((0, 0, 0, 255))
+        self.ctl.set_secondary((255, 255, 255, 255))
 
     def do_undo(self):
         self.ctl.undo()

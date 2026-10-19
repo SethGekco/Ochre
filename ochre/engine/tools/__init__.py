@@ -45,6 +45,8 @@ class ToolRegistry:
         self._labels = {}
         self._appearance = {}
         self._shortcuts = {}
+        self._groups = {}
+        self._icons = {}
         if db is not None:
             self.load(db)
 
@@ -55,7 +57,7 @@ class ToolRegistry:
         # become tool options and end up passed to a tool's constructor --
         # the engine has no business knowing what a cursor is.
         reserved = {"Class", "Label", "Order", "TargetPlane",
-                    "Cursor", "Footprint", "Shortcut"}
+                    "Cursor", "Footprint", "Shortcut", "Group", "Icon"}
         for name in db.sections("Tool"):
             section = "Tool:" + name
             cls_name = db.get(section, "Class", name)
@@ -81,7 +83,46 @@ class ToolRegistry:
             key_seq = db.get(section, "Shortcut")
             if key_seq:
                 self._shortcuts[key] = key_seq.strip()
+            # The toolbox shows one button per GROUP, with the rest on a
+            # flyout; a tool without a group stands alone. Icon names an
+            # icon in ochre/ui/icons.py, or a file under data/icons.
+            self._groups[key] = (db.get(section, "Group") or key).strip()
+            self._icons[key] = (db.get(section, "Icon") or key).strip()
         return self
+
+    def group(self, name):
+        return self._groups.get(name, name)
+
+    def icon(self, name):
+        return self._icons.get(name, name)
+
+    def groups(self):
+        """[(group, [tool, ...]), ...] in toolbox order.
+
+        A group sits where its first member would; members keep their own
+        order inside it.
+        """
+        out, seen = [], {}
+        for name in self.names():
+            g = self.group(name)
+            if g not in seen:
+                seen[g] = []
+                out.append((g, seen[g]))
+            seen[g].append(name)
+        return out
+
+    def spec(self, name):
+        """The tool's option descriptors, or () if it declares none."""
+        cls = self._classes.get(name)
+        return tuple(getattr(cls, "options_spec", ()) or ()) if cls else ()
+
+    def defaults(self, name):
+        """The INI's option values for a tool, already coerced by its spec."""
+        raw = dict(self._defaults.get(name, {}))
+        for opt in self.spec(name):
+            if opt.name in raw:
+                raw[opt.name] = opt.coerce(raw[opt.name])
+        return raw
 
     def shortcut(self, name):
         """The key that selects a tool, as a string the UI can parse, or None.

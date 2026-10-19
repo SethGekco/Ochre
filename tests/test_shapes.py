@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
+from ochre.engine import shapelib
 from ochre.engine import shapes
 from ochre.engine.document import Document
 from ochre.engine.geometry import Rect
@@ -369,8 +370,67 @@ def main():
     check("an unknown shape falls back rather than raising",
           tool.shape == "rectangle")
     check("every offered choice is drawable",
-          all(c in shapes.POLYGONS or c in ("rectangle", "ellipse")
+          all(c in shapelib.CATALOG and
+              shapes.coverage(40, 40, c, (4.0, 4.0, 36.0, 36.0), shapes.FILL, 1.0, True).any()
               for c in tool.choices()))
+
+    # ---- the shape catalog ----------------------------------------------------
+    groups = dict(shapelib.grouped())
+    check("the chooser has the five categories, in order",
+          [g for g, _ in shapelib.grouped()] ==
+          ["Basic", "Polygons and Stars", "Arrows", "Callouts", "Symbols"])
+    for wanted, cat in ((("rectangle", "rounded_rectangle", "ellipse", "diamond", "trapezoid",
+                          "parallelogram", "triangle", "right_triangle"), "Basic"),
+                        (("pentagon", "hexagon", "star3", "star4", "star5", "star6"),
+                         "Polygons and Stars"),
+                        (("arrow", "notched_arrow", "pentagon_arrow", "chevron"), "Arrows"),
+                        (("callout_rect", "callout_rounded", "callout_oval", "callout_cloud"),
+                         "Callouts"),
+                        (("lightning", "check", "cross", "gear", "heart"), "Symbols")):
+        check("%s offers %s" % (cat, ", ".join(wanted)),
+              all(w in groups[cat] for w in wanted), "-- has %s" % (groups[cat],))
+
+    box = (8.0, 8.0, 88.0, 72.0)
+    for ident in shapelib.CATALOG:
+        fill = shapes.coverage(96, 80, ident, box, shapes.FILL, 2.0, True)
+        edge = shapes.coverage(96, 80, ident, box, shapes.OUTLINE, 2.0, True)
+        inside = (int(fill[:6].sum()) == 0 and int(fill[75:].sum()) == 0
+                  and int(fill[:, :6].sum()) == 0 and int(fill[:, 91:].sum()) == 0)
+        if not (fill.any() and edge.any() and inside):
+            check("%s rasterises inside its drag box" % ident, False,
+                  "-- fill %d, edge %d, inside %s" % (fill.sum(), edge.sum(), inside))
+    check("every catalog shape fills, outlines, and stays in its box", True)
+
+    gear = shapes.coverage(96, 96, "gear", (8.0, 8.0, 88.0, 88.0), shapes.FILL, 2.0, True)
+    check("THE GEAR HAS A HOLE (rings combine even-odd)", int(gear[48, 48]) == 0
+          and int(gear[48, 22]) == 255, "-- centre %d, body %d" % (gear[48, 48], gear[48, 22]))
+    check("a speech bubble is ONE ring, so its outline has no seam across the tail",
+          len(shapelib.rings("callout_oval", box)) == 1
+          and len(shapelib.rings("callout_rounded", box)) == 1)
+    check("the thought bubble is a body plus two separate dots",
+          len(shapelib.rings("callout_cloud", box)) == 3)
+    heart = shapes.coverage(96, 80, "heart", box, shapes.FILL, 2.0, False)
+    asym = int((heart[:, 8:48] != heart[:, 48:88][:, ::-1]).sum())
+    check("the heart is left-right symmetric", asym < 12, "-- %d pixels differ" % asym)
+    wide = shapes.coverage(200, 60, "hexagon", (5.0, 5.0, 195.0, 55.0), shapes.FILL, 2.0, True)
+    ys, xs = np.nonzero(wide)
+    check("shapes inscribe in the drag box: a wide drag gives a wide hexagon",
+          (xs.max() - xs.min()) > 3 * (ys.max() - ys.min()))
+
+    # Every catalog shape through the REAL tool: one undo entry each.
+    failed = []
+    for ident in shapelib.CATALOG:
+        d = Document(90, 70)
+        lay = d.add_layer("x")
+        ctx = ToolContext(d, lay, d.frame, Selection(90, 70), history=HistoryStack())
+        t = reg.create("shape", shape=ident)
+        t.begin(ctx, ToolEvent(5, 5))
+        t.motion(ctx, ToolEvent(80, 60))
+        t.end(ctx, ToolEvent(80, 60))
+        if not (d.cell(lay).plane("rgba")[..., 3].any() and len(ctx.history) == 1):
+            failed.append(ident)
+    check("THE SHAPES TOOL DRAWS EVERY CATALOG SHAPE, one undo entry each", not failed,
+          "-- failed: %s" % failed)
 
     print("\nall shape and gradient checks passed")
 

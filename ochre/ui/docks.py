@@ -32,47 +32,127 @@ def _swatch(rgba, size=16):
 
 
 class ToolsDock(QDockWidget):
-    """One button per registered tool. Populated from the registry, so a
-    tool contributed by an addon appears here without this file changing."""
+    """The toolbox: one compact icon button per tool GROUP.
 
-    def __init__(self, controller, parent=None):
+    Grouped the way Photoshop and GIMP 3 do it -- the rectangle and ellipse
+    marquees share a button, the brushes share one, and the rest of a group
+    is on a flyout (press and hold, or right-click). With fifty-odd tools a
+    button each would not fit on a laptop screen, which is exactly the
+    complaint that prompted this. Groups come from `Group=` in tools.ini, so
+    anyone who prefers every tool visible gives each its own group.
+
+    Populated from the registry, so an addon's tool appears with no change
+    here. Keyboard shortcuts come from `Shortcut=`; several tools may share a
+    letter, and pressing it again cycles through them, as Paint.NET does.
+    """
+
+    BUTTON = 30
+    ICON = 22
+
+    def __init__(self, controller, parent=None, columns=2):
         super().__init__("Tools", parent)
         self.setObjectName("Tools")
         self.ctl = controller
+        self.columns = max(1, int(columns))
+        self.buttons = {}           # group -> QToolButton
+        self.members = {}           # group -> [tool, ...]
+        self.current = {}           # group -> the member the button shows
+        self.shortcuts = {}         # tool -> the QShortcut for its key
+        self._by_key = {}           # key -> [tool, ...] in toolbox order
+        self._build(parent)
+
+    def _build(self, owner):
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QKeySequence, QShortcut
+        from PySide6.QtWidgets import QMenu
+
+        from . import icons
+
+        tools = self.ctl.tools
         body = QWidget()
         grid = QGridLayout(body)
-        grid.setSpacing(2)
-        self.group = QButtonGroup(self)
-        self.group.setExclusive(True)
+        grid.setSpacing(1)
+        grid.setContentsMargins(3, 3, 3, 3)
 
-        from PySide6.QtGui import QKeySequence, QShortcut
-
-        self.shortcuts = {}
-        for i, name in enumerate(controller.tools.names()):
+        for i, (group, members) in enumerate(tools.groups()):
+            self.members[group] = list(members)
+            self.current[group] = members[0]
             btn = QToolButton()
-            key = controller.tools.shortcut(name)
-            btn.setText(controller.tools.label(name) + ("  (%s)" % key if key else ""))
+            btn.setAutoRaise(True)
             btn.setCheckable(True)
-            btn.setToolTip(name)
-            btn.clicked.connect(lambda _c=False, n=name: self.ctl.set_tool(n))
-            self.group.addButton(btn)
-            grid.addWidget(btn, i // 2, i % 2)
-            if name == controller.tool_name:
-                btn.setChecked(True)
-            if key:
-                # Owned by the main window so the key works wherever focus
-                # is. The canvas vetoes it (ShortcutOverride) while a text
-                # box is being typed into or a drag is in progress.
-                sc = QShortcut(QKeySequence(key), parent or self)
-                sc.setContext(Qt.WindowShortcut)
-                sc.activated.connect(lambda n=name: self.ctl.set_tool(n))
-                self.shortcuts[name] = sc
+            btn.setFixedSize(self.BUTTON, self.BUTTON)
+            btn.setIconSize(QSize(self.ICON, self.ICON))
+            btn.clicked.connect(lambda _c=False, g=group: self.ctl.set_tool(self.current[g]))
+            if len(members) > 1:
+                menu = QMenu(btn)
+                for m in members:
+                    key = tools.shortcut(m)
+                    act = menu.addAction(icons.tool_icon(tools.icon(m)),
+                                         tools.label(m) + ("\t" + key if key else ""))
+                    act.triggered.connect(lambda _c=False, m=m: self.ctl.set_tool(m))
+                btn.setMenu(menu)
+                btn.setPopupMode(QToolButton.DelayedPopup)
+                btn.setContextMenuPolicy(Qt.CustomContextMenu)
+                btn.customContextMenuRequested.connect(
+                    lambda pos, b=btn: b.menu().exec(b.mapToGlobal(pos)))
+            self.buttons[group] = btn
+            self._refresh_button(group)
+            grid.addWidget(btn, i // self.columns, i % self.columns)
         grid.setRowStretch(grid.rowCount(), 1)
         self.setWidget(body)
 
+        for name in tools.names():
+            key = tools.shortcut(name)
+            if key:
+                self._by_key.setdefault(key, []).append(name)
+        for key, names in self._by_key.items():
+            # Owned by the main window so a key works wherever focus is. The
+            # canvas vetoes shortcuts (ShortcutOverride) while a text box is
+            # being typed into or a drag is in progress.
+            sc = QShortcut(QKeySequence(key), owner or self)
+            sc.setContext(Qt.WindowShortcut)
+            sc.activated.connect(lambda k=key: self._key(k))
+            for n in names:
+                self.shortcuts[n] = sc
+
+    def _key(self, key):
+        names = self._by_key.get(key, [])
+        if not names:
+            return
+        if self.ctl.tool_name in names:
+            nxt = names[(names.index(self.ctl.tool_name) + 1) % len(names)]
+        else:
+            # Prefer whichever of them the user last picked in its group.
+            nxt = next((n for n in names if self.current.get(self.ctl.tools.group(n)) == n),
+                       names[0])
+        self.ctl.set_tool(nxt)
+
+    def _refresh_button(self, group):
+        from . import icons
+        tools = self.ctl.tools
+        btn = self.buttons[group]
+        name = self.current[group]
+        btn.setIcon(icons.tool_icon(tools.icon(name), self.ICON,
+                                    flyout=len(self.members[group]) > 1))
+        key = tools.shortcut(name)
+        tip = tools.label(name) + (" (%s)" % key if key else "")
+        others = [tools.label(m) for m in self.members[group] if m != name]
+        if others:
+            tip += "\nHold or right-click for: " + ", ".join(others)
+        btn.setToolTip(tip)
+        btn.setStatusTip(tools.label(name))
+
     def sync(self, **_):
-        for btn in self.group.buttons():
-            btn.setChecked(btn.toolTip() == self.ctl.tool_name)
+        active = self.ctl.tool_name
+        group = self.ctl.tools.group(active) if active else None
+        if group in self.current and self.current[group] != active:
+            self.current[group] = active
+            self._refresh_button(group)
+        for g, btn in self.buttons.items():
+            btn.setChecked(g == group)
+
+    def button_for(self, tool):
+        return self.buttons.get(self.ctl.tools.group(tool))
 
 
 class LayersDock(QDockWidget):

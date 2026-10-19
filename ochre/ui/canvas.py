@@ -97,6 +97,7 @@ class CanvasView(QAbstractScrollArea):
         self._pan_origin = QPoint()
         self._view_dragging = False
         self._needs_fit = True
+        self._space_pan = False
         self._drawing = False
         self._checker = None
         # Where the pointer is, in document coordinates, or None when it has
@@ -529,7 +530,11 @@ class CanvasView(QAbstractScrollArea):
             # click also starts the next one where the user pointed.
             self.commit_text()
 
-        if event.button() == Qt.MiddleButton:
+        self.setFocus(Qt.MouseFocusReason)
+        # Space held turns any tool into the hand, as in Paint.NET, GIMP and
+        # Photoshop. The left button then pans exactly like the middle one.
+        if event.button() == Qt.MiddleButton or (
+                event.button() == Qt.LeftButton and getattr(self, "_space_pan", False)):
             self.user_took_view()
             self._panning = True
             self._pan_origin = event.position().toPoint()
@@ -576,9 +581,13 @@ class CanvasView(QAbstractScrollArea):
             self.refresh()
 
     def mouseReleaseEvent(self, event):
-        if self._panning and event.button() == Qt.MiddleButton:
+        if self._panning and event.button() in (Qt.MiddleButton, Qt.LeftButton):
             self._panning = False
-            self.unsetCursor()
+            if getattr(self, "_space_pan", False):
+                self.viewport().setCursor(Qt.OpenHandCursor)
+            else:
+                self.unsetCursor()
+                self.apply_tool_cursor()
             return
         if self._view_dragging:
             self._view_dragging = False
@@ -635,6 +644,11 @@ class CanvasView(QAbstractScrollArea):
         if tool is not None and self._handle_text_key(tool, event):
             return
 
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat() and not self._drawing:
+            self._space_pan = True
+            self.viewport().setCursor(Qt.OpenHandCursor)
+            return
+
         if event.key() == Qt.Key_Escape and self._drawing:
             self._drawing = False
             self.ctl.cancel_stroke()
@@ -652,6 +666,14 @@ class CanvasView(QAbstractScrollArea):
             self.refresh()
             return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+            self._space_pan = False
+            if not self._panning:
+                self.apply_tool_cursor()
+            return
+        super().keyReleaseEvent(event)
 
     def _handle_text_key(self, tool, event):
         """Map a key onto the tool's edit operations. True if consumed.

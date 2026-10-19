@@ -196,8 +196,18 @@ def polygon_points(rect, sides, skip=0, rotation=None):
 
 
 def coverage(width, height, kind, geometry, style=BOTH, stroke=1.0,
-             antialias=True):
-    """Dispatch by shape name. `geometry` is a rect tuple or a point list."""
+             antialias=True, **params):
+    """Dispatch by shape name. `geometry` is a rect tuple or a point list.
+
+    Rectangle and ellipse keep their analytic rasterisers, which the tests
+    pin for exact symmetry. Every other named shape comes from the catalog
+    in shapelib, which is the single definition the chooser's icons are
+    drawn from too.
+    """
+    from . import shapelib
+    if kind in shapelib.CATALOG and kind not in ("rectangle", "ellipse"):
+        return shapelib.coverage(width, height, kind, geometry, style, stroke,
+                                 antialias, **params)
     if kind == "rectangle":
         return rect_coverage(width, height, geometry, style, stroke, antialias)
     if kind == "ellipse":
@@ -219,8 +229,10 @@ def coverage(width, height, kind, geometry, style=BOTH, stroke=1.0,
 
 def bounds_for(width, height, kind, geometry, stroke=1.0):
     """The dirty rect a shape will touch, padded for stroke and antialiasing."""
+    from . import shapelib
     pad = int(math.ceil(stroke / 2.0)) + 2
-    if kind in ("rectangle", "ellipse", "line") or kind in POLYGONS:
+    if kind in ("rectangle", "ellipse", "line") or kind in POLYGONS \
+            or kind in shapelib.CATALOG:
         # A polygon is inscribed in the drag rect, so the rect already bounds
         # it -- no need to generate the vertices just to measure them.
         x0, y0, x1, y1 = geometry
