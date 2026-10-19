@@ -57,6 +57,7 @@ class Document:
         self.counts = []
         self.notes = []
         self.slices = []
+        self.planes = []                # perspective planes: 4 (x, y) corners each
         self._settings = settings
         self._max_dirty = self._setting("Display", "MaxDirtyRects", 8)
 

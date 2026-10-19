@@ -590,6 +590,9 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "Paste Into New &Layer",
                   lambda: self.do_paste(new_layer=True), "Ctrl+Shift+V")
         self._act(edit_menu, "Paste Into New &Image", self.do_paste_new_image, "Ctrl+Alt+V")
+        self._act(edit_menu, "Paste in Pe&rspective", self.do_paste_in_perspective)
+        self._act(edit_menu, "Delete Perspective Plane", lambda: (
+            self.ctl.clear_planes(), self.canvas.viewport().update()))
         edit_menu.addSeparator()
         self._act(edit_menu, "Set &History Brush Source", lambda: self.ctl.set_history_source())
         edit_menu.addSeparator()
@@ -1338,6 +1341,21 @@ class MainWindow(QMainWindow):
         self.canvas.refresh()
         self.canvas.viewport().update()
         return landed
+
+    def do_paste_in_perspective(self):
+        if not getattr(self.ctl.doc, "planes", None):
+            QMessageBox.information(self, "Paste in Perspective",
+                                    "Define a plane first with the Vanishing Point tool.")
+            return None
+        foreign = self._system_clipboard_get()
+        clip = foreign or self.ctl.clip
+        if clip is None:
+            return None
+        layer = self.ctl.paste_in_perspective(clip.rgba)
+        self.layers_dock.sync()
+        self.canvas.refresh()
+        self.canvas.viewport().update()
+        return layer
 
     def do_paste_new_image(self):
         foreign = self._system_clipboard_get()

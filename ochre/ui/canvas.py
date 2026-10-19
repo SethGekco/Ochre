@@ -405,7 +405,10 @@ class CanvasView(QAbstractScrollArea):
         if tool is None or not hasattr(tool, "overlay"):
             return
         try:
-            prims = tool.overlay() or []
+            # A tool whose overlay shows document state (a perspective plane)
+            # rather than only its own drag says so, and is handed the doc.
+            prims = (tool.overlay(self.ctl.doc) if getattr(tool, "overlay_needs_doc", False)
+                     else tool.overlay()) or []
         except Exception:                                   # noqa: BLE001
             return
         if not prims:

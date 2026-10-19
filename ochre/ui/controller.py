@@ -1089,6 +1089,49 @@ class Controller:
         self._after_structure_change()
         return layer
 
+    def paste_in_perspective(self, rgba=None, name="Perspective Paste"):
+        """Edit > Paste in Perspective (Vanishing Point's paste): the
+        clipboard laid onto the document's perspective plane, as a smart
+        object -- so it can be refiltered, rescaled or replaced afterwards
+        without loss. None when there is no plane or nothing to paste."""
+        from ..engine import vanishing
+        from ..engine.commands import StructureDelta
+        from ..engine.layer import SMART, SmartSource
+        planes = getattr(self.doc, "planes", None) or []
+        if not planes:
+            return None
+        if rgba is None:
+            if self.clip is None:
+                return None
+            rgba = self.clip.rgba
+        rgba = np.ascontiguousarray(rgba, np.uint8)
+        sh, sw = rgba.shape[:2]
+        m = vanishing.paste_matrix(planes[-1], sw, sh)
+        layer = self.doc.add_layer(name)
+        layer.kind = SMART
+        layer.params = {"matrix": [float(v) for v in (m / m[2, 2]).ravel()],
+                        "src_w": sw, "src_h": sh, "filters": []}
+        layer.smart_source = SmartSource(layer, (sw, sh))
+        surf = self.doc.cell(layer.smart_source)
+        surf.plane("rgba")[...] = rgba
+        surf._touched(surf.bounds)
+        self.history.push(StructureDelta.insertion(self.doc, layer, "Paste in Perspective"),
+                          "Paste in Perspective")
+        self.set_active_layer(layer)
+        self._after_structure_change()
+        return layer
+
+    def clear_planes(self):
+        """Forget the perspective plane (undoable)."""
+        from ..engine.commands import MarksDelta
+        if not getattr(self.doc, "planes", None):
+            return False
+        before = MarksDelta(self.doc, "Delete Plane", ("planes",))
+        self.doc.planes = []
+        self.history.push(before, "Delete Plane")
+        self.emit("marks.changed")
+        return True
+
     def set_smart_filters(self, filters, layer=None):
         target = layer or self.active_layer
         if target is None or getattr(target, "kind", "raster") != "smart":

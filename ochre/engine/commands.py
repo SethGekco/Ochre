@@ -637,7 +637,7 @@ class PathDelta(Command):
         return 64 + 56 * sum(len(s) for p in self._paths for s in p.subpaths)
 
 
-MARKS = ("guides", "samplers", "counts", "notes", "slices")
+MARKS = ("guides", "samplers", "counts", "notes", "slices", "planes")
 
 
 class MarksDelta(Command):

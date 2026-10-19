@@ -207,6 +207,8 @@ def save(doc, path, selection=None, thumbnail_max=256):
     marks += [("Note", encode_note(*n)) for n in getattr(doc, "notes", [])]
     marks += [("Slice", "%s,%d,%d,%d,%d" % ((_esc(nm).replace(",", "_"),) + tuple(r)))
               for nm, r in getattr(doc, "slices", [])]
+    marks += [("Plane", ",".join("%g" % v for p in quad for v in p))
+              for quad in getattr(doc, "planes", [])]
     if marks:
         add("[Marks]")
         for n, (kind, value) in enumerate(marks):
@@ -486,6 +488,10 @@ def load(path, settings=None):
                     elif kind == "Slice":
                         parts = value.split(",")
                         doc.slices.append((parts[0], tuple(int(v) for v in parts[1:5])))
+                    elif kind == "Plane":
+                        v = [float(t) for t in value.split(",")]
+                        if len(v) == 8:
+                            doc.planes.append(tuple((v[i], v[i + 1]) for i in range(0, 8, 2)))
                 except (TypeError, ValueError, IndexError):
                     pass
 

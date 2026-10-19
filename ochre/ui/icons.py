@@ -328,6 +328,14 @@ def i_artboard(g):
     g.rect(9, 9, 9, 4, fill=ACCENT, w=0.8)
 
 
+def i_vanishing_point(g):
+    g.poly([(3, 20), (21, 20), (16, 7), (8, 7)], w=1.3)
+    g.line((12, 7), (12, 20), w=0.9)
+    g.line((5.5, 13.5), (18.5, 13.5), w=0.9)
+    g.line((8, 7), (12, 2), w=0.8, color=ACCENT)
+    g.line((16, 7), (12, 2), w=0.8, color=ACCENT)
+
+
 def i_frame(g):
     g.rect(4, 4, 16, 16, w=1.4)
     g.line((4, 4), (20, 20), w=1.0)

@@ -187,6 +187,8 @@ def _map_marks(doc, fn):
         x0, y0 = int(round(min(xs))), int(round(min(ys)))
         slices.append((name, (x0, y0, int(round(max(xs))) - x0, int(round(max(ys))) - y0)))
     doc.slices = slices
+    doc.planes = [tuple(tuple(map(float, fn(p))) for p in quad)
+                  for quad in getattr(doc, "planes", [])]
     guides = []
     for orient, pos in getattr(doc, "guides", []):
         a, b = ((pos, 0.0), (pos, float(h))) if orient == "v" else ((0.0, pos), (float(w), pos))
