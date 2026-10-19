@@ -61,7 +61,9 @@ run_pass() {
         else
             fail=$((fail + 1))
             failed_names="$failed_names $label/$name"
-            printf '%-28s FAIL\n' "$name"
+            # The exit code matters: a crash at interpreter shutdown, after
+            # every check passed, shows up as nothing else.
+            printf '%-28s FAIL (exit %d)\n' "$name" "$rc"
             echo "$out" | sed 's/^/    /'
         fi
     done

@@ -521,3 +521,38 @@ class GeometryDelta(Command):
     def nbytes(self):
         return sum(d.nbytes() for d, _ in self._cells.values() if d is not None) \
             + (len(self._sel_blob) if self._sel_blob else 0)
+
+
+
+class SelectionDelta(Command):
+    """The selection as it was. Selections are undoable, as in Paint.NET and
+    GIMP: losing a painstaking lasso to a stray click with no way back is
+    the kind of thing that makes people stop trusting a tool.
+
+    The selection lives on the controller, not the document, so the command
+    holds a reference to it -- the same arrangement GeometryDelta uses.
+    """
+
+    __slots__ = ("label", "selection", "_blob", "_shape")
+
+    def __init__(self, selection, mask, label="Selection"):
+        self.label = label
+        self.selection = selection
+        if mask is None:
+            self._blob, self._shape = None, None
+        else:
+            self._blob = zlib.compress(np.ascontiguousarray(mask).tobytes(), 1)
+            self._shape = mask.shape
+
+    def undo(self, doc):
+        sel = self.selection
+        opposite = SelectionDelta(sel, sel.mask, self.label)
+        if self._blob is None or self._shape != (sel.height, sel.width):
+            sel.mask = None
+        else:
+            sel.mask = np.frombuffer(zlib.decompress(self._blob), np.uint8).reshape(self._shape).copy()
+        sel._bbox = None
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return len(self._blob) if self._blob else 0

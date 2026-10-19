@@ -190,9 +190,29 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "&Erase Selection", lambda: self.ctl.erase_selection(), "Del")
         self._act(edit_menu, "&Fill Selection", lambda: self.ctl.fill_selection(), "Backspace")
         edit_menu.addSeparator()
-        self._act(edit_menu, "Select &All", self.do_select_all, "Ctrl+A")
-        self._act(edit_menu, "&Deselect", self.do_deselect, "Ctrl+D")
-        self._act(edit_menu, "&Invert Selection", self.do_invert, "Ctrl+I")
+
+        sel_menu = bar.addMenu("&Select")
+        self._act(sel_menu, "&All", self.do_select_all, "Ctrl+A")
+        self._act(sel_menu, "&None", self.do_deselect, "Ctrl+D")
+        self._act(sel_menu, "&Invert", self.do_invert, "Ctrl+I")
+        sel_menu.addSeparator()
+        self._act(sel_menu, "&Feather...", lambda: self._ask_radius(
+            "Feather Selection", self.ctl.feather_selection, 5))
+        self._act(sel_menu, "&Sharpen", lambda: self._sel(self.ctl.sharpen_selection))
+        self._act(sel_menu, "S&hrink...", lambda: self._ask_radius(
+            "Shrink Selection", self.ctl.shrink_selection, 4))
+        self._act(sel_menu, "&Grow...", lambda: self._ask_radius(
+            "Grow Selection", self.ctl.grow_selection, 4))
+        self._act(sel_menu, "&Border...", lambda: self._ask_radius(
+            "Border Selection", self.ctl.border_selection, 4))
+        self._act(sel_menu, "Remove &Holes", lambda: self._sel(self.ctl.remove_selection_holes))
+        self._act(sel_menu, "Rounded &Corners...", lambda: self._ask_radius(
+            "Round Selection Corners", self.ctl.round_selection, 10))
+        sel_menu.addSeparator()
+        self._act(sel_menu, "Alpha to Se&lection", lambda: self._sel(self.ctl.alpha_to_selection))
+        self.quick_mask_action = self._act(sel_menu, "Toggle &Quick Mask",
+                                           self.do_quick_mask, "Q")
+        self.quick_mask_action.setCheckable(True)
 
         view_menu = bar.addMenu("&View")
         self._act(view_menu, "Zoom &In", lambda: self.canvas.zoom_step(+1), "Ctrl++")
@@ -322,9 +342,26 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self.confirm_discard("closing"):
+            self.shutdown()
             event.accept()
         else:
             event.ignore()
+
+    def shutdown(self):
+        """Stop everything that can call back into Python.
+
+        Timers firing while the interpreter tears down -- after some of the
+        objects their callbacks touch are already gone -- are the classic
+        PySide crash at exit: intermittent, load-dependent, and invisible
+        except as a non-zero exit code after everything else succeeded.
+        """
+        for timer_name in ("_timer", "_caret_timer", "_tick_timer"):
+            timer = getattr(self.canvas, timer_name, None)
+            if timer is not None:
+                timer.stop()
+        bus = getattr(self.ctl, "bus", None)
+        if bus is not None and hasattr(bus, "clear"):
+            bus.clear()
 
     def do_new(self):
         from .dialogs import NewImageDialog
@@ -650,6 +687,25 @@ class MainWindow(QMainWindow):
                 self.open_file(url.toLocalFile())
                 event.acceptProposedAction()
                 return
+
+    def _sel(self, fn, *args):
+        fn(*args)
+        self.canvas.viewport().update()
+
+    def _ask_radius(self, title, fn, default):
+        from PySide6.QtWidgets import QInputDialog
+        value, ok = QInputDialog.getInt(self, title, "Radius (pixels):", default, 1, 2000)
+        if ok:
+            self._sel(fn, value)
+
+    def do_quick_mask(self):
+        on = self.ctl.toggle_quick_mask()
+        self.quick_mask_action.setChecked(on)
+        self.statusBar().showMessage(
+            "Quick Mask: paint white to select, black to deselect. Q again to finish."
+            if on else "Quick Mask applied to the selection.", 6000)
+        self.canvas.refresh()
+        self.canvas.viewport().update()
 
     def step_size(self, direction):
         """[ and ]: change the active tool's size the way Photoshop does --

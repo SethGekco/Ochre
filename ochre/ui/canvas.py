@@ -288,6 +288,7 @@ class CanvasView(QAbstractScrollArea):
         self._draw_selection(painter, target)
         self._draw_footprint(painter)
         self._draw_zoom_band(painter)
+        self._draw_tool_overlay(painter)
         self._draw_caret(painter)
         painter.end()
 
@@ -340,6 +341,70 @@ class CanvasView(QAbstractScrollArea):
             return
         self.zoom_changed.emit(format_zoom(self.view.zoom))
         vp.update()
+
+    def _draw_tool_overlay(self, painter):
+        """Whatever the active tool wants shown while it works.
+
+        Tools describe their in-progress geometry in DOCUMENT coordinates
+        (engine side, no Qt): ("poly", points, closed), ("rect", (x0, y0, x1,
+        y1)), ("line", (x0, y0, x1, y1)), ("handles", points), ("text",
+        (x, y), str). Drawn as a white line under a black dashed one, so it
+        reads on any image, light or dark.
+        """
+        tool = getattr(self.ctl, "tool", None)
+        if tool is None or not hasattr(tool, "overlay"):
+            return
+        try:
+            prims = tool.overlay() or []
+        except Exception:                                   # noqa: BLE001
+            return
+        if not prims:
+            return
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPolygonF
+        w2d = self.view.doc_to_widget
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        white = QPen(QColor(255, 255, 255, 230), 1.0)
+        black = QPen(QColor(0, 0, 0, 230), 1.0)
+        black.setDashPattern([4.0, 4.0])
+        for prim in prims:
+            kind = prim[0]
+            if kind in ("poly", "rect", "line"):
+                if kind == "poly":
+                    pts = [QPointF(*w2d(x, y)) for x, y in prim[1]]
+                    closed = bool(prim[2]) if len(prim) > 2 else False
+                elif kind == "rect":
+                    x0, y0, x1, y1 = prim[1]
+                    pts = [QPointF(*w2d(x0, y0)), QPointF(*w2d(x1, y0)),
+                           QPointF(*w2d(x1, y1)), QPointF(*w2d(x0, y1))]
+                    closed = True
+                else:
+                    x0, y0, x1, y1 = prim[1]
+                    pts = [QPointF(*w2d(x0, y0)), QPointF(*w2d(x1, y1))]
+                    closed = False
+                poly = QPolygonF(pts)
+                painter.setBrush(Qt.NoBrush)
+                for pen in (white, black):
+                    painter.setPen(pen)
+                    if closed:
+                        painter.drawPolygon(poly)
+                    else:
+                        painter.drawPolyline(poly)
+            elif kind == "handles":
+                painter.setPen(QPen(QColor(0, 0, 0), 1.0))
+                painter.setBrush(QColor(255, 255, 255))
+                for x, y in prim[1]:
+                    wx, wy = w2d(x, y)
+                    painter.drawRect(QRect(int(wx) - 3, int(wy) - 3, 6, 6))
+            elif kind == "text":
+                (x, y), text = prim[1], prim[2]
+                wx, wy = w2d(x, y)
+                painter.setPen(QColor(0, 0, 0))
+                painter.drawText(QPoint(int(wx) + 9, int(wy) + 15), text)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(QPoint(int(wx) + 8, int(wy) + 14), text)
+        painter.restore()
 
     def _draw_zoom_band(self, painter):
         """The zoom tool's rubber band, if it has one."""
@@ -551,6 +616,8 @@ class CanvasView(QAbstractScrollArea):
 
         dx, dy = self._doc_pos(event.position())
         button = 2 if event.button() == Qt.RightButton else 1
+        # "On a point" means a few SCREEN pixels, whatever the zoom.
+        self.ctl.pick_radius = 6.0 / max(self.view.scale, 1e-6)
         self._drawing = True
         # Tools that keep working while the pointer rests (the airbrush) get
         # ticks, so holding still builds paint up instead of doing nothing.
@@ -586,6 +653,22 @@ class CanvasView(QAbstractScrollArea):
         if self._drawing:
             self.ctl.motion_stroke(dx, dy, 1.0, self._mods(event))
             self.refresh()
+            if hasattr(self.ctl.tool, "overlay"):
+                self.viewport().update()
+        elif self.ctl.tool is not None and self.ctl.tool.active:
+            if self.ctl.hover_tool(dx, dy):
+                self.viewport().update()
+
+    def mouseDoubleClickEvent(self, event):
+        # Finishes a click-by-click tool (polygonal lasso, scissors). The
+        # press and release of the double-click have already been delivered.
+        tool = self.ctl.tool
+        if tool is not None and tool.active and hasattr(tool, "finish"):
+            self.ctl.finish_tool()
+            self.refresh()
+            self.viewport().update()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def _tick(self):
         if not self._drawing:
@@ -665,9 +748,16 @@ class CanvasView(QAbstractScrollArea):
             self.viewport().setCursor(Qt.OpenHandCursor)
             return
 
-        if event.key() == Qt.Key_Escape and self._drawing:
+        if event.key() == Qt.Key_Escape and (self._drawing or (
+                self.ctl.tool is not None and self.ctl.tool.active)):
             self._drawing = False
             self.ctl.cancel_stroke()
+            self.refresh()
+            self.viewport().update()
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and self.ctl.tool is not None \
+                and self.ctl.tool.active and hasattr(self.ctl.tool, "finish"):
+            self.ctl.finish_tool()
             self.refresh()
             self.viewport().update()
             return

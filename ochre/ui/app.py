@@ -112,7 +112,14 @@ def main(argv=None):
         return _selftest(window, controller)
 
     window.show()
-    return app.exec()
+    code = app.exec()
+    # Tear the window down while the QApplication still exists, rather than
+    # leaving the order to interpreter shutdown.
+    window.shutdown()
+    window.deleteLater()
+    app.processEvents()
+    del window
+    return code
 
 
 def _selftest(window, controller):

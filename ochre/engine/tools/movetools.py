@@ -327,6 +327,7 @@ class MoveSelectionTool(Tool):
 
     name = "move_selection"
     label = "Move Selection"
+    changes_selection = True
     wants_stroke = False
 
     def on_begin(self, ctx, event):

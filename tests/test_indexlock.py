@@ -185,6 +185,8 @@ DRIVERS = {
 # which stops painting is a failure rather than a silent exemption.
 NON_PAINTING = {"eyedropper", "select_rect", "select_ellipse", "lasso",
                 "magic_wand", "move_selection", "zoom", "pan",
+                "select_row", "select_col", "polygon_lasso", "scissors",
+                "foreground_select", "quick_select", "select_color", "object_select",
                 # Moves existing pixels rather than laying down new colour;
                 # covered by test_movetools.py against an indexed layer.
                 "move_pixels"}

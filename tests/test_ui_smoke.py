@@ -146,7 +146,9 @@ def main():
     ctl.selection.select_ellipse((20, 20, 200, 160))
     win.canvas.repaint()
     check("painting with an active selection does not crash", True)
-    ctl.deselect()
+    # Raw clean-up, not ctl.deselect(): Deselect is itself an undoable step
+    # now, and the next check is about undoing the stroke before it.
+    ctl.selection.select_all()
 
     # ---- undo/redo through the UI ---------------------------------------
     win.do_undo()
@@ -929,12 +931,14 @@ def main():
     check("tool buttons carry icons", all(not b.icon().isNull() for b in td.buttons.values()))
 
     # Shared letters cycle within a group, as in Paint.NET.
+    sharing = [n for n in ctl2.tools.names() if ctl2.tools.shortcut(n) == "S"]
     seq = []
-    for _ in range(3):
+    for _ in range(len(sharing) + 1):
         td.shortcuts["select_rect"].activated.emit()
         seq.append(ctl2.tool_name)
-    check("pressing S repeatedly cycles the marquees",
-          seq == ["select_rect", "select_ellipse", "select_rect"], "-- %s" % seq)
+    check("pressing S repeatedly cycles every marquee and wraps around",
+          seq[:len(sharing)] == sharing and seq[-1] == sharing[0] and len(sharing) >= 2,
+          "-- %s over %s" % (seq, sharing))
     ctl2.set_tool("select_ellipse")
     check("the group's button shows the member you last picked",
           td.current["marquee"] == "select_ellipse")
@@ -1007,6 +1011,68 @@ def main():
     check("HOLDING SPACE PANS WITH ANY TOOL", win2.canvas.view.offset_x != ox)
     check("...without painting", np.array_equal(before_px, ctl2.doc.cell(ctl2.active_layer).plane("rgba")))
 
+    # ---- click-by-click tools through REAL Qt events -------------------------
+    # Shown again: Qt does not deliver a button-less mouse move (the hover
+    # that drives the rubber band) to a hidden window.
+    win2.show()
+    ctl2.new_document(200, 150)
+    win2.canvas.bind()
+    for _ in range(5):
+        app.processEvents()
+    ctl2.set_tool("polygon_lasso")
+    v = win2.canvas.view
+    vp2 = win2.canvas.viewport()
+
+    def at(dx, dy):
+        wx, wy = v.doc_to_widget(dx, dy)
+        return QPoint(int(wx), int(wy))
+    for dx, dy in ((20, 20), (150, 25), (120, 120)):
+        QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at(dx, dy))
+    QTest.mouseMove(vp2, at(60, 130))
+    app.processEvents()
+    check("between clicks the lasso shows a rubber band to the pointer",
+          ctl2.tool.active and abs(ctl2.tool.overlay()[0][1][-1][1] - 130) < 3)
+    win2.canvas.repaint()
+    check("painting the tool overlay does not crash", True)
+    QTest.mouseDClick(vp2, Qt.LeftButton, Qt.NoModifier, at(40, 110))
+    app.processEvents()
+    check("A REAL DOUBLE-CLICK FINISHES THE POLYGON", not ctl2.tool.active
+          and ctl2.selection.mask is not None and int(ctl2.selection.mask[40, 100]) == 255)
+    ctl2.set_tool("polygon_lasso")
+    for dx, dy in ((10, 10), (60, 10), (60, 60)):
+        QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at(dx, dy))
+    QTest.keyClick(win2.canvas, Qt.Key_Return)
+    app.processEvents()
+    check("Enter finishes it too", not ctl2.tool.active and int(ctl2.selection.mask[20, 50]) == 255)
+    ctl2.set_tool("polygon_lasso")
+    QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at(100, 100))
+    QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at(150, 100))
+    QTest.keyClick(win2.canvas, Qt.Key_Escape)
+    check("Escape abandons it", not ctl2.tool.active and int(ctl2.selection.mask[20, 50]) == 255)
+
+    sel_items = [a.text().replace("&", "") for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&Select").menu().actions() if a.text()]
+    for entry in ("All", "None", "Invert", "Feather...", "Grow...", "Shrink...", "Border...",
+                  "Remove Holes", "Rounded Corners...", "Alpha to Selection", "Toggle Quick Mask"):
+        check("Select menu offers %s" % entry, entry in sel_items, "-- %s" % sel_items)
+    win2.do_quick_mask()
+    check("Q enters quick mask and the menu item shows it", win2.quick_mask_action.isChecked()
+          and ctl2.active_layer.name == "Quick Mask")
+    win2.canvas.repaint()
+    win2.do_quick_mask()
+    check("...and Q again leaves it", not win2.quick_mask_action.isChecked()
+          and all(l.name != "Quick Mask" for l in ctl2.doc.layers()))
+
+    # Explicit teardown while the QApplication is alive -- see
+    # MainWindow.shutdown for the crash this prevents.
+    import gc
+    for w in (win, win2):
+        w.shutdown()
+        w.hide()
+        w.deleteLater()
+    app.processEvents()
+    gc.collect()
+
     print("\nall UI smoke checks passed")
 
 
@@ -1017,3 +1083,10 @@ def _context_labels(dock, node):
 
 if __name__ == "__main__":
     main()
+    # As in ochre/ui/__main__.py: skip interpreter finalisation, where
+    # shiboken's arbitrary destruction order segfaults intermittently AFTER
+    # every check has passed (exit 139, "no Python frame"). Failures still
+    # exit non-zero through check() before reaching this line.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

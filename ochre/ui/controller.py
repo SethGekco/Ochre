@@ -62,6 +62,10 @@ class Controller:
         self.session = Session(state_dir)
         self._saved_marker = None
         self._tool_overrides = {}
+        # Document pixels that count as "on" a point; the canvas sets it to a
+        # few screen pixels as the zoom changes.
+        self.pick_radius = 4.0
+        self.quick_mask = None
         self.path = None
         self.dirty_since_save = False
         self.active_layer = None
@@ -870,6 +874,7 @@ class Controller:
         ctx.secondary_index = self.secondary_index
         ctx.clip = self.clip
         ctx.history_source = self.history_source
+        ctx.pick_radius = self.pick_radius
         return ctx
 
     def tick_stroke(self):
@@ -921,6 +926,16 @@ class Controller:
     def begin_stroke(self, x, y, pressure=1.0, modifiers=0, button=1):
         if self.tool is None or self.active_layer is None:
             return None
+        # A tool that is collecting clicks (polygonal lasso, scissors) keeps
+        # its context and its "before" snapshot across presses.
+        continuing = self.tool.active and getattr(self.tool, "multi_click", False)
+        if getattr(self.tool, "changes_selection", False) and not continuing:
+            self._sel_before = (None if self.selection.mask is None
+                                else self.selection.mask.copy())
+        if continuing and getattr(self, "_ctx", None) is not None:
+            self._ctx.pick_radius = self.pick_radius
+            rect = self.tool.begin(self._ctx, ToolEvent(x, y, pressure, modifiers, button))
+            return rect
         self._ctx = self._context()
         if self.tool.wants_stroke:
             self.compositor.build_cache(self.active_layer)
@@ -941,6 +956,44 @@ class Controller:
             return None
         result = self.tool.end(self._ctx, ToolEvent(x, y, pressure, modifiers, button))
         self._sync_from_context()
+        if not self.tool.active:
+            self._record_selection_change()
+        self.emit("history.changed")
+        return result
+
+    def _record_selection_change(self, label=None):
+        """Push the selection as it was before the tool, if the tool changed it."""
+        if not hasattr(self, "_sel_before"):
+            return False
+        before = self._sel_before
+        del self._sel_before
+        after = self.selection.mask
+        same = (before is None and after is None) or (
+            before is not None and after is not None and np.array_equal(before, after))
+        if same:
+            return False
+        from ..engine.commands import SelectionDelta
+        name = label or (self.tools.label(self.tool_name) if self.tool_name else "Selection")
+        self.history.push(SelectionDelta(self.selection, before, name), name)
+        self.emit("selection.changed")
+        return True
+
+    def hover_tool(self, x, y):
+        """Pointer moved with no button down while a tool is mid-task."""
+        tool = self.tool
+        if tool is None or not tool.active or not hasattr(tool, "hover"):
+            return False
+        return bool(tool.hover(self._ctx, ToolEvent(x, y)))
+
+    def finish_tool(self):
+        """Double-click / Enter: complete a multi-click tool."""
+        tool = self.tool
+        if tool is None or not tool.active or not hasattr(tool, "finish"):
+            return None
+        result = tool.finish(self._ctx)
+        tool.active = False
+        self._sync_from_context()
+        self._record_selection_change()
         self.emit("history.changed")
         return result
 
@@ -948,6 +1001,8 @@ class Controller:
         if self.tool is None or not self.tool.active:
             return None
         rect = self.tool.cancel(self._ctx)
+        if hasattr(self, "_sel_before"):
+            del self._sel_before
         if rect is not None:
             self.invalidate(rect if isinstance(rect, Rect) else self.doc.bounds)
         return rect
@@ -964,17 +1019,125 @@ class Controller:
 
     # ---- selection -------------------------------------------------------
 
+    def _selection_op(self, label, fn):
+        """Run a selection change as one undo entry. False if nothing changed."""
+        self._sel_before = None if self.selection.mask is None else self.selection.mask.copy()
+        fn(self.selection)
+        self.selection._bbox = None
+        if self.selection.mask is not None and self.selection.mask.min() == 255:
+            self.selection.mask = None
+        changed = self._record_selection_change(label)
+        self.emit("history.changed")
+        return changed
+
     def select_all(self):
-        self.selection.select_all()
-        self.emit("selection.changed")
+        return self._selection_op("Select All", lambda s: s.select_all())
 
     def deselect(self):
-        self.selection.select_all()
-        self.emit("selection.changed")
+        return self._selection_op("Deselect", lambda s: s.select_all())
 
     def invert_selection(self):
-        self.selection.invert()
-        self.emit("selection.changed")
+        return self._selection_op("Invert Selection", lambda s: s.invert())
+
+    def _mask_op(self, label, fn):
+        """Transform the selection mask. A select-all selection is treated as
+        a full mask, so 'shrink' on no selection still means something."""
+        def run(sel):
+            m = sel.mask if sel.mask is not None else \
+                np.full((sel.height, sel.width), 255, np.uint8)
+            sel.mask = np.asarray(fn(m), dtype=np.uint8)
+        return self._selection_op(label, run)
+
+    def grow_selection(self, radius):
+        from ..engine import morph
+        return self._mask_op("Grow Selection", lambda m: morph.grow(m, radius))
+
+    def shrink_selection(self, radius):
+        from ..engine import morph
+        return self._mask_op("Shrink Selection", lambda m: morph.shrink(m, radius))
+
+    def border_selection(self, radius):
+        from ..engine import morph
+        return self._mask_op("Border Selection", lambda m: morph.border(m, radius))
+
+    def feather_selection(self, radius):
+        return self._selection_op("Feather Selection", lambda s: s.feather(radius))
+
+    def sharpen_selection(self):
+        from ..engine import morph
+        return self._mask_op("Sharpen Selection", morph.sharpen)
+
+    def remove_selection_holes(self):
+        from ..engine import morph
+        return self._mask_op("Remove Holes", morph.remove_holes)
+
+    def round_selection(self, radius):
+        from ..engine import morph
+        return self._mask_op("Rounded Selection", lambda m: morph.round_corners(m, radius))
+
+    def alpha_to_selection(self):
+        """The active layer's opacity becomes the selection. GIMP's Alpha to
+        Selection; Photoshop's ctrl-click on a layer thumbnail."""
+        if self.active_layer is None or self.active_layer.is_group:
+            return False
+        cell = self.doc.cell(self.active_layer)
+        alpha = cell.plane("rgba")[..., 3].copy()
+        return self._selection_op("Alpha to Selection",
+                                  lambda s: setattr(s, "mask", alpha))
+
+    def select_by_colour_at(self, x, y, tolerance=32):
+        from ..engine.tools.select import SelectByColorTool
+        tool = SelectByColorTool(tolerance=tolerance)
+        ctx = self._context()
+        return self._selection_op("Select by Color",
+                                  lambda s: tool.on_begin(ctx, ToolEvent(x, y)))
+
+    # ---- quick mask ------------------------------------------------------
+
+    def toggle_quick_mask(self):
+        """Edit the selection by PAINTING it, as a temporary layer.
+
+        On: the selection becomes a layer on top -- white where selected,
+        red where not, multiplied so the image shows through -- and the brush,
+        eraser, gradient and every other tool edit it directly. Off: the
+        layer's green channel becomes the selection again and the layer goes.
+        GIMP's and Photoshop's Quick Mask, built on an ordinary layer so
+        nothing new is needed to paint it.
+        """
+        if self.quick_mask is None:
+            mask = self.selection.mask if self.selection.mask is not None else \
+                np.full((self.doc.height, self.doc.width), 255, np.uint8)
+            layer = self.doc.add_layer("Quick Mask")
+            layer.blend = "Multiply"
+            layer.opacity = 160
+            cell = self.doc.cell(layer)
+            px = cell.plane("rgba")
+            px[..., 0] = 255
+            px[..., 1] = mask
+            px[..., 2] = mask
+            px[..., 3] = 255
+            cell._touched(self.doc.bounds)
+            self.quick_mask = (layer, self.active_layer)
+            self.set_active_layer(layer)
+            # White paints "selected", black paints "not selected".
+            self.set_primary((255, 255, 255, 255))
+            self.set_secondary((0, 0, 0, 255))
+        else:
+            layer, previous = self.quick_mask
+            self.quick_mask = None
+            cell = self.doc.cells.get((layer.id, self.doc.frame.id))
+            mask = None if cell is None else cell.plane("rgba")[..., 1].copy()
+            self.doc.remove_layer(layer)
+            if previous is not None and self.doc.layer(previous.id) is not None:
+                self.set_active_layer(previous)
+            else:
+                leaves = self.doc.layers()
+                self.set_active_layer(leaves[-1] if leaves else None)
+            if mask is not None:
+                self._selection_op("Quick Mask", lambda s: setattr(s, "mask", mask))
+        self._after_structure_change()
+        self.emit("quickmask.changed", on=self.quick_mask is not None)
+        return self.quick_mask is not None
 
     # ---- history ---------------------------------------------------------
 

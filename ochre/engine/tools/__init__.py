@@ -20,6 +20,9 @@ from .select import (EllipseSelectTool, LassoTool, MagicWandTool,
 from .shapetools import (EllipseTool, FreeformTool, GradientTool, LineTool,
                          RectangleTool, ShapeTool, TextTool)
 from .viewtools import PanTool, ViewRequest, ZoomTool
+from .select import (ForegroundSelectTool, ObjectSelectTool, PolygonLassoTool,
+                     QuickSelectTool, ScissorsTool, SelectByColorTool,
+                     SingleColumnTool, SingleRowTool)
 from .retouch import (AirbrushTool, BackgroundEraserTool, BlurBrushTool, BurnTool,
                       DodgeTool, HealTool, HistoryBrushTool, InkTool, MagicEraserTool,
                       MixerBrushTool, PatternStampTool, RecolorTool, RedEyeTool,
@@ -37,6 +40,8 @@ BUILTIN = {
         SharpenBrushTool, SmudgeTool, DodgeTool, BurnTool, SpongeTool,
         BackgroundEraserTool, MagicEraserTool, PatternStampTool,
         HistoryBrushTool, HealTool, RedEyeTool,
+        SingleRowTool, SingleColumnTool, PolygonLassoTool, ScissorsTool,
+        SelectByColorTool, QuickSelectTool, ObjectSelectTool, ForegroundSelectTool,
     )
 }
 

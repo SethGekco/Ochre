@@ -76,6 +76,9 @@ class ToolContext:
         # Supplied by the controller; tools that need them check for None.
         self.clip = None              # the clipboard Clip, for pattern stamping
         self.history_source = None    # callable(layer_id, frame_id) -> rgba or None
+        # How close, in DOCUMENT pixels, counts as "on" a point -- a few
+        # screen pixels, so the canvas updates it as the zoom changes.
+        self.pick_radius = 4.0
 
     @property
     def cell(self):

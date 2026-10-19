@@ -292,8 +292,19 @@ class Selection:
         if mode == REPLACE:
             self.mask = new_mask
         else:
-            old = (self.mask if self.mask is not None
-                   else np.full((self.height, self.width), 255, dtype=np.uint8))
+            # "No selection" is stored as everything-selected, because that
+            # is what it means to the tools: nothing is fenced off. But to a
+            # user it looks like NOTHING is selected, so adding to it (or
+            # xor-ing with it) must start from empty -- otherwise Add mode, or
+            # a Quick Selection stroke, on a fresh canvas selects the lot.
+            # Subtract and intersect keep the everything reading, which is
+            # what makes "subtract this from the whole image" work.
+            if self.mask is not None:
+                old = self.mask
+            elif mode in (UNION, XOR):
+                old = np.zeros((self.height, self.width), dtype=np.uint8)
+            else:
+                old = np.full((self.height, self.width), 255, dtype=np.uint8)
             if mode == UNION:
                 self.mask = np.maximum(old, new_mask)
             elif mode == INTERSECT:
