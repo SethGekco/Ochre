@@ -168,7 +168,22 @@ class PaletteBar(QToolBar):
         except Exception as exc:                            # noqa: BLE001
             QMessageBox.warning(self.win, "Palette", str(exc))
             return
+        self._view_indexed(key)
         self.show_palette()
+
+    def _view_indexed(self, key):
+        """On an indexed image, the palette chosen IS how it is shown: the
+        indices stay, the colours follow (undoable), and the choice is
+        remembered for the next indexed file."""
+        if key and key[0] != "document" and self.ctl.is_indexed_document() \
+                and self.ctl.swatch_palette is not None:
+            self.ctl.set_document_palette(self.ctl.swatch_palette, key)
+            self.win.statusBar().showMessage(
+                "Showing the indices with %r (nothing in the image changed)."
+                % (self.ctl.swatch_palette.name or "this palette"), 6000)
+            self.win._after_pixels()
+            if hasattr(self.win, "palette_dock"):
+                self.win.palette_dock.sync()
 
     def show_palette(self):
         from ..engine import palettefiles as PF
@@ -195,6 +210,7 @@ class PaletteBar(QToolBar):
         except Exception as exc:                            # noqa: BLE001
             QMessageBox.warning(self.win, "Load Palette", str(exc))
             return
+        self._view_indexed(("file", path))
         self.refresh_sources()
         self.show_palette()
 

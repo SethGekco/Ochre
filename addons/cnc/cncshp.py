@@ -609,8 +609,11 @@ class ShpFormat:
             if names:
                 import os
                 stem = os.path.basename(path).lower()
-                for candidate in names:
-                    if candidate.lower() in stem:
+                # Names may carry their folder ("RA2/unittem"): match on the
+                # palette's own name, longest first (so "unittem" wins over
+                # "unit" when both exist).
+                for candidate in sorted(names, key=lambda n: -len(n.split("/")[-1])):
+                    if candidate.split("/")[-1].lower() in stem:
                         return self._palettes.load(candidate, host)
                 return self._palettes.load(names[0], host)
         from . import cncpal

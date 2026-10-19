@@ -177,6 +177,76 @@ class Controller:
         return candidates[0]
 
     def open_path(self, path):
+        doc = self._open_path(path)
+        self.indexed_note = None
+        if self.is_indexed_document():
+            self._palette_for_opened_indexed(path)
+        return doc
+
+    def is_indexed_document(self):
+        return self.doc is not None and any(l.index_locked for l in self.doc.layers())
+
+    def _palette_for_opened_indexed(self, path=""):
+        """An indexed file carries indices, not colours; its palette is often
+        a separate file nobody can infer. So: keep every index exactly, show
+        it with the palette the user last chose for an indexed image (or the
+        format's own guess), and say so -- no prompts, no conversion."""
+        key = None
+        guess = (getattr(self.doc.palette, "name", "") or "").split("/")[-1].lower()
+        named = bool(guess) and guess in os.path.basename(path or "").lower()
+        if self.session is not None and not named:
+            # A palette the file's own name points at beats a remembered
+            # choice; the remembered choice beats a blind default.
+            try:
+                key = tuple(self.session._cp.get("Prefs", "IndexedPalette").split("\t"))
+            except Exception:                               # noqa: BLE001
+                key = None
+        if key and key[0] in ("file", "builtin", "provider"):
+            try:
+                pal = self.palette_for(key)
+                if pal is not None:
+                    self.doc.bind_palette(self._bindable(pal))
+                    self.swatch_palette, self.swatch_key = self.doc.palette, key
+            except Exception:                               # noqa: BLE001
+                key = None
+        if not key or self.swatch_key != key:
+            self.swatch_palette, self.swatch_key = self.doc.palette, ("document",)
+        name = getattr(self.doc.palette, "name", "") or "a guess"
+        self.indexed_note = ("Indexed image: its pixels are palette indices, kept exactly. Shown "
+                             "with the palette %r -- pick the right one on the Palette bar to see "
+                             "its true colours." % name)
+        self.emit("palette.swatches")
+        return self.indexed_note
+
+    @staticmethod
+    def _bindable(pal):
+        """A palette ready to bind to a document: a copy, with its name."""
+        out = pal.copy()
+        out.name = pal.name
+        return out
+
+    def set_document_palette(self, palette, remember_key=None):
+        """Show an indexed image through another palette: every index stays
+        as it is, only the colours change. One undo step. remember_key: the
+        Palette bar source, remembered as the palette for the next indexed
+        file opened."""
+        from ..engine.commands import PaletteBindDelta
+        if palette is None or self.doc is None:
+            return False
+        before = PaletteBindDelta(self.doc, "Choose Palette")
+        self.doc.bind_palette(self._bindable(palette))
+        self.history.push(before, "Choose Palette")
+        if remember_key and remember_key[0] in ("file", "builtin", "provider") and self.session is not None:
+            self.session.set_flag("_", False)
+            self.session._cp.set("Prefs", "IndexedPalette", "\t".join(remember_key))
+            self.session._write()
+        self.compositor.invalidate()
+        self.invalidate()
+        self.emit("palette.changed", index=None)
+        self.emit("history.changed")
+        return True
+
+    def _open_path(self, path):
         provider = self._addon_format_for(path)
         if provider is not None:
             owner = self.addons.registry.owner("formats", provider.name)
@@ -3972,7 +4042,8 @@ class Controller:
         if self.swatch_key == ("generated",) and self.swatch_palette is not None:
             out.append(("Generated", self.swatch_palette.name or "Generated", ("generated",)))
         if self.doc is not None and self.doc.palette is not None:
-            out.append(("Document", "Document palette", ("document",)))
+            out.append(("Document", "Document: %s" % (self.doc.palette.name or "palette"),
+                        ("document",)))
         out += [("Built-in", n, ("builtin", n)) for n in PF.BUILTIN]
         listed, paths = set(), set()
         for name, path in PF.files_in(self.palette_folders()):

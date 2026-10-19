@@ -878,3 +878,26 @@ class IndexConvertDelta(Command):
 
     def nbytes(self):
         return sum(c.nbytes() for c in self.cells.values())
+
+
+class PaletteBindDelta(Command):
+    """The document's palette as it was. Rebinding a palette to an indexed
+    image changes no index -- only what the indices are shown as -- so this
+    holds one small object, not pixels."""
+
+    __slots__ = ("label", "palette")
+
+    def __init__(self, doc, label="Choose Palette"):
+        self.label = label
+        self.palette = doc.palette
+
+    def undo(self, doc):
+        opposite = PaletteBindDelta(doc, self.label)
+        if self.palette is not None:
+            doc.bind_palette(self.palette)
+        else:
+            doc.palette = None
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return 1100
