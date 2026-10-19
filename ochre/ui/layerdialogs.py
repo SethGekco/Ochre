@@ -195,7 +195,9 @@ class LayerStyleDialog(QDialog):
         # Blending Options: Photoshop's Blend If, the last page.
         self.original_bi = getattr(layer, "blend_if", None)
         self.working_bi = list(self.original_bi or (0, 0, 255, 255, 0, 0, 255, 255))
-        item = QListWidgetItem("Blending Options (Blend If)")
+        self.original_fill = getattr(layer, "fill_opacity", 255)
+        self.original_ko = getattr(layer, "knockout", "none")
+        item = QListWidgetItem("Blending Options")
         item.setData(Qt.UserRole, "__blend_if__")
         self.list.addItem(item)
         self.pages.addWidget(self._blend_if_page())
@@ -238,6 +240,20 @@ class LayerStyleDialog(QDialog):
     def _blend_if_page(self):
         page = QWidget()
         form = QFormLayout(page)
+        # Fill opacity: the layer's own pixels, not its effects.
+        self.fill_spin = QSpinBox()
+        self.fill_spin.setRange(0, 100)
+        self.fill_spin.setSuffix("%")
+        self.fill_spin.setValue(int(round(self.original_fill * 100 / 255.0)))
+        self.fill_spin.valueChanged.connect(lambda _v: self._preview())
+        form.addRow("Fill opacity", self.fill_spin)
+        self.knockout_box = QComboBox()
+        for label, value in (("None", "none"), ("Shallow (to the group's bottom)", "shallow"),
+                             ("Deep (to the bottom layer)", "deep")):
+            self.knockout_box.addItem(label, value)
+        self.knockout_box.setCurrentIndex(max(0, self.knockout_box.findData(self.original_ko)))
+        self.knockout_box.currentIndexChanged.connect(lambda _i: self._preview())
+        form.addRow("Knockout", self.knockout_box)
         labels = ("This layer: black from", "This layer: black to", "This layer: white from",
                   "This layer: white to", "Underlying: black from", "Underlying: black to",
                   "Underlying: white from", "Underlying: white to")
@@ -279,27 +295,42 @@ class LayerStyleDialog(QDialog):
     def result_styles(self):
         return {k: v for k, v in self.working.items() if v.get("enabled", True)}
 
+    def _fill_value(self):
+        return int(round(self.fill_spin.value() * 255 / 100.0))
+
     def _preview(self):
         self.layer.styles = {k: dict(v) for k, v in self.result_styles().items()}
         self.layer.blend_if = self._bi_value()
+        self.layer.fill_opacity = self._fill_value()
+        self.layer.knockout = self.knockout_box.currentData()
         _refresh(self.ctl, self.canvas)
+
+    def _put_back(self):
+        self.layer.styles = {k: dict(v) for k, v in self.original.items()}
+        self.layer.blend_if = self.original_bi
+        self.layer.fill_opacity = self.original_fill
+        self.layer.knockout = self.original_ko
 
     def accept(self):
         new = self.result_styles()
         bi = self._bi_value()
-        self.layer.styles = {k: dict(v) for k, v in self.original.items()}
-        self.layer.blend_if = self.original_bi
+        fill = self._fill_value()
+        ko = self.knockout_box.currentData()
+        self._put_back()
         self.ctl.history.begin_group()
         if new != self.original:
             self.ctl.set_layer_styles(self.layer, new)
         if bi != self.original_bi:
             self.ctl.set_layer_property(self.layer, "blend_if", bi)
+        if fill != self.original_fill:
+            self.ctl.set_layer_property(self.layer, "fill_opacity", fill)
+        if ko != self.original_ko:
+            self.ctl.set_layer_property(self.layer, "knockout", ko)
         self.ctl.history.end_group("Layer Style")
         _refresh(self.ctl, self.canvas)
         super().accept()
 
     def reject(self):
-        self.layer.styles = {k: dict(v) for k, v in self.original.items()}
-        self.layer.blend_if = self.original_bi
+        self._put_back()
         _refresh(self.ctl, self.canvas)
         super().reject()

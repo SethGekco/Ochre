@@ -126,6 +126,10 @@ def save(doc, path, selection=None, thumbnail_max=256):
                     add("Clip = 1")
                 if getattr(node, "blend_if", None):
                     add("BlendIf = %s" % ",".join(str(int(v)) for v in node.blend_if))
+                if getattr(node, "fill_opacity", 255) != 255:
+                    add("FillOpacity = %d" % node.fill_opacity)
+                if getattr(node, "knockout", "none") != "none":
+                    add("Knockout = %s" % node.knockout)
                 if getattr(node, "mask", None) is not None:
                     add("Mask = 1")
                     if not node.mask_enabled:
@@ -366,6 +370,9 @@ def load(path, settings=None):
                 node.clip = db.getbool(section, "Clip", False)
                 bi = db.getints(section, "BlendIf")
                 node.blend_if = tuple(bi) if len(bi) == 8 else None
+                node.fill_opacity = max(0, min(255, int(db.get(section, "FillOpacity", 255) or 255)))
+                ko = db.get(section, "Knockout", "none")
+                node.knockout = ko if ko in ("shallow", "deep") else "none"
                 if node.kind == "smart":
                     from ..layer import SmartSource
                     sw, sh = node.params.get("src_w"), node.params.get("src_h")

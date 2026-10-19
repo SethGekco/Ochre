@@ -98,6 +98,12 @@ class Layer(LayerNode):
         # underlying image's luminance ranges, each (black lo, black hi,
         # white lo, white hi); None means off.
         self.blend_if = None
+        # Photoshop's Fill opacity: scales the layer's own pixels but not its
+        # layer styles (a stroke stays at full strength at Fill 0).
+        self.fill_opacity = 255
+        # Knockout: "none", "shallow" (punch through to the bottom of the
+        # enclosing group) or "deep" (to the bottom layer of the image).
+        self.knockout = "none"
         self.planes = tuple(planes)
         self.authoritative = tuple(authoritative if authoritative is not None
                                    else (self.planes[0],))

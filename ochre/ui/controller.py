@@ -664,6 +664,8 @@ class Controller:
         copy.kind, copy.params = source.kind, dict(source.params)
         copy.clip, copy.mask_enabled = source.clip, source.mask_enabled
         copy.blend_if = source.blend_if
+        copy.fill_opacity = getattr(source, "fill_opacity", 255)
+        copy.knockout = getattr(source, "knockout", "none")
         if getattr(source, "smart_source", None) is not None:
             from ..engine.layer import SmartSource
             copy.smart_source = SmartSource(copy, source.smart_source.size)
@@ -1499,7 +1501,9 @@ class Controller:
             cell._touched(self.doc.bounds)
             if delta is not None:
                 self.history.push(delta, label, frame_id=frame.id)
-        for attr, empty in (("styles", {}), ("kind", "raster"), ("params", {})):
+        # The pixels now carry the styles and the Fill opacity, so both reset.
+        for attr, empty in (("styles", {}), ("kind", "raster"), ("params", {}),
+                            ("fill_opacity", 255)):
             if getattr(target, attr) != empty:
                 self.history.push(PropertyDelta(target.id, attr, getattr(target, attr)), label)
                 setattr(target, attr, empty)
@@ -1532,7 +1536,8 @@ class Controller:
         if lower is None:
             return False
         plain = (getattr(upper, "kind", "raster") == "raster" and upper.mask is None
-                 and not upper.styles and not upper.clip)
+                 and not upper.styles and not upper.clip
+                 and getattr(upper, "fill_opacity", 255) == 255)
         rects = transform.merge_rects(self.doc, upper, lower)
         if not plain:
             # An adjustment, a fill or a style reaches past the upper layer's

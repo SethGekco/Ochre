@@ -70,7 +70,7 @@ _EMPTY = object()      # a clipping base with no pixels: its clipped layers show
 class _Leaf:
     """One visible leaf, as the compositor needs it."""
 
-    __slots__ = ("surface", "mode", "opacity", "layer", "base")
+    __slots__ = ("surface", "mode", "opacity", "layer", "base", "group_start")
 
     def __init__(self, surface, mode, opacity, layer, base=None):
         self.surface = surface
@@ -78,6 +78,9 @@ class _Leaf:
         self.opacity = opacity
         self.layer = layer
         self.base = base           # the _Leaf this one is clipped to, or None
+        # Index (in the leaf list) where this leaf's pass-through group starts;
+        # None at the top level. A shallow knockout reveals that point.
+        self.group_start = None
 
     # The old (surface, mode, opacity, layer) tuple shape, for callers that
     # unpack leaves.
@@ -127,7 +130,7 @@ class Compositor:
 
     # ---- the leaves ------------------------------------------------------------
 
-    def _visible_leaves(self, group, frame, scale=255):
+    def _visible_leaves(self, group, frame, scale=255, _offset=0, _nested=False):
         """Visible leaves bottom-first, with opacity multiplied down through
         groups and each clipped layer pointing at its base.
 
@@ -154,7 +157,8 @@ class Compositor:
                     out.append(leaf)
                     base = leaf
                 else:
-                    out.extend(self._visible_leaves(node, frame, opacity))
+                    out.extend(self._visible_leaves(node, frame, opacity,
+                                                    _offset + len(out), True))
                     base = None
                 continue
             kind = getattr(node, "kind", "raster")
@@ -171,6 +175,8 @@ class Compositor:
                     continue
                 clipped_to = base
             leaf = _Leaf(surface, self.blends.opcode(node.blend), opacity, node, clipped_to)
+            if _nested:
+                leaf.group_start = _offset
             if not node.clip:
                 base = leaf
             out.append(leaf)
@@ -194,9 +200,66 @@ class Compositor:
                     return True
                 continue
             if (n.blend != "Normal" or getattr(n, "kind", "raster") == ADJUSTMENT
-                    or getattr(n, "clip", False) or getattr(n, "blend_if", None)):
+                    or getattr(n, "clip", False) or getattr(n, "blend_if", None)
+                    or _knocks(n)):
                 return True
         return False
+
+    def _run(self, window, leaves, r, frame, top=True):
+        """Composite leaves bottom-up over window -- the one loop every
+        composite goes through, so knockouts behave the same everywhere.
+
+        A knockout needs the picture as it was further down the stack: the
+        start of the layer's group (shallow) or just above the bottom layer
+        (deep, Photoshop's 'to the Background'). Those states are copied
+        only when some leaf asks for them. Inside an isolated group (top
+        False) both kinds reach the group's own transparent start -- an
+        approximation: Photoshop's deep knockout there reaches the image
+        background, through the group.
+        """
+        need = {}
+        for i, leaf in enumerate(leaves):
+            ko = _knocks(leaf.layer)
+            if not ko:
+                continue
+            if ko == "shallow" and leaf.group_start is not None:
+                start = leaf.group_start
+            else:
+                start = 1 if top else 0
+            if start < i:
+                need[i] = start
+        wanted = set(need.values())
+        snaps = {}
+        for i, leaf in enumerate(leaves):
+            if i in wanted:
+                snaps[i] = window.copy()
+            if i in need:
+                self._knock(window, snaps[need[i]], leaf, r, frame)
+            self._blend_leaf(window, leaf, r, frame)
+        return window
+
+    def _knock(self, window, backdrop, leaf, r, frame):
+        """Where the leaf has pixels, put back the backdrop: window becomes
+        lerp(window, backdrop, footprint) in premultiplied space. The leaf
+        itself is blended afterwards at its Fill opacity."""
+        if getattr(leaf.layer, "kind", "raster") == ADJUSTMENT:
+            return
+        src = self._source(leaf, r)
+        if src is None:
+            return
+        k = src[..., 3].astype(np.float64) * (leaf.opacity / (255.0 * 255.0))
+        mask = self._coverage(leaf, r, frame)
+        if mask is not None:
+            k = k * (mask / 255.0)
+        k = k[..., None]
+        w = window.astype(np.float64)
+        b = backdrop.astype(np.float64)
+        wa, ba = w[..., 3:4], b[..., 3:4]
+        a = wa * (1 - k) + ba * k
+        rgb = w[..., :3] * wa * (1 - k) + b[..., :3] * ba * k
+        rgb = np.divide(rgb, a, out=np.zeros_like(rgb), where=a > 0)
+        window[..., :3] = np.clip(np.rint(rgb), 0, 255)
+        window[..., 3:4] = np.clip(np.rint(a), 0, 255)
 
     def _source(self, leaf, r):
         """The leaf's own pixels over r: stored, generated (a fill layer), or
@@ -205,9 +268,7 @@ class Compositor:
         if layer.is_group:
             frame = self._frame_for_group or self.doc.frame
             out = np.zeros((r.h, r.w, 4), np.uint8)
-            for child in self._visible_leaves(layer, frame):
-                self._blend_leaf(out, child, r, frame)
-            return out
+            return self._run(out, self._visible_leaves(layer, frame), r, frame, top=False)
         kind = getattr(layer, "kind", "raster")
         if kind == FILL:
             return fill_pixels(layer.params, r, self.doc.width, self.doc.height)
@@ -338,19 +399,21 @@ class Compositor:
                                  sub[2], out=sub[0])
 
         blend_if = getattr(layer, "blend_if", None)
+        fill = getattr(layer, "fill_opacity", 255)
+        opacity = leaf.opacity if fill >= 255 else (leaf.opacity * fill + 127) // 255
         if getattr(layer, "kind", "raster") == ADJUSTMENT:
             effect = self._effect(layer)
             if effect is not None:
                 adjusted = effect.apply(window)
                 if blend_if:
                     mask = _combine(mask, blend_if_factor(adjusted, window, blend_if))
-                accel.blend_rect(window, adjusted, leaf.mode, leaf.opacity, mask, out=window)
+                accel.blend_rect(window, adjusted, leaf.mode, opacity, mask, out=window)
         else:
             src = self._source(leaf, r)
             if src is not None:
                 if blend_if:
                     mask = _combine(mask, blend_if_factor(src, window, blend_if))
-                accel.blend_rect(window, src, leaf.mode, leaf.opacity, mask, out=window)
+                accel.blend_rect(window, src, leaf.mode, opacity, mask, out=window)
 
         if sub is not None and styled[2] is not None:
             accel.blend_rect(sub[0], styled[2][sub[1]], accel.NORMAL, leaf.opacity,
@@ -369,8 +432,7 @@ class Compositor:
             return None
         window = dst[r.slice()]
         window[...] = 0
-        for leaf in self._visible_leaves(self.doc.root, frame):
-            self._blend_leaf(window, leaf, r, frame)
+        self._run(window, self._visible_leaves(self.doc.root, frame), r, frame)
         return r
 
     def composite(self, rect=None, frame=None):
@@ -381,9 +443,7 @@ class Compositor:
         if r is None:
             return None
         out = np.zeros((r.h, r.w, 4), dtype=np.uint8)
-        for leaf in self._visible_leaves(self.doc.root, frame):
-            self._blend_leaf(out, leaf, r, frame)
-        return out
+        return self._run(out, self._visible_leaves(self.doc.root, frame), r, frame)
 
     # ---- the stroke cache -------------------------------------------------------
 
@@ -411,6 +471,11 @@ class Compositor:
                 split = i
                 break
 
+        if any(_knocks(leaf.layer) for leaf in layers):
+            # A knockout reads the picture further down the stack, which the
+            # three-part cache does not keep: take the full walk.
+            self.invalidate()
+            return self
         if split is None and self.doc.layer(active_id) is not None \
                 and not self.doc.layer(active_id).is_group:
             # The active layer is inside an isolated group, which composites
@@ -490,6 +555,14 @@ class Compositor:
 
 
 # ---- helpers shared with merge / flatten ----------------------------------------
+
+def _knocks(node):
+    """The node's knockout kind, or None."""
+    if node is None or node.is_group:
+        return None
+    ko = getattr(node, "knockout", "none")
+    return ko if ko in ("shallow", "deep") else None
+
 
 def _combine(mask, factor):
     if mask is None:

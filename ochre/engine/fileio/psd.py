@@ -187,6 +187,8 @@ class PSDLayer:
         self.mask_disabled = False
         self.section = 0                  # lsct: 0 layer, 1/2 group open/closed, 3 group end
         self.blend_if = None
+        self.fill = 255                   # iOpa: Fill opacity
+        self.knockout = False             # knko (PSD stores one flag: shallow)
         self.pixels = None                # (h, w, 4)
         self.mask = None                  # (mh, mw)
 
@@ -267,6 +269,10 @@ def read(path):
                         L.name = r.take(n * 2).decode("utf-16-be", "replace")
                     elif key in (b"lsct", b"lsdk") and klen >= 4:
                         L.section = r.u32()
+                    elif key == b"iOpa" and klen >= 1:
+                        L.fill = r.u8()
+                    elif key == b"knko" and klen >= 1:
+                        L.knockout = r.u8() != 0
                     r.p = kend
                     if klen % 2 and r.p < extra_end and data[r.p:r.p + 4] not in (b"8BIM", b"8B64"):
                         r.p += 1
@@ -389,6 +395,8 @@ def load(path, settings=None):
         node.blend = L.blend
         node.clip = L.clipping
         node.blend_if = L.blend_if
+        node.fill_opacity = L.fill
+        node.knockout = "shallow" if L.knockout else "none"
         t, l, b, rt = L.rect
         cell = doc.cell(node)
         dst = Rect(l, t, rt - l, b - t).clipped_to(width, height)
@@ -448,7 +456,7 @@ def save(doc, path, compositor=None):
     records = []      # (record bytes, channel data bytes), bottom-first
 
     def layer_record(name, rect, chans, blend, opacity, clip, hidden, section=None, mask=None,
-                     blend_if=None):
+                     blend_if=None, fill=255, knockout=False):
         t, l, b, r = rect
         rec = struct.pack(">iiii", t, l, b, r)
         rec += struct.pack(">H", len(chans))
@@ -478,6 +486,10 @@ def save(doc, path, compositor=None):
         extra += _block(b"luni", struct.pack(">I", len(name)) + uni)
         if section is not None:
             extra += _block(b"lsct", struct.pack(">I", section))
+        if fill != 255:
+            extra += _block(b"iOpa", struct.pack(">B3x", fill))
+        if knockout:
+            extra += _block(b"knko", struct.pack(">B3x", 1))
         rec += struct.pack(">I", len(extra)) + extra
         return rec, data
 
@@ -514,11 +526,17 @@ def save(doc, path, compositor=None):
                 # The mask and Blend If travel as themselves, not baked in.
                 saved_mask, node.mask = node.mask, None
                 saved_bi, node.blend_if = getattr(node, "blend_if", None), None
+                # Fill opacity too -- unless styles are baked into the pixels,
+                # when only the baked result is right and iOpa stays 255.
+                saved_fill = getattr(node, "fill_opacity", 255)
+                if not getattr(node, "styles", None):
+                    node.fill_opacity = 255
                 try:
                     comp._blend_leaf(px, leaf, doc.bounds, frame)
                 finally:
                     node.mask = saved_mask
                     node.blend_if = saved_bi
+                    node.fill_opacity = saved_fill
             ys, xs = np.nonzero(px[..., 3])
             if ys.size:
                 t, l, b, r = int(ys.min()), int(xs.min()), int(ys.max()) + 1, int(xs.max()) + 1
@@ -536,7 +554,13 @@ def save(doc, path, compositor=None):
             records.append(layer_record(node.name or "Layer", (t, l, b, r), chans, node.blend,
                                         node.opacity, getattr(node, "clip", False),
                                         not node.visible, mask=mask,
-                                        blend_if=getattr(node, "blend_if", None)))
+                                        blend_if=getattr(node, "blend_if", None),
+                                        fill=255 if getattr(node, "styles", None)
+                                        else getattr(node, "fill_opacity", 255),
+                                        knockout=getattr(node, "knockout", "none") != "none"))
+            if getattr(node, "knockout", "none") == "deep":
+                warnings.append("deep knockout on %r is saved as shallow (PSD keeps one flag)"
+                                % node.name)
     emit(doc.root)
 
     head = b"8BPS" + struct.pack(">H6xHIIHH", 1, 4, height, width, 8, 3)
