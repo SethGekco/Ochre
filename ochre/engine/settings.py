@@ -116,6 +116,50 @@ class Settings:
                     value = _coerce(default, env_raw)
                 self._cache[(section, key)] = value
 
+    # ---- the user's preferences ---------------------------------------------
+
+    def apply_user(self, path):
+        """Lay the user's preferences (an INI written by the Preferences
+        dialog) over the data INIs; the environment still wins. Unknown keys
+        are ignored, as everywhere. Returns how many values it set."""
+        import configparser
+        if not path or not os.path.isfile(path):
+            return 0
+        cp = configparser.ConfigParser()
+        cp.optionxform = str
+        try:
+            cp.read(path, encoding="utf-8")
+        except (OSError, configparser.Error):
+            return 0
+        n = 0
+        for section in cp.sections():
+            for key, raw in cp.items(section):
+                default = self._defaults.get(section, {}).get(key)
+                if default is None or self._env.get(self.ENV_PREFIX + key.upper()) is not None:
+                    continue
+                self._cache[(section, key)] = _coerce(default, raw)
+                n += 1
+        return n
+
+    @staticmethod
+    def save_user(path, values):
+        """Write {(section, key): value} as the user's preferences INI."""
+        import configparser
+        cp = configparser.ConfigParser()
+        cp.optionxform = str
+        for (section, key), value in sorted(values.items()):
+            if not cp.has_section(section):
+                cp.add_section(section)
+            if isinstance(value, tuple):
+                value = ",".join(str(int(v)) for v in value)
+            elif isinstance(value, bool):
+                value = "on" if value else "off"
+            cp.set(section, key, str(value))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            cp.write(fh)
+        return path
+
     # ---- access ----------------------------------------------------------
 
     def get(self, section, key):

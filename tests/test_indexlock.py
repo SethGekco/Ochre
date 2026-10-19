@@ -154,6 +154,13 @@ DRIVERS = {
                                      t.begin(c, ToolEvent(26, 20)),
                                      t.motion(c, ToolEvent(30, 22)),
                                      t.end(c, ToolEvent(30, 22))),
+    # Lay out one quad over the inked corner, pull a corner, apply.
+    "perspective_warp": lambda t, c: (_ink(c, 2, 2, 20, 16, 200),
+                                      t.begin(c, ToolEvent(2, 2)), t.motion(c, ToolEvent(30, 24)),
+                                      t.end(c, ToolEvent(30, 24)),
+                                      t.set_option("mode", "warp"),
+                                      t.begin(c, ToolEvent(30, 24)), t.motion(c, ToolEvent(36, 30)),
+                                      t.end(c, ToolEvent(36, 30)), t.finish(c)),
     "shape":    lambda t, c: (t.begin(c, ToolEvent(4, 4)),
                               t.motion(c, ToolEvent(34, 28)),
                               t.end(c, ToolEvent(34, 28))),

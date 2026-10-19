@@ -103,6 +103,10 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, self.options_bar)
 
         self._build_menus()
+        # The user's menu keys (Edit > Keyboard Shortcuts), over the built-in ones.
+        from . import keymap
+        from .prefsdialog import apply_menu_keys
+        apply_menu_keys(self.menuBar(), keymap.load(getattr(self.ctl, "state_dir", None)))
         self._build_window_menu()
         self._build_status()
         self._subscribe()
@@ -611,6 +615,9 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "Stro&ke...", self.do_stroke_dialog)
         self._act(edit_menu, "Define &Pattern...", self.do_define_pattern)
         self._act(edit_menu, "Define &Brush Tip", self.do_define_brush_tip)
+        edit_menu.addSeparator()
+        self._act(edit_menu, "Pre&ferences...", self.do_preferences, "Ctrl+K")
+        self._act(edit_menu, "Keyboard S&hortcuts...", self.do_shortcuts, "Ctrl+Alt+Shift+K")
         edit_menu.addSeparator()
         self._act(edit_menu, "Auto-Align La&yers...", self.do_auto_align)
         self._act(edit_menu, "Auto-Blend Layers...", self.do_auto_blend)
@@ -1484,6 +1491,14 @@ class MainWindow(QMainWindow):
         if path:
             self.ctl.relink(path)
             self._after_pixels()
+
+    def do_preferences(self):
+        from .prefsdialog import PreferencesDialog
+        PreferencesDialog(self.ctl, self).exec()
+
+    def do_shortcuts(self):
+        from .prefsdialog import ShortcutsDialog
+        ShortcutsDialog(self.ctl, self.menuBar(), self).exec()
 
     def do_filter_gallery(self):
         from .gallery import FilterGalleryDialog

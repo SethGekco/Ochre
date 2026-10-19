@@ -336,6 +336,13 @@ def i_vanishing_point(g):
     g.line((16, 7), (12, 2), w=0.8, color=ACCENT)
 
 
+def i_perspective_warp(g):
+    g.poly([(3, 18), (11, 15), (11, 5), (3, 7)], w=1.2)
+    g.poly([(11, 15), (21, 19), (21, 4), (11, 5)], w=1.2)
+    for x, y in ((3, 18), (11, 15), (11, 5), (3, 7), (21, 19), (21, 4)):
+        g.rect(x - 1.4, y - 1.4, 2.8, 2.8, fill=ACCENT, w=0.7)
+
+
 def i_frame(g):
     g.rect(4, 4, 16, 16, w=1.4)
     g.line((4, 4), (20, 20), w=1.0)

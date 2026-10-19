@@ -34,6 +34,7 @@ from .pathtools import (AddAnchorTool, ConvertPointTool, CurvaturePenTool,
                         PathSelectTool, PenTool)
 from .boards import ArtboardTool, FrameTool
 from .vanishing import VanishingPointTool
+from .perspwarp import PerspectiveWarpTool
 from .utility import (ColorSamplerTool, CountTool, MeasureTool, NoteTool,
                       SliceSelectTool, SliceTool)
 from .retouch import (AirbrushTool, ArtHistoryBrushTool, BackgroundEraserTool, BlurBrushTool, BurnTool,
@@ -63,7 +64,7 @@ BUILTIN = {
         CurveTool, MeasureTool, ColorSamplerTool, CountTool, NoteTool, SliceTool,
         SliceSelectTool, AddAnchorTool, DeleteAnchorTool, ConvertPointTool, PuppetWarpTool,
         ArtHistoryBrushTool, ArtboardTool, FrameTool,
-        VanishingPointTool,
+        VanishingPointTool, PerspectiveWarpTool,
     )
 }
 

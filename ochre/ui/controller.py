@@ -65,6 +65,12 @@ class Controller:
         except Exception:                                   # noqa: BLE001
             pass
         self.session = Session(state_dir)
+        # The user's Preferences and keyboard shortcuts (Edit > Preferences,
+        # Edit > Keyboard Shortcuts), over the data INIs.
+        if state_dir:
+            self.settings.apply_user(os.path.join(state_dir, "preferences.ini"))
+            from . import keymap
+            keymap.apply_tools(self.tools, keymap.load(state_dir))
         # Effects as non-destructive filters (GIMP 3) instead of baked in.
         self.non_destructive = self.session.flag("NonDestructiveFilters", False)
         self._saved_marker = None
