@@ -169,7 +169,7 @@ def main():
         check("a real %d-layer PSD composites as Photoshop did (max %.2f)" % (len(layers), diff),
               diff <= 1.5 and np.array_equal(mine[..., 3], comp[..., 3]))
     else:
-        print("ok: skipped real-PSD comparison (no sample)")
+        print("ok: (real-PSD comparison not run: no sample present)")
 
     # ---- OpenRaster ---------------------------------------------------------------------
     doc = sample_doc()
@@ -236,7 +236,7 @@ def main():
         check("GIMP flattens Ochre's PSD the same way (max diff %d)" % np.abs(gimp - mine).max(),
               np.abs(gimp - mine).max() <= 2)
     else:
-        print("ok: skipped GIMP cross-check (set OCHRE_GIMP=1)")
+        print("ok: (GIMP cross-check not run: set OCHRE_GIMP=1)")
 
     print("\nall format checks passed")
 
