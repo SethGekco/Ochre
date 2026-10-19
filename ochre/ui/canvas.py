@@ -1018,7 +1018,9 @@ class CanvasView(QAbstractScrollArea):
         tool = self._text_tool()
         if tool is None:
             return None
-        cmd = tool.commit_text(self.ctl._context())
+        # Through the controller, so a type mask's selection is recorded
+        # (and undoable) like any other selection change.
+        cmd = self.ctl.finish_tool()
         self._stop_caret()
         self.ctl.emit("history.changed")
         self.refresh()

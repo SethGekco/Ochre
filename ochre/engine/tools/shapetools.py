@@ -371,7 +371,46 @@ class TextTool(_DragTool):
                     O.Opt("size", O.INT, 24, "Size", 4, 1000, suffix=" px"),
                     O.Opt("align", O.CHOICE, "left", "Align", choices=("left", "center", "right")),
                     O.Opt("line_spacing", O.FLOAT, 1.0, "Line spacing", 0.5, 4.0, 0.1),
-                    O.antialias(True))
+                    O.antialias(True),
+                    O.Opt("orientation", O.CHOICE, "horizontal", "Direction",
+                          choices=("horizontal", "vertical"),
+                          tip="Vertical sets characters top to bottom, columns "
+                              "right to left (Photoshop's Vertical Type)."),
+                    O.Opt("output", O.CHOICE, "pixels", "Makes",
+                          choices=("pixels", "selection"),
+                          labels={"pixels": "Text", "selection": "Selection (type mask)"},
+                          tip="Selection makes the letters a selection instead of "
+                              "paint: Photoshop's Type Mask tools."))
+
+    @property
+    def changes_selection(self):
+        """A type mask's result is a selection, recorded as one."""
+        return self.option("output", "pixels") == "selection"
+
+    @property
+    def vertical(self):
+        return self.option("orientation", "horizontal") == "vertical"
+
+    def _layout(self):
+        from .. import text as textmod
+        body = str(self.option("text", ""))
+        if self.vertical:
+            return textmod.vertical_layout(
+                body, family=str(self.option("font", "DejaVu Sans")),
+                size=int(self.option("size", 24)),
+                line_spacing=float(self.option("line_spacing", 1.0)),
+                antialias=bool(self.option("antialias", True)))
+        return textmod.layout(
+            body, family=str(self.option("font", "DejaVu Sans")),
+            size=int(self.option("size", 24)),
+            align=str(self.option("align", textmod.LEFT)),
+            line_spacing=float(self.option("line_spacing", 1.0)),
+            antialias=bool(self.option("antialias", True)))
+
+    def _align(self):
+        from .. import text as textmod
+        # Vertical text anchors at its top-left; alignment is a horizontal idea.
+        return textmod.LEFT if self.vertical else str(self.option("align", textmod.LEFT))
 
     def on_begin(self, ctx, event):
         if ctx.cell is None:
@@ -484,20 +523,17 @@ class TextTool(_DragTool):
 
         if self._anchor is None:
             return None
-        lay = textmod.layout(
-            str(self.option("text", "")),
-            family=str(self.option("font", "DejaVu Sans")),
-            size=int(self.option("size", 24)),
-            align=str(self.option("align", textmod.LEFT)),
-            line_spacing=float(self.option("line_spacing", 1.0)))
-        cx, cy, height = lay.caret_at(self.caret)
+        lay = self._layout()
+        cx, cy, extent = lay.caret_at(self.caret)
 
         ax, ay = self._anchor
-        align = str(self.option("align", textmod.LEFT))
-        origin = textmod.place(lay.coverage, ax, ay, align) if lay.width else None
+        origin = textmod.place(lay.coverage, ax, ay, self._align()) if lay.width else None
         ox = origin.x if origin is not None else int(round(ax))
         oy = origin.y if origin is not None else int(round(ay))
-        return Rect(ox + cx, oy + cy, 1, max(1, int(height)))
+        if getattr(lay, "vertical", False):
+            # Between two stacked characters the caret lies across the column.
+            return Rect(ox + cx, oy + cy, max(1, int(extent)), 1)
+        return Rect(ox + cx, oy + cy, 1, max(1, int(extent)))
 
     def caret_from_point(self, ctx, x, y):
         """Click-to-position: move the caret nearest a document point."""
@@ -505,15 +541,9 @@ class TextTool(_DragTool):
 
         if self._anchor is None:
             return self.caret
-        lay = textmod.layout(
-            str(self.option("text", "")),
-            family=str(self.option("font", "DejaVu Sans")),
-            size=int(self.option("size", 24)),
-            align=str(self.option("align", textmod.LEFT)),
-            line_spacing=float(self.option("line_spacing", 1.0)))
+        lay = self._layout()
         ax, ay = self._anchor
-        align = str(self.option("align", textmod.LEFT))
-        origin = textmod.place(lay.coverage, ax, ay, align) if lay.width else None
+        origin = textmod.place(lay.coverage, ax, ay, self._align()) if lay.width else None
         ox = origin.x if origin is not None else int(round(ax))
         oy = origin.y if origin is not None else int(round(ay))
         self.caret = lay.index_at(x - ox, y - oy)
@@ -539,6 +569,8 @@ class TextTool(_DragTool):
         """Finish the edit and push one history entry."""
         if self._session is None:
             return None
+        if self.changes_selection:
+            return self._commit_mask(ctx)
         cmd = self._session.commit()
         self._session = None
         self.active = False
@@ -567,26 +599,32 @@ class TextTool(_DragTool):
         self.set_option("text", "")
         self._caret = 0
 
-    def _render(self, ctx, event):
+    def _coverage(self):
+        """(rect, window) of the current text in document space, or None."""
         from .. import text as textmod
-
-        cell = ctx.cell
         body = str(self.option("text", ""))
-        if not body:
+        if not body or self._anchor is None:
             return None
-
-        cov, w, h = textmod.render_coverage(
-            body,
-            family=str(self.option("font", "DejaVu Sans")),
-            size=int(self.option("size", 24)),
-            align=str(self.option("align", textmod.LEFT)),
-            line_spacing=float(self.option("line_spacing", 1.0)),
-            antialias=bool(self.option("antialias", True)))
-        if w == 0 or h == 0:
+        if self.vertical:
+            cov = self._layout().coverage
+        else:
+            cov, _w, _h = textmod.render_coverage(
+                body,
+                family=str(self.option("font", "DejaVu Sans")),
+                size=int(self.option("size", 24)),
+                align=str(self.option("align", textmod.LEFT)),
+                line_spacing=float(self.option("line_spacing", 1.0)),
+                antialias=bool(self.option("antialias", True)))
+        if cov.size == 0:
             return None
+        return textmod.place(cov, self._anchor[0], self._anchor[1], self._align()), cov
 
-        ax, ay = self._anchor
-        rect = textmod.place(cov, ax, ay, str(self.option("align", textmod.LEFT)))
+    def _render(self, ctx, event):
+        cell = ctx.cell
+        placed = self._coverage()
+        if placed is None:
+            return None
+        rect, cov = placed
         clipped = rect.clipped_to(cell.width, cell.height)
         if clipped is None:
             return None
@@ -595,8 +633,205 @@ class TextTool(_DragTool):
                      clipped.x - rect.x:clipped.x - rect.x + clipped.w]
         self._session.touch(clipped)
 
-        colour = ctx.colour_for(event) if event is not None else ctx.primary
         src = np.empty((clipped.h, clipped.w, 4), dtype=np.uint8)
+        if self.changes_selection:
+            # A type mask previews the way Photoshop's does: a translucent
+            # red overlay while typing, the selection only on commit. The
+            # preview is restored away then, so it never reaches the layer.
+            src[:] = (255, 40, 40, 255)
+            cell.apply_masked(clipped, src, (window.astype(np.uint16) * 140 // 255
+                                             ).astype(np.uint8))
+            return clipped
+        colour = ctx.colour_for(event) if event is not None else ctx.primary
         src[:] = colour
         cell.apply_masked(clipped, src, ctx.coverage(window, clipped))
         return clipped
+
+    def _commit_mask(self, ctx):
+        """Type mask: the letters become the selection; the layer is untouched."""
+        placed = self._coverage()
+        self._session.cancel()
+        self._session = None
+        self.active = False
+        self._clear()
+        if placed is None or ctx.selection is None:
+            return None
+        rect, cov = placed
+        doc = ctx.doc
+        mask = np.zeros((doc.height, doc.width), dtype=np.uint8)
+        clipped = rect.clipped_to(doc.width, doc.height)
+        if clipped is None:
+            return None
+        mask[clipped.slice()] = cov[clipped.y - rect.y:clipped.y - rect.y + clipped.h,
+                                    clipped.x - rect.x:clipped.x - rect.x + clipped.w]
+        from ..selection import REPLACE
+        ctx.selection.combine(mask, REPLACE)
+        ctx.selection._bbox = None
+        return clipped
+
+
+class CurveTool(_DragTool):
+    """Paint.NET's Line / Curve: draw a line, then bend it by its handles.
+
+    Drag to draw a straight line. It stays editable: four handles appear --
+    the two ends and two control points -- and dragging any of them reshapes
+    the line into a cubic Bezier, redrawn live from the stroke session.
+    Enter, a double-click or switching tools commits it; clicking away from
+    the handles commits it and starts the next line there; Escape abandons
+    it. Arrowheads at either end follow the curve's direction.
+    """
+
+    name = "curve"
+    label = "Line / Curve"
+    multi_click = True
+    commit_on_switch = True
+    options_spec = (O.stroke(2), O.antialias(True),
+                    O.Opt("arrows", O.CHOICE, "none", "Arrows",
+                          choices=("none", "end", "start", "both"),
+                          labels={"none": "None", "end": "At end", "start": "At start",
+                                  "both": "Both ends"}))
+
+    def __init__(self, **options):
+        super().__init__(**options)
+        self._pts = None
+        self._grab = None
+        self._colour = None
+
+    def on_begin(self, ctx, event):
+        if self._pts is not None:
+            r = max(float(ctx.pick_radius), 4.0)
+            best, grab = r * r, None
+            for i, (px, py) in enumerate(self._pts):
+                d = (px - event.x) ** 2 + (py - event.y) ** 2
+                if d <= best:
+                    best, grab = d, i
+            if grab is not None:
+                self._grab = (grab, (event.x, event.y), list(self._pts))
+                return None
+            self._commit(ctx)
+            self.active = True          # this press goes on to draw the next one
+        if ctx.cell is None:
+            self.active = False
+            return None
+        self._session = self._begin_session(ctx)
+        self._last_rect = None
+        self._colour = ctx.colour_for(event)
+        self._pts = [(event.x, event.y)] * 4
+        self._grab = ("new",)
+        return None
+
+    def on_motion(self, ctx, event):
+        if self._session is None or self._grab is None:
+            return None
+        if self._grab[0] == "new":
+            x0, y0 = self._pts[0]
+            x1, y1 = event.x, event.y
+            if event.has(1):
+                x1, y1 = constrain_angle(x0, y0, x1, y1)
+            self._pts = [(x0, y0), (x0 + (x1 - x0) / 3.0, y0 + (y1 - y0) / 3.0),
+                         (x0 + (x1 - x0) * 2 / 3.0, y0 + (y1 - y0) * 2 / 3.0), (x1, y1)]
+        else:
+            i, (sx, sy), orig = self._grab
+            dx, dy = event.x - sx, event.y - sy
+            pts = list(orig)
+            pts[i] = (orig[i][0] + dx, orig[i][1] + dy)
+            self._pts = pts
+        restored = self._session.restore(self._last_rect)
+        drawn = self._render(ctx, event)
+        self._last_rect = drawn
+        if restored is None:
+            return drawn
+        return restored if drawn is None else restored.union(drawn)
+
+    def on_end(self, ctx, event):
+        rect = self.on_motion(ctx, event)
+        grab, self._grab = self._grab, None
+        if grab is not None and grab[0] == "new":
+            (x0, y0), (x1, y1) = self._pts[0], self._pts[3]
+            if math.hypot(x1 - x0, y1 - y0) < 1.0:
+                # A click with no drag draws nothing and leaves nothing open.
+                self.on_cancel(ctx)
+                self.active = False
+                return rect
+        self.active = self._pts is not None      # still editable
+        return rect
+
+    def finish(self, ctx):
+        return self._commit(ctx)
+
+    def _commit(self, ctx):
+        if self._session is None:
+            self._pts = None
+            self.active = False
+            return None
+        cmd = self._session.commit()
+        self._session = None
+        self._pts = None
+        self.active = False
+        if cmd is not None and ctx.history is not None:
+            ctx.history.push(cmd, self.label, frame_id=ctx.frame.id)
+        return cmd
+
+    def on_cancel(self, ctx):
+        rect = None
+        if self._session is not None:
+            rect = self._session.cancel()
+        self._session = None
+        self._pts = None
+        self._grab = None
+        return rect
+
+    def _arrow(self, tip, toward, size):
+        from .. import paths as P
+        tx, ty = tip
+        dx, dy = tx - toward[0], ty - toward[1]
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            return None
+        ux, uy = dx / L, dy / L
+        bx, by = tx - ux * size, ty - uy * size
+        nx, ny = -uy * size * 0.55, ux * size * 0.55
+        return P.Subpath([P.Anchor(tx + ux * size * 0.15, ty + uy * size * 0.15),
+                          P.Anchor(bx + nx, by + ny), P.Anchor(bx - nx, by - ny)], closed=True)
+
+    def _render(self, ctx, event):
+        from .. import paths as P
+        cell = ctx.cell
+        p0, c0, c1, p1 = self._pts
+        stroke = float(self.option("stroke", 2))
+        aa = bool(self.option("antialias", True))
+        line = P.Path("", [P.Subpath([P.Anchor(p0[0], p0[1], ox=c0[0], oy=c0[1]),
+                                      P.Anchor(p1[0], p1[1], ix=c1[0], iy=c1[1])])])
+        cov = P.stroke_mask(line, cell.width, cell.height, stroke, aa)
+        arrows = self.option("arrows", "none")
+        size = max(10.0, stroke * 5.0)
+        heads = []
+
+        def toward(end, ctrl, other_ctrl, other_end):
+            for q in (ctrl, other_ctrl, other_end):
+                if math.hypot(q[0] - end[0], q[1] - end[1]) > 1e-6:
+                    return q
+            return end
+        if arrows in ("end", "both"):
+            heads.append(self._arrow(p1, toward(p1, c1, c0, p0), size))
+        if arrows in ("start", "both"):
+            heads.append(self._arrow(p0, toward(p0, c0, c1, p1), size))
+        heads = [h for h in heads if h is not None]
+        if heads:
+            cov = np.maximum(cov, P.fill_mask(P.Path("", heads), cell.width, cell.height, aa))
+        ys, xs = np.nonzero(cov)
+        if ys.size == 0:
+            return None
+        rect = Rect.from_bounds(int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        self._session.touch(rect)
+        src = np.empty((rect.h, rect.w, 4), dtype=np.uint8)
+        src[:] = self._colour if self._colour is not None else ctx.primary
+        cell.apply_masked(rect, src, ctx.coverage(cov[rect.slice()], rect))
+        return rect
+
+    def overlay(self):
+        if self._pts is None:
+            return []
+        p0, c0, c1, p1 = self._pts
+        return [("line", (p0[0], p0[1], c0[0], c0[1])), ("line", (p1[0], p1[1], c1[0], c1[1])),
+                ("handles", [p0, c0, c1, p1])]

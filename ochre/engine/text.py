@@ -296,6 +296,99 @@ def layout(text, family="DejaVu Sans", size=24, align=LEFT, line_spacing=1.0,
                   x0 - pad, y0 - pad, step, lines, font)
 
 
+class VerticalLayout:
+    """Text set top-to-bottom in columns, the columns running right to left.
+
+    Photoshop's Vertical Type: each character upright and centred in its
+    column, at a fixed pitch, which is how CJK text is set and how vertical
+    signage is lettered. Same caret interface as Layout, except a caret here
+    is horizontal, so caret_at also reports the column width.
+    """
+
+    __slots__ = ("coverage", "width", "height", "crop_x", "crop_y",
+                 "column", "pitch", "lines", "font")
+    vertical = True
+
+    def __init__(self, coverage, width, height, crop_x, crop_y, column, pitch, lines, font):
+        self.coverage = coverage
+        self.width = width
+        self.height = height
+        self.crop_x = crop_x
+        self.crop_y = crop_y
+        self.column = column
+        self.pitch = pitch
+        self.lines = lines
+        self.font = font
+
+    def _column_x(self, i):
+        return (len(self.lines) - 1 - i) * self.column
+
+    def caret_at(self, index):
+        """(x, y, column width) of a horizontal caret before `index`."""
+        total = sum(len(l) for l in self.lines) + max(0, len(self.lines) - 1)
+        index = max(0, min(int(index), total))
+        seen = 0
+        for i, line in enumerate(self.lines):
+            if index <= seen + len(line):
+                row = index - seen
+                return (self._column_x(i) - self.crop_x, row * self.pitch - self.crop_y,
+                        self.column)
+            seen += len(line) + 1
+        i = len(self.lines) - 1
+        return (self._column_x(i) - self.crop_x, len(self.lines[i]) * self.pitch - self.crop_y,
+                self.column)
+
+    def index_at(self, x, y):
+        n = len(self.lines)
+        col = int((x + self.crop_x) // max(1, self.column))
+        i = max(0, min(n - 1, n - 1 - col))
+        row = int(round((y + self.crop_y) / float(max(1, self.pitch))))
+        row = max(0, min(len(self.lines[i]), row))
+        return sum(len(l) + 1 for l in self.lines[:i]) + row
+
+
+def vertical_layout(text, family="DejaVu Sans", size=24, line_spacing=1.0,
+                    book=None, antialias=True):
+    """Rasterise text vertically. Returns a VerticalLayout (tight coverage)."""
+    book = book or DEFAULT_BOOK
+    font = book.load(family, size)
+    lines = (text or "").split("\n")
+    pitch = max(1, int(round(size * 1.1)))
+    column = max(1, int(round(size * 1.25 * float(line_spacing))))
+    rows = max([len(l) for l in lines] + [1])
+    pad = max(4, int(size))
+    W = len(lines) * column + 2 * pad
+    H = rows * pitch + 2 * pad
+    canvas = Image.new("L", (max(1, W), max(1, H)), 0)
+    draw = ImageDraw.Draw(canvas)
+    n = len(lines)
+    for i, line in enumerate(lines):
+        cx = pad + (n - 1 - i) * column + column / 2.0
+        for j, ch in enumerate(line):
+            if ch.isspace():
+                continue
+            cy = pad + j * pitch + pitch / 2.0
+            try:
+                draw.text((cx, cy), ch, fill=255, font=font, anchor="mm")
+            except (ValueError, TypeError):
+                # Bitmap fonts have no anchor support: centre by hand.
+                box = font.getbbox(ch)
+                draw.text((cx - (box[2] + box[0]) / 2.0, cy - (box[3] + box[1]) / 2.0),
+                          ch, fill=255, font=font)
+    arr = np.asarray(canvas, dtype=np.uint8)
+    if not antialias:
+        arr = ((arr >= 128).astype(np.uint8)) * 255
+    ys, xs = np.nonzero(arr)
+    if ys.size == 0:
+        return VerticalLayout(np.zeros((0, 0), dtype=np.uint8), 0, 0, pad, pad,
+                              column, pitch, lines, font)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    cropped = np.ascontiguousarray(arr[y0:y1, x0:x1])
+    return VerticalLayout(cropped, cropped.shape[1], cropped.shape[0],
+                          x0 - pad, y0 - pad, column, pitch, lines, font)
+
+
 def _line_height(font):
     try:
         ascent, descent = font.getmetrics()

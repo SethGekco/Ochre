@@ -17,7 +17,7 @@ from .movetools import (CloneStampTool, MovePixelsTool,
                         MoveSelectionTool)
 from .select import (EllipseSelectTool, LassoTool, MagicWandTool,
                      RectSelectTool)
-from .shapetools import (EllipseTool, FreeformTool, GradientTool, LineTool,
+from .shapetools import (CurveTool, EllipseTool, FreeformTool, GradientTool, LineTool,
                          RectangleTool, ShapeTool, TextTool)
 from .viewtools import PanTool, RotateViewTool, ViewRequest, ZoomTool
 from .transform import (CageTool, CropTool, FlipTool, HandleTransformTool,
@@ -55,6 +55,7 @@ BUILTIN = {
         PerspectiveCropTool, MoveLayerTool,
         SpotHealTool, RemoveTool, PatchTool, ContentAwareMoveTool,
         PenTool, CurvaturePenTool, FreeformPenTool, PathSelectTool, DirectSelectTool,
+        CurveTool,
     )
 }
 

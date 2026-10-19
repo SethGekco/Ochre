@@ -149,6 +149,9 @@ DRIVERS = {
                               t.motion(c, ToolEvent(34, 28)),
                               t.end(c, ToolEvent(34, 28))),
     "text":     lambda t, c: (t.begin(c, ToolEvent(2, 10)), t.commit_text(c)),
+    "text_vertical": lambda t, c: (t.begin(c, ToolEvent(10, 2)), t.commit_text(c)),
+    "curve":    lambda t, c: (_stroke(t, c, [(4, 4), (34, 28)]),
+                              _stroke(t, c, [(14, 12), (30, 4)]), t.finish(c)),
     # ---- retouch family: each needs content it can actually change -------
     # An airbrush is used by HOLDING it: ticks while the pointer rests are
     # what build coverage past an index's 50% threshold. A quick swipe at
@@ -226,7 +229,9 @@ NON_PAINTING = {"eyedropper", "select_rect", "select_ellipse", "lasso",
                 "move_pixels",
                 # Vector paths: outlines beside the pixels. They reach a layer
                 # only through Fill/Stroke Path (test_paths.py).
-                "pen", "curvature_pen", "freeform_pen", "path_select", "direct_select"}
+                "pen", "curvature_pen", "freeform_pen", "path_select", "direct_select",
+                # Type masks make a selection, not paint (test_typecurve.py).
+                "type_mask", "vertical_type_mask"}
 
 
 def main():
@@ -243,7 +248,7 @@ def main():
             continue
 
         opts = {"size": 5} if name in ("pencil", "brush", "eraser", "clone") else {}
-        if name == "text":
+        if name in ("text", "text_vertical"):
             opts = {"text": "Hi", "size": 14}
         _doc, _layer, cell, ctx = setup()
         before = cell.plane("index").copy()
