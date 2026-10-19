@@ -846,3 +846,35 @@ class DocMetaDelta(Command):
 
     def nbytes(self):
         return 64 + sum(len(str(v)) for v in self.meta.values())
+
+
+class IndexConvertDelta(Command):
+    """A layer's colour model as it was: planes, authoritative planes, its
+    cells (the Surface objects themselves -- conversion REPLACES them), and
+    the document's palette. Converting to indexed is then one exact undo."""
+
+    __slots__ = ("label", "layer_id", "planes", "authoritative", "cells", "palette")
+
+    def __init__(self, doc, layer, label="Convert to Indexed"):
+        self.label = label
+        self.layer_id = layer.id
+        self.planes = tuple(layer.planes)
+        self.authoritative = tuple(layer.authoritative)
+        self.cells = {k: v for k, v in doc.cells.items() if k[0] == layer.id}
+        self.palette = doc.palette
+
+    def undo(self, doc):
+        layer = doc.layer(self.layer_id)
+        if layer is None:
+            return None, None
+        opposite = IndexConvertDelta(doc, layer, self.label)
+        for k in [k for k in doc.cells if k[0] == self.layer_id]:
+            del doc.cells[k]
+        doc.cells.update(self.cells)
+        layer.planes = self.planes
+        layer.authoritative = self.authoritative
+        doc.palette = self.palette
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return sum(c.nbytes() for c in self.cells.values())

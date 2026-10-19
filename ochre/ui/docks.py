@@ -25,6 +25,95 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QColorDialog,
 from ..engine.palette import LENGTH
 
 
+class ScrollStrip(QWidget):
+    """A column that never forces the window taller than the screen: its
+    contents scroll, with an arrow at each end that appears only when there
+    is more that way. Resting the mouse on an arrow -- or near the top or
+    bottom edge -- scrolls; so does the wheel."""
+
+    EDGE = 18          # px from an edge where hovering scrolls
+    STEP = 8           # px per tick
+
+    def __init__(self, content, parent=None):
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QScrollArea
+        super().__init__(parent)
+        self.area = QScrollArea()
+        self.area.setWidget(content)
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.NoFrame)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.area.setMinimumHeight(3 * 32)
+        self.up = QToolButton()
+        self.up.setArrowType(Qt.UpArrow)
+        self.down = QToolButton()
+        self.down.setArrowType(Qt.DownArrow)
+        for b in (self.up, self.down):
+            b.setAutoRaise(True)
+            b.setFixedHeight(14)
+            b.setSizePolicy(b.sizePolicy().horizontalPolicy(), b.sizePolicy().verticalPolicy())
+            b.setAutoRepeat(True)
+            b.setAutoRepeatInterval(30)
+        self.up.clicked.connect(lambda: self.scroll(-self.STEP * 3))
+        self.down.clicked.connect(lambda: self.scroll(self.STEP * 3))
+        box = QVBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(0)
+        box.addWidget(self.up)
+        box.addWidget(self.area, 1)
+        box.addWidget(self.down)
+        self._dir = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(25)
+        self._timer.timeout.connect(lambda: self.scroll(self._dir * self.STEP))
+        for w in (self.up, self.down, self.area.viewport(), content):
+            w.setMouseTracking(True)
+            w.installEventFilter(self)
+        self.area.verticalScrollBar().rangeChanged.connect(lambda *_: self._arrows())
+        self.area.verticalScrollBar().valueChanged.connect(lambda *_: self._arrows())
+        self._arrows()
+
+    def scroll(self, dy):
+        bar = self.area.verticalScrollBar()
+        bar.setValue(bar.value() + int(dy))
+        if bar.value() in (bar.minimum(), bar.maximum()) and self._dir:
+            self._timer.stop()
+
+    def _arrows(self):
+        bar = self.area.verticalScrollBar()
+        # Keep their space (no jumping layout); just enable / blank them.
+        self.up.setEnabled(bar.value() > bar.minimum())
+        self.down.setEnabled(bar.value() < bar.maximum())
+        self.up.setArrowType(Qt.UpArrow if bar.maximum() > 0 else Qt.NoArrow)
+        self.down.setArrowType(Qt.DownArrow if bar.maximum() > 0 else Qt.NoArrow)
+
+    def _hover(self, direction):
+        if direction != self._dir:
+            self._dir = direction
+            if direction:
+                self._timer.start()
+            else:
+                self._timer.stop()
+
+    def eventFilter(self, obj, event):
+        from PySide6.QtCore import QEvent
+        t = event.type()
+        if obj is self.up and t == QEvent.Enter:
+            self._hover(-1)
+        elif obj is self.down and t == QEvent.Enter:
+            self._hover(+1)
+        elif obj in (self.up, self.down) and t == QEvent.Leave:
+            self._hover(0)
+        elif t == QEvent.MouseMove and obj is not self.up and obj is not self.down:
+            y = self.area.viewport().mapFromGlobal(event.globalPosition().toPoint()).y()
+            h = self.area.viewport().height()
+            self._hover(-1 if y < self.EDGE else (1 if y > h - self.EDGE else 0))
+        elif t == QEvent.Leave and obj is self.area.viewport():
+            self._hover(0)
+        return False
+
+
 def _swatch(rgba, size=16):
     pix = QPixmap(size, size)
     pix.fill(QColor(*rgba))
@@ -99,7 +188,8 @@ class ToolsDock(QDockWidget):
             self._refresh_button(group)
             grid.addWidget(btn, i // self.columns, i % self.columns)
         grid.setRowStretch(grid.rowCount(), 1)
-        self.setWidget(body)
+        self.body = body
+        self.setWidget(ScrollStrip(body, self))
 
         for name in tools.names():
             key = tools.shortcut(name)

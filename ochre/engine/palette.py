@@ -49,6 +49,9 @@ class Palette:
         self._snap_bits = None
         self._render = None
         self.revision = 0                       # bumped on any mutation
+        # How many entries are real (a shorter palette is padded to 256, the
+        # padding protected so no snap produces it).
+        self.size = LENGTH
 
     # ---- rendering -------------------------------------------------------
 
@@ -212,8 +215,10 @@ class Palette:
         return tuple(int(v) for v in self.entries[int(index)])
 
     def copy(self):
-        return Palette(self.entries.copy(), self.name, self._protected,
-                       self.transparent, list(self.annotations))
+        out = Palette(self.entries.copy(), self.name, self._protected,
+                      self.transparent, list(self.annotations))
+        out.size = getattr(self, "size", LENGTH)
+        return out
 
     def __len__(self):
         return LENGTH

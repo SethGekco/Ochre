@@ -50,6 +50,10 @@ DEFAULTS = {
     },
     "Palette": {
         "SnapBits": 5,             # 5-5-5 snap LUT; 6-6-6 costs 1.5 s to build
+        # Folders of palette files for the Palette bar (comma-separated,
+        # searched with their subfolders), and the palette it starts on.
+        "Folders": "",
+        "Default": "",
     },
     "IndexLocked": {
         "EffectPolicy": "refuse",  # refuse | snap | unlock

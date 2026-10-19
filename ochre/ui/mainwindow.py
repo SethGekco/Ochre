@@ -79,6 +79,21 @@ class MainWindow(QMainWindow):
                      self.channels_dock, self.comps_dock, self.brushes_dock):
             self.tabifyDockWidget(self.palette_dock, dock)
         self.history_dock.raise_()
+        # Every panel's contents scroll inside it, so the panels' combined
+        # minimum heights can never force the window taller than the screen
+        # (they used to add up to 712 px -- off the bottom of a 768 px laptop).
+        from PySide6.QtWidgets import QDockWidget, QFrame, QScrollArea
+        for dock in self.findChildren(QDockWidget):
+            if dock is self.tools_dock or dock.widget() is None \
+                    or isinstance(dock.widget(), QScrollArea):
+                continue
+            area = QScrollArea()
+            area.setFrameShape(QFrame.NoFrame)
+            area.setWidgetResizable(True)
+            area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            area.setWidget(dock.widget())
+            area.setMinimumHeight(60)
+            dock.setWidget(area)
         # Give the canvas the room. Left to itself Qt sizes the right-hand
         # column from the docks' preferred widths, which with a dozen panels
         # took 740 px of an 1100 px window. ui.ini [Window] DockWidth sets it.
@@ -101,6 +116,11 @@ class MainWindow(QMainWindow):
         from .tooloptions import ToolOptionsBar
         self.options_bar = ToolOptionsBar(controller, self)
         self.addToolBar(Qt.TopToolBarArea, self.options_bar)
+        # The Palette bar, on its own row under the tool options.
+        from .palettebar import PaletteBar
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.palette_bar = PaletteBar(controller, self)
+        self.addToolBar(Qt.TopToolBarArea, self.palette_bar)
 
         self._build_menus()
         # The user's menu keys (Edit > Keyboard Shortcuts), over the built-in ones.
@@ -122,6 +142,7 @@ class MainWindow(QMainWindow):
         bus = self.ctl.bus
         if bus is None:
             return
+        bus.subscribe("palette.swatches", lambda **k: self.palette_bar.show_palette())
         bus.subscribe("layers.changed", self._on_layers)
         bus.subscribe("layer.active", lambda **k: self.layers_dock.sync())
         bus.subscribe("history.changed", lambda **k: (self.history_dock.sync(),
@@ -1688,15 +1709,11 @@ class MainWindow(QMainWindow):
 
     def do_convert_indexed(self):
         """Convert the active layer to indexed, and report what it cost."""
-        from ..engine.palette import grayscale
-        from ..engine.quantize import ORDERED, convert_layer_to_indexed
 
         if self.ctl.active_layer is None:
             return
-        if self.ctl.doc.palette is None:
-            self.ctl.doc.bind_palette(grayscale())
-        report = convert_layer_to_indexed(self.ctl.doc, self.ctl.active_layer,
-                                          dither=ORDERED)
+        # Undoable now, and on the Palette bar's palette when one is chosen.
+        report = self.ctl.convert_to_indexed(dither="ordered") or {}
         worst = max((r["max"] for r in report.values()), default=0)
         mean = max((r["mean"] for r in report.values()), default=0.0)
         self.ctl.compositor.invalidate()

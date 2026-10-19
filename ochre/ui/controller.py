@@ -71,6 +71,11 @@ class Controller:
             self.settings.apply_user(os.path.join(state_dir, "preferences.ini"))
             from . import keymap
             keymap.apply_tools(self.tools, keymap.load(state_dir))
+        # The Palette bar: the palette in use, and whether painting keeps to it.
+        self.swatch_palette = None
+        self.swatch_key = None
+        self.palette_lock = False
+        self._loaded_palettes = {}     # path -> Palette, loaded this session
         # View > Proof Setup / Proof Colors / Gamut Warning.
         self.proof_profile = None      # path of the proof (e.g. CMYK press) profile
         self.proof_on = False
@@ -2267,6 +2272,8 @@ class Controller:
         return touched
 
     def set_primary(self, rgba, index=None):
+        if index is None and getattr(self, "palette_lock", False):
+            rgba = self._lock_colour(tuple(rgba))
         self.primary = tuple(rgba)
         self.primary_index = index
         tool = self.tool
@@ -2279,6 +2286,8 @@ class Controller:
         self.emit("colour.changed", which="primary", rgba=self.primary, index=index)
 
     def set_secondary(self, rgba, index=None):
+        if index is None and getattr(self, "palette_lock", False):
+            rgba = self._lock_colour(tuple(rgba))
         self.secondary = tuple(rgba)
         self.secondary_index = index
         self.emit("colour.changed", which="secondary", rgba=self.secondary, index=index)
@@ -2537,6 +2546,8 @@ class Controller:
             self.history.begin_group()
         try:
             result = self.tool.end(self._ctx, ToolEvent(x, y, pressure, modifiers, button))
+            if getattr(self, "palette_lock", False) and hasattr(result, "rect"):
+                self._snap_stroke(result.rect)     # Palette bar: Lock to palette
             self._sync_from_context()
             if not self.tool.active:
                 self._record_selection_change()
@@ -3854,6 +3865,234 @@ class Controller:
         self.invalidate()
         self.emit("history.changed")
         return True
+
+    # ---- the Palette bar -------------------------------------------------------------
+
+    def palette_folders(self):
+        raw = self.settings.get("Palette", "Folders") or ""
+        return [p.strip() for p in raw.split(",") if p.strip()]
+
+    def palette_sources(self):
+        """[(group, name, key)] for the Palette bar, in display order: the
+        document's palette, built-ins, every palette file in the palette
+        folders (read here or by an addon's palette provider), palettes
+        loaded this session, and providers' own named palettes."""
+        import os as _os
+        from ..engine import palettefiles as PF
+        out = []
+        if self.doc is not None and self.doc.palette is not None:
+            out.append(("Document", "Document palette", ("document",)))
+        out += [("Built-in", n, ("builtin", n)) for n in PF.BUILTIN]
+        listed, paths = set(), set()
+        for name, path in PF.files_in(self.palette_folders()):
+            out.append(("Folders", name, ("file", path)))
+            listed.add(_os.path.splitext(_os.path.basename(path))[0])
+            paths.add(path)
+        for path in self._loaded_palettes:
+            if path not in paths:                  # loaded from elsewhere with Load...
+                out.append(("Loaded", _os.path.basename(path), ("file", path)))
+        for pname, provider in sorted(self.addons.registry.all("palettes").items()):
+            try:
+                names = provider.names()
+            except Exception:                               # noqa: BLE001
+                continue
+            for n in names:
+                if n.split("/")[-1] not in listed:
+                    out.append((pname, n, ("provider", pname, n)))
+        return out
+
+    def load_palette_file(self, path):
+        """A palette file -- read here (JASC, GIMP, ACT, Paint.NET, hex) or, for
+        formats only an addon understands, by a palette provider."""
+        from ..engine import palettefiles as PF
+        if path in self._loaded_palettes:
+            return self._loaded_palettes[path]
+        try:
+            pal = PF.read(path)
+        except ValueError:
+            pal = None
+            for provider in self.addons.registry.all("palettes").values():
+                reader = getattr(provider, "read_file", None)
+                if reader is None:
+                    continue
+                try:
+                    pal = reader(path)
+                except Exception:                           # noqa: BLE001
+                    pal = None
+                if pal is not None:
+                    break
+            if pal is None:
+                raise ValueError("no reader for the palette file %s" % path)
+        self._loaded_palettes[path] = pal
+        return pal
+
+    def palette_for(self, key):
+        from ..engine import palettefiles as PF
+        kind = key[0]
+        if kind == "document":
+            return self.doc.palette
+        if kind == "builtin":
+            return PF.builtin(key[1])
+        if kind == "file":
+            return self.load_palette_file(key[1])
+        if kind == "provider":
+            provider = self.addons.registry.get("palettes", key[1])
+            return provider.load(key[2], self.addons_host(self.addons.registry.owner("palettes", key[1])))
+        if kind == "generated":
+            return self.swatch_palette
+        return None
+
+    def set_swatch_palette(self, key_or_palette, remember=True):
+        """Choose the Palette bar's palette (a source key, or a Palette)."""
+        from ..engine.palette import Palette
+        if isinstance(key_or_palette, Palette):
+            pal, key = key_or_palette, ("generated",)
+        else:
+            key = tuple(key_or_palette)
+            pal = self.palette_for(key)
+        self.swatch_palette = pal
+        self.swatch_key = key
+        if remember and self.session is not None and key[0] in ("builtin", "file", "provider"):
+            self.session.set_flag("_", False)          # ensure [Prefs] exists
+            self.session._cp.set("Prefs", "Palette", "\t".join(key))
+            self.session._write()
+        self.emit("palette.swatches")
+        return pal
+
+    def restore_swatch_palette(self):
+        """The palette last used (or Preferences > Palette > Default)."""
+        want = None
+        if self.session is not None:
+            try:
+                want = tuple(self.session._cp.get("Prefs", "Palette").split("\t"))
+            except Exception:                               # noqa: BLE001
+                want = None
+        default = self.settings.get("Palette", "Default") or ""
+        for group, name, key in self.palette_sources():
+            if (want and key == want) or (not want and default and name == default):
+                try:
+                    return self.set_swatch_palette(key, remember=False)
+                except Exception:                           # noqa: BLE001
+                    break
+        return None
+
+    def set_palette_lock(self, on):
+        """Paint with palette colours only: picked colours snap to the
+        nearest entry, and each stroke is snapped when it ends."""
+        self.palette_lock = bool(on)
+        if self.palette_lock and self.swatch_palette is not None:
+            self.set_primary(self.primary)
+            self.set_secondary(self.secondary)
+        return self.palette_lock
+
+    def _lock_colour(self, rgba):
+        if self.palette_lock and self.swatch_palette is not None:
+            from ..engine import palettefiles as PF
+            r, g, b = PF.nearest(self.swatch_palette, rgba)
+            return (r, g, b, rgba[3] if len(rgba) > 3 else 255)
+        return rgba
+
+    def _snap_stroke(self, rect):
+        """With the palette lock on, a finished stroke's pixels keep to the
+        palette (part of the same undo step: the stroke's delta already holds
+        what was there before)."""
+        from ..engine import palettefiles as PF
+        target = self.paint_target
+        if not (self.palette_lock and self.swatch_palette is not None) or rect is None \
+                or target is None or target.is_group or getattr(target, "kind", "raster") != "raster" \
+                or target.index_locked or getattr(target, "is_mask", False):
+            return
+        r = rect.clipped_to(self.doc.width, self.doc.height)
+        if r is None:
+            return
+        cell = self.doc.cell(target)
+        win = cell.plane("rgba")[r.slice()]
+        win[...] = PF.map_rgba(win, self.swatch_palette)
+        cell._touched(r)
+        self.invalidate(r)
+
+    def _raster_target(self):
+        t = self.paint_target
+        if t is None or t.is_group or getattr(t, "kind", "raster") != "raster" or t.index_locked:
+            return None
+        return t
+
+    def reduce_colours(self, n, dither="none"):
+        """Limit the active layer to n colours: an n-colour palette made for
+        it (median cut), the pixels mapped to it (inside the selection). The
+        new palette becomes the Palette bar's. One undo step."""
+        from ..engine import palettefiles as PF
+        from ..engine.commands import PixelDelta
+        target = self._raster_target()
+        if target is None:
+            return None
+        cell = self.doc.cell(target)
+        px = cell.plane("rgba")
+        sel = self.selection.mask
+        sample = px if sel is None else px * (sel[..., None] >= 128)
+        pal = PF.median_cut(sample, int(n))
+        label = "Reduce to %d colours" % int(n)
+        d = PixelDelta.capture(self.doc, target.id, self.doc.frame.id, self.doc.bounds, label)
+        mapped = PF.map_rgba(px, pal, dither)
+        cell.lerp_masked(self.doc.bounds, mapped, sel)
+        cell._touched(self.doc.bounds)
+        if d is not None:
+            self.history.push(d, label, frame_id=self.doc.frame.id)
+        self.invalidate()
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        self.set_swatch_palette(pal)
+        return pal
+
+    def apply_palette(self, dither="none", palette=None):
+        """The active layer's colours replaced by the palette's nearest (inside
+        the selection), still an ordinary RGB layer. One undo step."""
+        from ..engine import palettefiles as PF
+        from ..engine.commands import PixelDelta
+        pal = palette or self.swatch_palette
+        target = self._raster_target()
+        if pal is None or target is None:
+            return None
+        cell = self.doc.cell(target)
+        label = "Apply Palette"
+        d = PixelDelta.capture(self.doc, target.id, self.doc.frame.id, self.doc.bounds, label)
+        cell.lerp_masked(self.doc.bounds, PF.map_rgba(cell.plane("rgba"), pal, dither),
+                         self.selection.mask)
+        cell._touched(self.doc.bounds)
+        if d is not None:
+            self.history.push(d, label, frame_id=self.doc.frame.id)
+        self.invalidate()
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return True
+
+    def convert_to_indexed(self, palette=None, dither="ordered", layer=None):
+        """The active layer to an index-locked layer on a palette (the Palette
+        bar's, the document's, or greys), the palette bound to the document.
+        One undo step -- the conversion is lossy, so it must be undoable."""
+        from ..engine.commands import IndexConvertDelta
+        from ..engine.palette import grayscale
+        from ..engine.quantize import FLOYD, NONE, ORDERED, convert_layer_to_indexed
+        target = layer or self.active_layer
+        if target is None or target.is_group or target.index_locked \
+                or getattr(target, "kind", "raster") != "raster":
+            return None
+        pal = palette or self.swatch_palette or self.doc.palette or grayscale()
+        if self.doc.palette is not None and pal is not self.doc.palette:
+            # One palette per document: other indexed layers keep theirs.
+            if any(l.index_locked for l in self.doc.layers()):
+                pal = self.doc.palette
+        label = "Convert to Indexed"
+        before = IndexConvertDelta(self.doc, target, label)
+        if self.doc.palette is None or self.doc.palette is not pal:
+            self.doc.bind_palette(pal.copy() if pal is self.swatch_palette else pal)
+        mode = {"none": NONE, "ordered": ORDERED, "floyd": FLOYD}.get(dither, ORDERED)
+        report = convert_layer_to_indexed(self.doc, target, self.doc.palette, dither=mode)
+        self.history.push(before, label)
+        self.compositor.invalidate()
+        self.invalidate()
+        self._after_structure_change()
+        return report
 
     def straighten(self, line=None):
         """Image > Straighten: rotate so the measured line comes out level."""

@@ -161,26 +161,51 @@ class CncPalettes:
         self._db = host.read_ini("data", "palettes.ini")
         self._search = []
         raw = self._db.get("Search", "Directories", "") or ""
-        for part in raw.split(","):
+        # The editor's own palette folders (Preferences > Palette > Folders)
+        # are searched too, subfolders included -- a tools folder of game
+        # palettes is usually sorted by game.
+        settings = getattr(host, "settings", None)
+        user = (settings.get("Palette", "Folders") if settings is not None else "") or ""
+        for part in raw.split(",") + user.split(","):
             part = os.path.expanduser(part.strip())
-            if part and os.path.isdir(part):
+            if part and os.path.isdir(part) and part not in self._search:
                 self._search.append(part)
 
-    def names(self):
-        found = []
+    def _files(self):
+        """(name, path) for every .pal under the search folders; the name
+        keeps the subfolder ("RA2/temperat") when it has one."""
+        out, seen = [], set()
         for directory in self._search:
-            for entry in sorted(os.listdir(directory)):
-                if entry.lower().endswith(".pal"):
-                    found.append(os.path.splitext(entry)[0])
+            for root, dirs, files in os.walk(directory):
+                dirs.sort()
+                for entry in sorted(files):
+                    if entry.lower().endswith(".pal"):
+                        rel = os.path.relpath(os.path.join(root, entry), directory)
+                        name = os.path.splitext(rel)[0].replace(os.sep, "/")
+                        if name not in seen:
+                            seen.add(name)
+                            out.append((name, os.path.join(root, entry)))
+        return out
+
+    def names(self):
+        found = [n for n, _p in self._files()]
         return found + [n for n in self._db.sections("Palette") if n != "Default"]
 
     def load(self, name, host):
-        for directory in self._search:
-            candidate = os.path.join(directory, name + ".pal")
-            if os.path.isfile(candidate):
-                palette = load_pal_file(candidate)
-                return annotate(palette, self._db, self._section_for(name))
+        for n, path in self._files():
+            if n == name or os.path.splitext(os.path.basename(path))[0] == name:
+                palette = load_pal_file(path)
+                palette.name = name
+                return annotate(palette, self._db, self._section_for(os.path.basename(name)))
         palette = grayscale_fallback(name)
+        return annotate(palette, self._db, self._section_for(name))
+
+    def read_file(self, path):
+        """A .pal file the editor could not read itself (the 768-byte form)."""
+        if not path.lower().endswith(".pal"):
+            return None
+        palette = load_pal_file(path)
+        name = os.path.splitext(os.path.basename(path))[0]
         return annotate(palette, self._db, self._section_for(name))
 
     def _section_for(self, name):
