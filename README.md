@@ -4,15 +4,22 @@ A Linux-native, layered raster image editor. Paint.NET's approachability, built
 for Linux, with an addon system capable enough that format support ships
 separately from the editor.
 
-Status: **working editor with C&C support.** Layers, groups, blend modes,
-selections, the full Paint.NET tool set, cut/copy/paste (system clipboard
-too), resize / canvas size / crop / flip / rotate, merge and flatten, undo of
-everything including layer and frame structure, adjustments and effects, a
-native document format, an optional C accelerator, an addon system, and a
-Command & Conquer addon that reads and writes SHP sprites and TMP terrain
-templates.
+Status: **working editor with C&C support.** The Paint.NET tool set and most
+of GIMP's and Photoshop's: layers and groups with masks, vector masks,
+clipping, 32 blend modes, Blend If, fill opacity and knockouts, layer styles,
+adjustment / fill / text / shape / smart-object layers (smart filters, linked
+files), non-destructive filters on any layer, artboards and frames; selection
+tools through Color Range, Focus Area and Refine Edge; retouching,
+content-aware fill / move / scale, Liquify, Puppet and Perspective Warp,
+Vanishing Point; about a hundred filters and adjustments including Camera Raw,
+Lens Correction, HDR Toning and the Filter Gallery; Auto-Align, Auto-Blend and
+Photomerge; actions, channels, layer comps, history snapshots; PSD and
+OpenRaster read and write. "AI" features are done with classical algorithms
+(each module says which). Plus a native document format, an optional C
+accelerator, an addon system, and a Command & Conquer addon that reads and
+writes SHP sprites and TMP terrain templates.
 
-    ./tests/run_all.sh      # 53 checks, both backends
+    ./tests/run_all.sh      # every test, on both backends
     python -m ochre.ui      # the editor
 
 ## The rules
@@ -25,7 +32,8 @@ These are invariants, not aspirations. Each one is enforced by a test.
   AST of every engine module.
 - **Everything tunable lives in `data/*.ini`.** The `DEFAULTS` dict in
   `ochre/engine/settings.py` *is* the schema — the type of each default is the
-  coercion rule. Precedence is `DEFAULTS < data/*.ini < OCHRE_<KEY>`. Unknown
+  coercion rule. Precedence is `DEFAULTS < data/*.ini < the user's
+  preferences.ini (Edit > Preferences, in the state dir) < OCHRE_<KEY>`. Unknown
   keys are silently ignored, and that is the forward-compatibility story: a
   config written by a newer Ochre opens correctly in an older one, minus the
   settings it does not know about.
@@ -47,7 +55,7 @@ These are invariants, not aspirations. Each one is enforced by a test.
 ```
 ochre/engine/     I/O-free, Qt-free core
   accel/          numpy specification + optional C extension
-  tools/          pencil, brush, eraser, bucket, picker, 4 selection tools
+  tools/          every tool (paint, select, retouch, transform, paths, type, ...)
   fileio/         the .ochre container, and flat import/export
 ochre/ui/         PySide6. viewstate/controller/bus/config are Qt-free.
 ochre/addons/     the addon contract and host
