@@ -263,7 +263,9 @@ def main():
         eff = win.effects.create(name)
         try:
             probe = EffectDialog(eff, ctl, win, debounce_ms=0)
-            if len(probe.rows) != len(list(eff.props)):
+            # A custom panel (Selective Color's) stands in for the props it hides.
+            hidden = set(getattr(eff, "ui_hidden", ())) if hasattr(probe, "panel") else set()
+            if len(probe.rows) != len([p for p in eff.props if p.name not in hidden]):
                 failures.append(name)
             probe.reject()
         except Exception as exc:                              # noqa: BLE001
