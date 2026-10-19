@@ -1190,6 +1190,102 @@ def main():
     win2.canvas.repaint()
     check("View > Show Path can hide the outline", win2.canvas.show_path is False)
 
+    # ---- utility: rulers, guides, docks, notes, tabs ---------------------------
+    ctl2.new_document(200, 150)
+    win2.canvas.bind()
+    for _ in range(5):
+        app.processEvents()
+    win2.rulers_action.setChecked(True)
+    for _ in range(3):
+        app.processEvents()
+    top_ruler = win2.canvas.rulers[0]
+    check("View > Rulers shows rulers beside the canvas",
+          top_ruler.isVisible() and top_ruler.height() > 0)
+    win2.canvas.repaint()
+    v = win2.canvas.view
+    vp2 = win2.canvas.viewport()
+
+    def at5(dx, dy):
+        wx, wy = v.doc_to_widget(dx, dy)
+        return QPoint(int(round(wx)), int(round(wy)))
+    target = at5(100, 60)
+    QTest.mousePress(top_ruler, Qt.LeftButton, Qt.NoModifier, QPoint(target.x(), 5))
+    local = top_ruler.mapFromGlobal(vp2.mapToGlobal(target))
+    QTest.mouseMove(top_ruler, local)
+    QTest.mouseRelease(top_ruler, Qt.LeftButton, Qt.NoModifier, local)
+    app.processEvents()
+    check("DRAGGING OUT OF THE TOP RULER MAKES A HORIZONTAL GUIDE",
+          len(ctl2.doc.guides) == 1 and ctl2.doc.guides[0][0] == "h"
+          and abs(ctl2.doc.guides[0][1] - 60) <= 1, str(ctl2.doc.guides))
+    ctl2.set_tool("move_layer")
+    gy = ctl2.doc.guides[0][1]
+    QTest.mousePress(vp2, Qt.LeftButton, Qt.NoModifier, at5(30, gy))
+    QTest.mouseMove(vp2, at5(30, 90))
+    QTest.mouseRelease(vp2, Qt.LeftButton, Qt.NoModifier, at5(30, 90))
+    app.processEvents()
+    check("the Move tool drags a guide", abs(ctl2.doc.guides[0][1] - 90) <= 1,
+          str(ctl2.doc.guides))
+    win2.grid_action.setChecked(True)
+    win2.canvas.repaint()
+    check("View > Grid draws without error", win2.canvas.show_grid)
+    win2.grid_action.setChecked(False)
+    win2.rulers_action.setChecked(False)
+
+    win2.info_dock.show()
+    win2.info_dock.raise_()
+    app.processEvents()
+    QTest.mouseMove(vp2, at5(50, 50))
+    app.processEvents()
+    win2.info_dock.sync()
+    check("the Info dock reads out the pointer and the colour under it",
+          "Pointer" in win2.info_dock.label.text() and "RGB" in win2.info_dock.label.text())
+    win2.histogram_dock.show()
+    win2.histogram_dock.raise_()
+    app.processEvents()
+    win2.histogram_dock.sync()
+    check("the Histogram dock computes", win2.histogram_dock.view.data is not None
+          and win2.histogram_dock.view.data["pixels"] > 0)
+    win2.navigator_dock.show()
+    win2.navigator_dock.raise_()
+    app.processEvents()
+    win2.navigator_dock.sync()
+    win2.navigator_dock.view.repaint()
+    check("the Navigator shows a thumbnail", win2.navigator_dock.view.thumb is not None)
+
+    from PySide6.QtWidgets import QInputDialog
+    real = QInputDialog.getMultiLineText
+    QInputDialog.getMultiLineText = staticmethod(lambda *a, **k: ("remember this", True))
+    try:
+        ctl2.set_tool("note")
+        QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at5(120, 40))
+        app.processEvents()
+    finally:
+        QInputDialog.getMultiLineText = real
+    check("A NOTE CLICKED ONTO THE CANVAS ASKS FOR TEXT AND KEEPS IT",
+          len(ctl2.doc.notes) == 1 and ctl2.doc.notes[0][2] == "remember this")
+    win2.canvas.repaint()
+
+    # Tabs: an edited document stays open beside a new one.
+    n_before = win2.doc_tabs.count()
+    ctl2.new_document(64, 64)
+    win2.canvas.bind()
+    win2._sync_all()
+    app.processEvents()
+    check("a new image opens in a second tab", win2.doc_tabs.count() == n_before + 1
+          and win2.doc_tabs.currentIndex() == ctl2.current_doc)
+    win2.doc_tabs.setCurrentIndex(ctl2.current_doc - 1)
+    app.processEvents()
+    check("clicking a tab switches document (and the canvas follows)",
+          ctl2.doc.width == 200 and win2.canvas.view.doc_w == 200)
+    win2.close_document(len(ctl2.documents) - 1)
+    app.processEvents()
+    check("closing an untouched tab asks nothing and removes it",
+          win2.doc_tabs.count() == n_before)
+    file_items = [a.text().replace("&", "") for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&File").menu().actions() if a.text()]
+    check("File offers Close and Export Slices", "Close" in file_items and "Export Slices..." in file_items)
+    check("a Window menu toggles every dock", any(a.text() == "&Window" for a in win2.menuBar().actions()))
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc

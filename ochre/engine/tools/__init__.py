@@ -29,8 +29,11 @@ from .select import (ForegroundSelectTool, ObjectSelectTool, PolygonLassoTool,
                      SingleColumnTool, SingleRowTool)
 from .inpaint import (ContentAwareMoveTool, PatchTool, RemoveTool,
                       SpotHealTool)
-from .pathtools import (CurvaturePenTool, DirectSelectTool, FreeformPenTool,
+from .pathtools import (AddAnchorTool, ConvertPointTool, CurvaturePenTool,
+                        DeleteAnchorTool, DirectSelectTool, FreeformPenTool,
                         PathSelectTool, PenTool)
+from .utility import (ColorSamplerTool, CountTool, MeasureTool, NoteTool,
+                      SliceSelectTool, SliceTool)
 from .retouch import (AirbrushTool, BackgroundEraserTool, BlurBrushTool, BurnTool,
                       DodgeTool, HealTool, HistoryBrushTool, InkTool, MagicEraserTool,
                       MixerBrushTool, PatternStampTool, RecolorTool, RedEyeTool,
@@ -55,7 +58,8 @@ BUILTIN = {
         PerspectiveCropTool, MoveLayerTool,
         SpotHealTool, RemoveTool, PatchTool, ContentAwareMoveTool,
         PenTool, CurvaturePenTool, FreeformPenTool, PathSelectTool, DirectSelectTool,
-        CurveTool,
+        CurveTool, MeasureTool, ColorSamplerTool, CountTool, NoteTool, SliceTool,
+        SliceSelectTool, AddAnchorTool, DeleteAnchorTool, ConvertPointTool,
     )
 }
 

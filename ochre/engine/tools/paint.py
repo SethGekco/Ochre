@@ -50,6 +50,8 @@ def _circle_coverage(diameter, hardness=1.0, antialias=True):
 class _StrokeTool(Tool):
     """Shared machinery: open a session, lay dabs, commit one entry."""
 
+    snaps = False
+
     default_size = 8
 
     def _begin_session(self, ctx):
@@ -304,17 +306,35 @@ class EyedropperTool(Tool):
     name = "eyedropper"
     label = "Color Picker"
     wants_stroke = False
+    # Paint.NET's sampling options: an averaged square, from the layer or
+    # from the merged image.
+    options_spec = (
+        O.Opt("sample_size", O.CHOICE, "1", "Sampling",
+              choices=("1", "3", "5", "11", "31"),
+              labels={"1": "Single pixel", "3": "3x3 region", "5": "5x5 region",
+                      "11": "11x11 region", "31": "31x31 region"}),
+        O.Opt("sample_from", O.CHOICE, "layer", "From",
+              choices=("layer", "image"), labels={"layer": "Layer", "image": "Image"}),
+    )
 
     def on_begin(self, ctx, event):
+        from .. import annotations
         cell = ctx.cell
         if cell is None:
             return None
         if not cell.bounds.contains(event.ix, event.iy):
             return None
+        size = int(self.option("sample_size", "1") or 1)
+        from_image = self.option("sample_from", "layer") == "image" and ctx.composite is not None
         picked_index = None
-        if cell.index_locked:
+        # An index is only meaningful for one pixel of the layer itself.
+        if cell.index_locked and size == 1 and not from_image:
             picked_index = int(cell.plane("index")[event.iy, event.ix])
-        rgba = tuple(int(v) for v in cell.pixels[event.iy, event.ix])
+        source = ctx.composite() if from_image else cell.pixels
+        if size == 1:
+            rgba = tuple(int(v) for v in source[event.iy, event.ix])
+        else:
+            rgba = annotations.sample(source, event.x, event.y, size)
         if event.button == 2:
             ctx.secondary = rgba
             ctx.secondary_index = picked_index

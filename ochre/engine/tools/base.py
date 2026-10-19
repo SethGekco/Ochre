@@ -76,6 +76,7 @@ class ToolContext:
         # Supplied by the controller; tools that need them check for None.
         self.clip = None              # the clipboard Clip, for pattern stamping
         self.history_source = None    # callable(layer_id, frame_id) -> rgba or None
+        self.composite = None         # callable() -> the merged image, rgba
         # How close, in DOCUMENT pixels, counts as "on" a point -- a few
         # screen pixels, so the canvas updates it as the zoom changes.
         self.pick_radius = 4.0
@@ -115,6 +116,10 @@ class Tool:
     # What the user may adjust, as options.Opt descriptors. The options bar
     # is generated from this; see options.py for why it lives on the tool.
     options_spec = ()
+    # Snap the pointer to guides / grid / canvas edges when snapping is on.
+    # Off for freehand painting and for tools that move things by an offset,
+    # where snapping the POINTER is not snapping the object.
+    snaps = True
     # Resolvable by name but not offered in the toolbox. For compatibility
     # aliases of a tool that has absorbed them, so an old tools.ini or a
     # script naming the old tool keeps working without the chooser growing

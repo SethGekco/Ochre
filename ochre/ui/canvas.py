@@ -104,6 +104,18 @@ class CanvasView(QAbstractScrollArea):
         # left the widget. Drives the tool footprint overlay.
         self._hover = None
         self._show_while_drawing = True
+        # Guides, grid and Photoshop's "extras" (samplers, counts, notes,
+        # slices): what is drawn over the image, each switchable from View.
+        self.show_grid = False
+        self.show_guides = True
+        self.show_extras = True
+        self.show_path = True
+        self.guide_preview = None      # ("h"|"v", pos) while a guide is dragged
+        self._guide_drag = None
+        self.rulers = None
+        # Each open document keeps its own zoom and scroll.
+        self._views = {}
+        self._bound_doc = None
 
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.viewport().setMouseTracking(True)
@@ -139,6 +151,21 @@ class CanvasView(QAbstractScrollArea):
             self.surface.detach()
             return
         self.surface.attach(self.ctl.display)
+        previous = self._bound_doc
+        if previous is not None and previous is not doc:
+            self._views[id(previous)] = (previous, self.view.copy(), self._needs_fit)
+        self._bound_doc = doc
+        remembered = self._views.pop(id(doc), None)
+        if not keep_view and remembered is not None and remembered[0] is doc \
+                and (remembered[1].doc_w, remembered[1].doc_h) == (doc.width, doc.height):
+            # Back to a document already open in another tab: where you were.
+            self.view = remembered[1]
+            self._needs_fit = remembered[2]
+            self._fit_if_real()
+            self.ctl.invalidate()
+            self.refresh()
+            self.zoom_changed.emit(format_zoom(self.view.zoom))
+            return
         if keep_view:
             zoom, ox, oy = self.view.zoom, self.view.offset_x, self.view.offset_y
             self.view = ViewState(doc.width, doc.height, zoom=zoom)
@@ -288,13 +315,22 @@ class CanvasView(QAbstractScrollArea):
 
             if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
                 self._draw_pixel_grid(painter, event.rect(), target)
+        if self.show_grid:
+            self._draw_grid(painter)
         self._draw_selection(painter, target)
+        if self.show_guides or self.guide_preview is not None:
+            self._draw_guides(painter)
+        if self.show_extras:
+            self._draw_marks(painter)
         self._draw_footprint(painter)
         self._draw_zoom_band(painter)
         self._draw_paths(painter)
         self._draw_tool_overlay(painter)
         self._draw_caret(painter)
         painter.end()
+        if self.rulers is not None:
+            for r in self.rulers:
+                r.update()
 
     # ---- view tools ------------------------------------------------------
 
@@ -427,6 +463,142 @@ class CanvasView(QAbstractScrollArea):
                 painter.setPen(QColor(255, 255, 255))
                 painter.drawText(QPoint(int(wx) + 8, int(wy) + 14), text)
         painter.restore()
+
+    def _draw_grid(self, painter):
+        """The snapping grid, in document space, through the view transform."""
+        from PySide6.QtCore import QPointF
+        doc = self.ctl.doc
+        gx, gy = (float(v) for v in self.ctl.grid[:2])
+        if gx <= 0 or gy <= 0 or min(gx, gy) * self.view.scale < 4:
+            return                      # too dense to be anything but grey
+        vis = self.view.visible_doc_rect(self.viewport().width(), self.viewport().height())
+        if vis is None:
+            return
+        w2d = self.view.doc_to_widget
+        painter.save()
+        painter.setPen(QPen(QColor(*(self.cfg.get("Canvas", "GridColour") or (120, 120, 255, 110))), 1.0))
+        x = math.floor(vis.x / gx) * gx
+        while x <= vis.x1:
+            painter.drawLine(QPointF(*w2d(x, 0)), QPointF(*w2d(x, doc.height)))
+            x += gx
+        y = math.floor(vis.y / gy) * gy
+        while y <= vis.y1:
+            painter.drawLine(QPointF(*w2d(0, y)), QPointF(*w2d(doc.width, y)))
+            y += gy
+        painter.restore()
+
+    def _draw_guides(self, painter):
+        from PySide6.QtCore import QPointF
+        doc = self.ctl.doc
+        w2d = self.view.doc_to_widget
+        painter.save()
+        guides = list(doc.guides) if self.show_guides else []
+        drag = self._guide_drag
+        for i, (o, pos) in enumerate(guides):
+            if drag is not None and drag[0] == i:
+                continue
+            painter.setPen(QPen(QColor(0, 200, 230), 1.0))
+            a, b = ((0, pos), (doc.width, pos)) if o == "h" else ((pos, 0), (pos, doc.height))
+            painter.drawLine(QPointF(*w2d(*a)), QPointF(*w2d(*b)))
+        if self.guide_preview is not None:
+            o, pos = self.guide_preview
+            pen = QPen(QColor(0, 200, 230), 1.0)
+            pen.setDashPattern([4.0, 3.0])
+            painter.setPen(pen)
+            a, b = ((0, pos), (doc.width, pos)) if o == "h" else ((pos, 0), (pos, doc.height))
+            painter.drawLine(QPointF(*w2d(*a)), QPointF(*w2d(*b)))
+        painter.restore()
+
+    def _draw_marks(self, painter):
+        """Samplers, counts, notes and slices: Photoshop's Extras."""
+        from PySide6.QtCore import QPointF
+        doc = self.ctl.doc
+        if not (doc.samplers or doc.counts or doc.notes or doc.slices):
+            return
+        w2d = self.view.doc_to_widget
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        for i, (name, (x, y, w, h)) in enumerate(doc.slices):
+            pts = [QPointF(*w2d(px, py)) for px, py in ((x, y), (x + w, y), (x + w, y + h), (x, y + h))]
+            painter.setPen(QPen(QColor(40, 140, 255), 1.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolygon(pts)
+            tag = QRectF(pts[0].x() + 1, pts[0].y() + 1, 22, 13)
+            painter.fillRect(tag, QColor(40, 140, 255))
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(tag, Qt.AlignCenter, "%02d" % (i + 1))
+        for i, (x, y) in enumerate(doc.samplers):
+            wx, wy = w2d(x + 0.5, y + 0.5)
+            for pen in (QPen(QColor(255, 255, 255), 3.0), QPen(QColor(0, 0, 0), 1.0)):
+                painter.setPen(pen)
+                painter.drawEllipse(QPointF(wx, wy), 5, 5)
+                painter.drawLine(QPointF(wx - 9, wy), QPointF(wx + 9, wy))
+                painter.drawLine(QPointF(wx, wy - 9), QPointF(wx, wy + 9))
+            painter.drawText(QPointF(wx + 7, wy + 14), str(i + 1))
+        for i, (x, y) in enumerate(doc.counts):
+            wx, wy = w2d(x, y)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 160, 255))
+            painter.drawEllipse(QPointF(wx, wy), 3, 3)
+            painter.setPen(QColor(0, 0, 0))
+            painter.drawText(QPointF(wx + 5, wy - 4), str(i + 1))
+            painter.setPen(QColor(0, 160, 255))
+            painter.drawText(QPointF(wx + 4, wy - 5), str(i + 1))
+        for i, (x, y, text) in enumerate(doc.notes):
+            wx, wy = w2d(x, y)
+            box = QRectF(wx - 7, wy - 7, 14, 14)
+            painter.setPen(QPen(QColor(120, 90, 0), 1.0))
+            painter.setBrush(QColor(255, 220, 60))
+            painter.drawRect(box)
+            painter.drawLine(QPointF(wx - 4, wy - 2), QPointF(wx + 4, wy - 2))
+            painter.drawLine(QPointF(wx - 4, wy + 2), QPointF(wx + 3, wy + 2))
+            tip = (text.splitlines() or [""])[0][:32]
+            if tip:
+                painter.setPen(QColor(60, 45, 0))
+                painter.drawText(QPointF(wx + 10, wy + 4), tip)
+        painter.restore()
+
+    def centre_on(self, dx, dy):
+        """Scroll so a document point is in the middle (the Navigator)."""
+        self.user_took_view()
+        vp = self.viewport()
+        self.view._pin(dx, dy, vp.width() / 2.0, vp.height() / 2.0)
+        vp.update()
+
+    def set_rulers(self, on):
+        from .panels import RULER, Ruler
+        if on and self.rulers is None:
+            self.rulers = (Ruler(self, True), Ruler(self, False))
+        if self.rulers is None:
+            return
+        for r in self.rulers:
+            r.setVisible(bool(on))
+        self.setViewportMargins(RULER if on else 0, RULER if on else 0, 0, 0)
+        self._place_rulers()
+
+    def _place_rulers(self):
+        if self.rulers is None or not self.rulers[0].isVisible():
+            return
+        from .panels import RULER
+        vp = self.viewport().geometry()
+        top, left = self.rulers
+        top.setGeometry(vp.x(), vp.y() - RULER, vp.width(), RULER)
+        left.setGeometry(vp.x() - RULER, vp.y(), RULER, vp.height())
+
+    def _guide_hit(self, pos):
+        """Index of the guide under a viewport point, within 4 screen px."""
+        if not self.show_guides or self.ctl.doc is None or self.view.rotated:
+            return None
+        best, idx = 4.0, None
+        for i, (o, p) in enumerate(self.ctl.doc.guides):
+            wx, wy = self.view.doc_to_widget(p, p)
+            d = abs((pos.y() - wy) if o == "h" else (pos.x() - wx))
+            if d <= best:
+                best, idx = d, i
+        return idx
+
+    def _moves_guides(self):
+        return getattr(self.ctl, "tool_name", "") in ("move_layer", "move_pixels", "move_selection")
 
     def _draw_paths(self, painter):
         """The active vector path, while a path tool is in hand.
@@ -776,6 +948,13 @@ class CanvasView(QAbstractScrollArea):
 
         dx, dy = self._doc_pos(event.position())
         button = 2 if event.button() == Qt.RightButton else 1
+        # Guides move with the Move tools, as in Photoshop and GIMP.
+        if event.button() == Qt.LeftButton and self._moves_guides():
+            hit = self._guide_hit(event.position())
+            if hit is not None:
+                self._guide_drag = (hit, self.ctl.doc.guides[hit][0])
+                self.guide_preview = self.ctl.doc.guides[hit]
+                return
         # "On a point" means a few SCREEN pixels, whatever the zoom.
         self.ctl.pick_radius = 6.0 / max(self.view.scale, 1e-6)
         self._drawing = True
@@ -796,6 +975,22 @@ class CanvasView(QAbstractScrollArea):
         dx, dy = self._doc_pos(pos)
         self.cursor_moved.emit(dx, dy)
         self._move_hover(dx, dy)
+        if self.rulers is not None:
+            self.rulers[0].pointer, self.rulers[1].pointer = pos.x(), pos.y()
+        if self._guide_drag is not None:
+            orient = self._guide_drag[1]
+            self.guide_preview = (orient, round(dy) if orient == "h" else round(dx))
+            self.viewport().update()
+            return
+        if self._moves_guides() and not self._drawing and not self._panning:
+            hit = self._guide_hit(pos)
+            if hit is not None:
+                o = self.ctl.doc.guides[hit][0]
+                self.viewport().setCursor(Qt.SplitVCursor if o == "h" else Qt.SplitHCursor)
+                self._on_guide = True
+            elif getattr(self, "_on_guide", False):
+                self._on_guide = False
+                self.apply_tool_cursor()
         if self._panning:
             point = pos.toPoint()
             delta = point - self._pan_origin
@@ -838,6 +1033,17 @@ class CanvasView(QAbstractScrollArea):
             self.refresh()
 
     def mouseReleaseEvent(self, event):
+        if self._guide_drag is not None:
+            index, orient = self._guide_drag
+            self._guide_drag = None
+            preview, self.guide_preview = self.guide_preview, None
+            inside = self.viewport().rect().contains(event.position().toPoint())
+            if not inside:
+                self.ctl.remove_guide(index)          # dragged back off the canvas
+            elif preview is not None:
+                self.ctl.move_guide(index, preview[1])
+            self.viewport().update()
+            return
         if self._panning and event.button() in (Qt.MiddleButton, Qt.LeftButton):
             self._panning = False
             if getattr(self, "_space_pan", False):
@@ -1078,6 +1284,7 @@ class CanvasView(QAbstractScrollArea):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._place_rulers()
         self._fit_if_real()
         self.viewport().update()
 

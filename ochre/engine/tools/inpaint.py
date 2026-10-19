@@ -180,6 +180,8 @@ class RemoveTool(SpotHealTool):
 class _SelectionDragTool(Tool):
     """Press inside the selection and drag it; press outside to lasso a new one."""
 
+    snaps = False         # moves by an offset; snapping the pointer is wrong
+
     changes_selection = True
     wants_stroke = True
     slow_commit = True

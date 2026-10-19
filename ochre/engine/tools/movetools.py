@@ -52,6 +52,8 @@ class CloneStampTool(Tool):
     are still visible to the next one, so nothing is actually lost.
     """
 
+    snaps = False         # freehand painting
+
     name = "clone"
     label = "Clone Stamp"
     options_spec = (O.size(24), O.hardness(0.8),
@@ -185,6 +187,8 @@ class MovePixelsTool(Tool):
     With no selection this moves the whole layer, which is what a user
     dragging with nothing selected means.
     """
+
+    snaps = False         # moves by an offset; snapping the pointer is wrong
 
     name = "move_pixels"
     label = "Move Selected Pixels"
@@ -324,6 +328,8 @@ class MoveSelectionTool(Tool):
     do entirely different things, and merging them is how people destroy work
     by accident.
     """
+
+    snaps = False         # moves by an offset; snapping the pointer is wrong
 
     name = "move_selection"
     label = "Move Selection"

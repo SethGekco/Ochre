@@ -463,13 +463,15 @@ class GeometryDelta(Command):
     """
 
     __slots__ = ("label", "width", "height", "_cells", "_selection",
-                 "_sel_blob", "_sel_shape", "_paths")
+                 "_sel_blob", "_sel_shape", "_paths", "_marks")
 
     def __init__(self, width, height, cells, selection=None, label="Transform",
                  paths=None):
         self.label = label
-        # Paths are transformed with the image, so they come back with it.
+        # Paths and marks are transformed with the image, so they come back
+        # with it.
         self._paths = paths
+        self._marks = None
         self.width = width
         self.height = height
         self._cells = cells             # {(layer_id, frame_id): (PixelDelta|None, bbox)}
@@ -493,7 +495,9 @@ class GeometryDelta(Command):
                                    label, level)
             cells[(layer_id, frame_id)] = (delta, box)
         paths = ([p.copy() for p in doc.paths], doc.active_path)
-        return GeometryDelta(doc.width, doc.height, cells, selection, label, paths)
+        out = GeometryDelta(doc.width, doc.height, cells, selection, label, paths)
+        out._marks = {a: list(getattr(doc, a, [])) for a in MARKS}
+        return out
 
     def undo(self, doc):
         opposite = GeometryDelta.capture(doc, self._selection, self.label)
@@ -523,6 +527,9 @@ class GeometryDelta(Command):
         if self._paths is not None:
             doc.paths = [p.copy() for p in self._paths[0]]
             doc.active_path = self._paths[1]
+        if self._marks is not None:
+            for a, v in self._marks.items():
+                setattr(doc, a, list(v))
         return opposite, doc.bounds
 
     def nbytes(self):
@@ -605,3 +612,32 @@ class PathDelta(Command):
 
     def nbytes(self):
         return 64 + 56 * sum(len(s) for p in self._paths for s in p.subpaths)
+
+
+MARKS = ("guides", "samplers", "counts", "notes", "slices")
+
+
+class MarksDelta(Command):
+    """Guides, samplers, counts, notes and slices as they were.
+
+    All plain lists of tuples, so a shallow copy is a complete snapshot.
+    Adding a guide or a count marker is undoable, as in Photoshop.
+    """
+
+    __slots__ = ("label", "_state")
+
+    def __init__(self, doc, label="Marks", attrs=MARKS):
+        self.label = label
+        self._state = {a: list(getattr(doc, a, [])) for a in attrs}
+
+    def same_as(self, doc):
+        return all(list(getattr(doc, a, [])) == v for a, v in self._state.items())
+
+    def undo(self, doc):
+        opposite = MarksDelta(doc, self.label, tuple(self._state))
+        for a, v in self._state.items():
+            setattr(doc, a, list(v))
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return 64 + 48 * sum(len(v) for v in self._state.values())

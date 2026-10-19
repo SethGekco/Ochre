@@ -604,6 +604,29 @@ def i_pen(g):
     g.rect(8, 19, 8, 3, fill=g.fg, w=0)
 
 
+def _pen_small(g):
+    g.poly([(9, 2), (14, 9), (11, 14), (7, 14), (4, 9)], fill=None, w=1.3)
+    g.line((9, 2), (9, 8), w=1.0)
+    g.rect(6, 14, 6, 2.5, fill=g.fg, w=0)
+
+
+def i_add_anchor(g):
+    _pen_small(g)
+    g.line((15, 18), (22, 18), w=2.0)
+    g.line((18.5, 14.5), (18.5, 21.5), w=2.0)
+
+
+def i_delete_anchor(g):
+    _pen_small(g)
+    g.line((15, 18), (22, 18), w=2.0)
+
+
+def i_convert_point(g):
+    g.line((4, 20), (12, 6), w=1.6)
+    g.line((12, 6), (20, 20), w=1.6)
+    g.rect(10, 4, 4, 4, fill=ACCENT, w=1.0)
+
+
 def i_freeform_pen(g):
     i_pen(g)
     g.curve((2, 6), (5, 2), (6, 9), (9, 5), w=1.2, color=ACCENT)

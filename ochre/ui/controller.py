@@ -76,6 +76,17 @@ class Controller:
         self.primary_index = None
         self.secondary_index = None
         self._pending = []
+        # Snapping and the grid. Engine-side so snapping is testable; the
+        # canvas only draws the grid and guides.
+        self.snap_guides = True
+        self.snap_grid = False
+        self.snap_bounds = False
+        self.grid = (16, 16)
+        self.last_measure = None
+        # Open documents, one tab each. The current one lives in the
+        # attributes above; the others are parked here as state bundles.
+        self.documents = []
+        self.current_doc = -1
 
     # ---- events ----------------------------------------------------------
 
@@ -213,7 +224,121 @@ class Controller:
         self.emit("document.saved", path=target)
         return target
 
+    # Everything that belongs to ONE open document rather than to the editor.
+    _PER_DOC = ("doc", "history", "selection", "compositor", "blends", "display",
+                "path", "dirty_since_save", "_saved_marker", "active_layer",
+                "_pending", "quick_mask", "last_measure", "_history_src")
+
+    def _capture(self):
+        return {k: getattr(self, k, None) for k in self._PER_DOC}
+
+    def _restore(self, state):
+        for k, v in state.items():
+            setattr(self, k, v)
+
+    def _pristine(self):
+        """An untitled document nobody has touched: replaced, not kept."""
+        return (self.doc is not None and self.path is None and not self.is_modified()
+                and not self.history.entries)
+
+    def document_titles(self):
+        """One title per open document, '*' marking unsaved work."""
+        out = []
+        for i, state in enumerate(self.documents):
+            if i == self.current_doc:
+                out.append(self.title)
+                continue
+            path = state.get("path")
+            name = os.path.basename(path) if path else "Untitled"
+            out.append(("*" if self._state_modified(state) else "") + name)
+        return out
+
+    @staticmethod
+    def _state_modified(state):
+        history = state.get("history")
+        if history is None:
+            return False
+        current = history.marker()
+        saved = state.get("_saved_marker")
+        if saved is None:
+            return current[0] is not None or current[2] != 0
+        return current[1] is not saved[1] or current[2] != saved[2]
+
+    def modified_documents(self):
+        """Indices of documents with unsaved work."""
+        return [i for i, st in enumerate(self.documents)
+                if (self.is_modified() if i == self.current_doc else self._state_modified(st))]
+
+    def _leave_current(self):
+        """Settle the tool before the document under it changes."""
+        if self.tool is not None and self.tool.active:
+            if getattr(self.tool, "commit_on_switch", False) and hasattr(self.tool, "finish"):
+                self.finish_tool()
+            else:
+                self.tool.cancel(self._context())
+        if 0 <= self.current_doc < len(self.documents):
+            self.documents[self.current_doc] = self._capture()
+
+    def switch_document(self, index):
+        """Bring another open document to the front."""
+        if not (0 <= index < len(self.documents)) or index == self.current_doc:
+            return False
+        self._leave_current()
+        self.current_doc = index
+        self._restore(self.documents[index])
+        if self.tool_name:
+            self.set_tool(self.tool_name)
+        self.emit("document.opened", document=self.doc, path=self.path)
+        self.emit("documents.changed")
+        return True
+
+    def close_document(self, index=None):
+        """Close a document (the current one by default) WITHOUT asking.
+
+        Asking is the window's job; by the time this runs the user has said
+        yes. Closing the last one leaves a fresh untitled canvas, so there is
+        always something to draw on.
+        """
+        index = self.current_doc if index is None else index
+        if not (0 <= index < len(self.documents)):
+            return False
+        if index == self.current_doc:
+            if self.tool is not None and self.tool.active:
+                self.tool.cancel(self._context())
+            del self.documents[index]
+            self.current_doc = -1
+            if not self.documents:
+                self.doc = None
+                self.new_document()
+            else:
+                target = min(index, len(self.documents) - 1)
+                self.current_doc = target
+                self._restore(self.documents[target])
+                if self.tool_name:
+                    self.set_tool(self.tool_name)
+                self.emit("document.opened", document=self.doc, path=self.path)
+        else:
+            del self.documents[index]
+            if index < self.current_doc:
+                self.current_doc -= 1
+        self.emit("documents.changed")
+        return True
+
     def _adopt(self, doc, path):
+        # A new tab, unless the current document is an untouched Untitled
+        # -- then it is simply replaced, as Paint.NET does with its blank
+        # start-up canvas.
+        if self.doc is None or not self.documents:
+            self.documents = [None]
+            self.current_doc = 0
+        elif self._pristine():
+            pass
+        else:
+            self._leave_current()
+            self.documents.append(None)
+            self.current_doc = len(self.documents) - 1
+        self.quick_mask = None
+        self.last_measure = None
         self.doc = doc
         self.history = HistoryStack(self.settings)
         self.selection = Selection(doc.width, doc.height)
@@ -231,7 +356,9 @@ class Controller:
         self.set_history_source(auto=True)
         if self.tool_name:
             self.set_tool(self.tool_name)
+        self.documents[self.current_doc] = self._capture()
         self.emit("document.opened", document=doc, path=path)
+        self.emit("documents.changed")
 
     def is_modified(self):
         """True only when there is real unsaved work.
@@ -980,7 +1107,34 @@ class Controller:
         ctx.clip = self.clip
         ctx.history_source = self.history_source
         ctx.pick_radius = self.pick_radius
+        ctx.composite = self.merged
         return ctx
+
+    def merged(self):
+        """The merged image as displayed, brought up to date."""
+        self.flush()
+        return self.display
+
+    # ---- snapping -------------------------------------------------------------
+
+    def snap_point(self, x, y):
+        """(x, y) snapped to guides / grid / canvas edges, as switched on."""
+        from ..engine import annotations
+        guides = self.doc.guides if self.snap_guides else ()
+        grid = self.grid if self.snap_grid else None
+        bounds = (self.doc.width, self.doc.height) if self.snap_bounds else None
+        if not guides and grid is None and bounds is None:
+            return x, y
+        # Twice the pick radius: a few screen pixels, whatever the zoom.
+        sx, sy, _a, _b = annotations.snap(x, y, guides, grid, bounds,
+                                          tolerance=2.0 * self.pick_radius)
+        return sx, sy
+
+    def _snapped(self, x, y):
+        tool = self.tool
+        if tool is None or not getattr(tool, "snaps", True) or tool.affects != "pixels":
+            return x, y
+        return self.snap_point(x, y)
 
     def tick_stroke(self):
         """A pointer-at-rest tick, for tools that keep working (airbrush)."""
@@ -1031,6 +1185,7 @@ class Controller:
     def begin_stroke(self, x, y, pressure=1.0, modifiers=0, button=1):
         if self.tool is None or self.active_layer is None:
             return None
+        x, y = self._snapped(x, y)
         # A tool that is collecting clicks (polygonal lasso, scissors) keeps
         # its context and its "before" snapshot across presses.
         continuing = self.tool.active and getattr(self.tool, "multi_click", False)
@@ -1059,6 +1214,7 @@ class Controller:
     def motion_stroke(self, x, y, pressure=1.0, modifiers=0, button=1):
         if self.tool is None or not self.tool.active:
             return None
+        x, y = self._snapped(x, y)
         rect = self.tool.motion(self._ctx, ToolEvent(x, y, pressure, modifiers, button))
         self._sync_from_context()
         return rect
@@ -1066,6 +1222,7 @@ class Controller:
     def end_stroke(self, x, y, pressure=1.0, modifiers=0, button=1):
         if self.tool is None:
             return None
+        x, y = self._snapped(x, y)
         # A tool that changes pixels AND the selection in one gesture (the
         # Patch tool's Destination mode, Content-Aware Move) must undo as one
         # step: otherwise the first Ctrl+Z only moves the marching ants back,
@@ -1086,6 +1243,15 @@ class Controller:
             # Path tools edit the document's paths directly; the Paths dock
             # and the canvas outline follow from this.
             self.emit("paths.changed")
+        if getattr(self.tool, "measurement", None) is not None:
+            self.last_measure = self.tool.line
+        # A tool that needs the window (the Note tool wants a text box) says
+        # so through `request`; it is handed on once and cleared.
+        req = getattr(self.tool, "request", None)
+        if req is not None:
+            self.tool.request = None
+            self.emit("tool.request", request=req)
+        self.emit("marks.changed")
         self.emit("history.changed")
         return result
 
@@ -1325,6 +1491,173 @@ class Controller:
         cov = P.stroke_mask(self.doc.paths[index], self.doc.width, self.doc.height,
                             float(width), antialias)
         return self._paint_coverage("Stroke Path", cov, colour or self.primary)
+
+    # ---- guides and marks -----------------------------------------------------
+
+    def _marks_change(self, label, fn, attrs=None):
+        from ..engine.commands import MARKS, MarksDelta
+        before = MarksDelta(self.doc, label, attrs or MARKS)
+        result = fn()
+        if not before.same_as(self.doc):
+            self.history.push(before, label)
+            self.dirty_since_save = True
+        self.emit("marks.changed")
+        self.emit("history.changed")
+        return result
+
+    def add_guide(self, orientation, position):
+        """A guide across the canvas: 'h' at a y, or 'v' at an x."""
+        orientation = "h" if str(orientation).lower().startswith("h") else "v"
+        pos = float(position)
+
+        def run():
+            self.doc.guides = list(self.doc.guides) + [(orientation, pos)]
+            return len(self.doc.guides) - 1
+        return self._marks_change("New Guide", run, ("guides",))
+
+    def move_guide(self, index, position):
+        if not (0 <= index < len(self.doc.guides)):
+            return False
+        limit = self.doc.height if self.doc.guides[index][0] == "h" else self.doc.width
+        if position < 0 or position > limit:
+            return self.remove_guide(index)     # dragged off the canvas
+
+        def run():
+            g = list(self.doc.guides)
+            g[index] = (g[index][0], float(position))
+            self.doc.guides = g
+            return True
+        return self._marks_change("Move Guide", run, ("guides",))
+
+    def remove_guide(self, index):
+        if not (0 <= index < len(self.doc.guides)):
+            return False
+
+        def run():
+            self.doc.guides = self.doc.guides[:index] + self.doc.guides[index + 1:]
+            return True
+        return self._marks_change("Remove Guide", run, ("guides",))
+
+    def clear_guides(self):
+        def run():
+            self.doc.guides = []
+            return True
+        return self._marks_change("Clear Guides", run, ("guides",))
+
+    def guide_at(self, x, y, radius=None):
+        """Index of the guide within `radius` document pixels of a point."""
+        r = 2.0 * self.pick_radius if radius is None else radius
+        best, idx = r, None
+        for i, (o, p) in enumerate(self.doc.guides):
+            d = abs((y if o == "h" else x) - p)
+            if d <= best:
+                best, idx = d, i
+        return idx
+
+    def add_note(self, x, y, text):
+        def run():
+            self.doc.notes = list(self.doc.notes) + [(float(x), float(y), str(text))]
+            return len(self.doc.notes) - 1
+        return self._marks_change("Note", run, ("notes",))
+
+    def set_note_text(self, index, text):
+        if not (0 <= index < len(self.doc.notes)):
+            return False
+
+        def run():
+            notes = list(self.doc.notes)
+            x, y, _t = notes[index]
+            notes[index] = (x, y, str(text))
+            self.doc.notes = notes
+            return True
+        return self._marks_change("Edit Note", run, ("notes",))
+
+    def clear_marks(self, attr):
+        def run():
+            setattr(self.doc, attr, [])
+            return True
+        return self._marks_change("Clear " + attr.capitalize(), run, (attr,))
+
+    def slices_from_guides(self):
+        from ..engine import annotations
+
+        def run():
+            self.doc.slices = annotations.slices_from_guides(
+                self.doc.guides, self.doc.width, self.doc.height)
+            return len(self.doc.slices)
+        return self._marks_change("Slices From Guides", run, ("slices",))
+
+    def export_slices(self, directory, fmt="png"):
+        """File > Export Slices: each slice of the merged image to its own file."""
+        from PIL import Image
+        os.makedirs(directory, exist_ok=True)
+        image = self.merged()
+        out = []
+        for name, (x, y, w, h) in self.doc.slices:
+            x0, y0 = max(0, x), max(0, y)
+            x1, y1 = min(self.doc.width, x + w), min(self.doc.height, y + h)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name) or "slice"
+            target = os.path.join(directory, "%s.%s" % (safe, fmt))
+            Image.fromarray(np.ascontiguousarray(image[y0:y1, x0:x1])).save(target)
+            out.append(target)
+        return out
+
+    def straighten(self, line=None):
+        """Image > Straighten: rotate so the measured line comes out level."""
+        from ..engine import annotations
+        line = line or self.last_measure
+        if line is None:
+            return None
+        angle = annotations.straighten_angle(*line)
+        if abs(angle) < 1e-6:
+            return 0.0
+        self.rotate_image_by(angle)
+        self.last_measure = None
+        if getattr(self.tool, "line", None) is not None:
+            self.tool.line = None
+        return angle
+
+    def sample_at(self, x, y, size=1):
+        """The merged colour around a document point, for the Info dock."""
+        from ..engine import annotations
+        return annotations.sample(self.merged(), x, y, size)
+
+    def histogram(self, source="image", within_selection=True):
+        """256-bin counts for R, G, B and luminance, alpha-weighted.
+
+        Over the merged image or the active layer, and over the selection
+        when there is one -- what GIMP's Histogram dialog reports.
+        """
+        if source == "layer" and self.active_layer is not None and not self.active_layer.is_group:
+            rgba = self.doc.cell(self.active_layer).plane("rgba")
+        else:
+            rgba = self.merged()
+        weight = rgba[..., 3].astype(np.float64) / 255.0
+        if within_selection and self.selection is not None and self.selection.mask is not None:
+            weight = weight * (self.selection.mask.astype(np.float64) / 255.0)
+        w = weight.ravel()
+        out = {}
+        for name, ch in (("red", 0), ("green", 1), ("blue", 2)):
+            out[name] = np.bincount(rgba[..., ch].ravel(), weights=w, minlength=256)
+        lum = (0.2126 * rgba[..., 0] + 0.7152 * rgba[..., 1] + 0.0722 * rgba[..., 2])
+        out["value"] = np.bincount(np.clip(np.rint(lum), 0, 255).astype(np.int64).ravel(),
+                                   weights=w, minlength=256)
+        total = float(w.sum())
+        out["pixels"] = total
+        if total > 0:
+            levels = np.arange(256)
+            v = out["value"]
+            mean = float((levels * v).sum() / total)
+            out["mean"] = mean
+            out["std"] = float(np.sqrt(((levels - mean) ** 2 * v).sum() / total))
+            c = np.cumsum(v)
+            out["median"] = int(np.searchsorted(c, total / 2.0))
+        else:
+            out["mean"] = out["std"] = 0.0
+            out["median"] = 0
+        return out
 
     def select_all(self):
         return self._selection_op("Select All", lambda s: s.select_all())

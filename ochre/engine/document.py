@@ -49,6 +49,12 @@ class Document:
         # them. active_path indexes the one the path tools edit, or None.
         self.paths = []
         self.active_path = None
+        # Non-pixel marks (engine/annotations.py): plain lists of tuples.
+        self.guides = []
+        self.samplers = []
+        self.counts = []
+        self.notes = []
+        self.slices = []
         self._settings = settings
         self._max_dirty = self._setting("Display", "MaxDirtyRects", 8)
 

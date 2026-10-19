@@ -29,7 +29,23 @@ class MainWindow(QMainWindow):
                     settings.get("Window", "Height") or 800)
 
         self.canvas = CanvasView(controller, settings, self)
-        self.setCentralWidget(self.canvas)
+        # One tab per open document above the canvas, as Paint.NET and GIMP
+        # (single-window mode) show them.
+        from PySide6.QtWidgets import QTabBar, QVBoxLayout, QWidget
+        central = QWidget(self)
+        lay = QVBoxLayout(central)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.doc_tabs = QTabBar(central)
+        self.doc_tabs.setTabsClosable(True)
+        self.doc_tabs.setDocumentMode(True)
+        self.doc_tabs.setExpanding(False)
+        self.doc_tabs.currentChanged.connect(self._tab_picked)
+        self.doc_tabs.tabCloseRequested.connect(self.close_document)
+        self._syncing_tabs = False
+        lay.addWidget(self.doc_tabs)
+        lay.addWidget(self.canvas, 1)
+        self.setCentralWidget(central)
 
         self.tools_dock = ToolsDock(controller, self,
                                     columns=settings.get("Toolbox", "Columns") or 2)
@@ -38,16 +54,24 @@ class MainWindow(QMainWindow):
         self.palette_dock = PaletteDock(controller, self)
         self.history_dock = HistoryDock(controller, self)
         self.paths_dock = PathsDock(controller, self)
+        from .panels import HistogramDock, InfoDock, NavigatorDock
+        self.navigator_dock = NavigatorDock(controller, self.canvas, self)
+        self.info_dock = InfoDock(controller, self)
+        self.histogram_dock = HistogramDock(controller, self)
         self.frames_dock = FramesDock(controller, self)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.tools_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.layers_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.colors_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.palette_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.history_dock)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.frames_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.paths_dock)
-        self.tabifyDockWidget(self.palette_dock, self.history_dock)
-        self.tabifyDockWidget(self.history_dock, self.paths_dock)
+        # One tab group for the reference panels, every one tabified onto the
+        # same anchor in a single pass. Stacking them as separate groups made
+        # the window at least 934 px tall, and building the group in steps
+        # left Qt drawing a stale tab strip over the dock below.
+        for dock in (self.history_dock, self.paths_dock, self.navigator_dock,
+                     self.info_dock, self.histogram_dock):
+            self.tabifyDockWidget(self.palette_dock, dock)
+        self.history_dock.raise_()
 
         # None = decide from the document; True/False = the user has said.
         # Only an explicit toggle sets it, never our own show and hide, so
@@ -67,6 +91,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, self.options_bar)
 
         self._build_menus()
+        self._build_window_menu()
         self._build_status()
         self._subscribe()
 
@@ -103,6 +128,15 @@ class MainWindow(QMainWindow):
         bus.subscribe("selection.changed", lambda **k: self.canvas.viewport().update())
         bus.subscribe("paths.changed", lambda **k: (self.paths_dock.sync(),
                                                     self.canvas.viewport().update()))
+        bus.subscribe("marks.changed", lambda **k: (self.canvas.viewport().update(),
+                                                    self.info_dock.schedule()))
+        bus.subscribe("history.changed", lambda **k: (self.histogram_dock.schedule(),
+                                                      self.navigator_dock.schedule(),
+                                                      self.info_dock.schedule(),
+                                                      self._sync_tabs()))
+        bus.subscribe("documents.changed", lambda **k: self._sync_tabs())
+        bus.subscribe("tool.request", self._on_tool_request)
+        self.canvas.cursor_moved.connect(self.info_dock.pointer)
         self.canvas.cursor_moved.connect(self._on_cursor)
         self.canvas.zoom_changed.connect(self.zoom_label.setText)
 
@@ -127,8 +161,10 @@ class MainWindow(QMainWindow):
     def _sync_all(self):
         for dock in (self.tools_dock, self.layers_dock, self.colors_dock,
                      self.palette_dock, self.history_dock, self.frames_dock,
-                     self.paths_dock):
+                     self.paths_dock, self.info_dock, self.histogram_dock,
+                     self.navigator_dock):
             dock.sync()
+        self._sync_tabs()
         self._update_frames_visible()
         self._update_title()
 
@@ -158,6 +194,121 @@ class MainWindow(QMainWindow):
 
     # ---- menus -----------------------------------------------------------
 
+    def _build_window_menu(self):
+        menu = self.menuBar().addMenu("&Window")
+        for dock in (self.tools_dock, self.layers_dock, self.colors_dock, self.palette_dock,
+                     self.history_dock, self.paths_dock, self.navigator_dock, self.info_dock,
+                     self.histogram_dock, self.frames_dock):
+            menu.addAction(dock.toggleViewAction())
+        return menu
+
+    # ---- documents (tabs) -------------------------------------------------
+
+    def _sync_tabs(self):
+        if not hasattr(self, "doc_tabs"):
+            return
+        titles = self.ctl.document_titles()
+        self._syncing_tabs = True
+        while self.doc_tabs.count() > len(titles):
+            self.doc_tabs.removeTab(self.doc_tabs.count() - 1)
+        for i, t in enumerate(titles):
+            if i < self.doc_tabs.count():
+                if self.doc_tabs.tabText(i) != t:
+                    self.doc_tabs.setTabText(i, t)
+            else:
+                self.doc_tabs.addTab(t)
+        if self.ctl.current_doc >= 0:
+            self.doc_tabs.setCurrentIndex(self.ctl.current_doc)
+        self._syncing_tabs = False
+
+    def _tab_picked(self, index):
+        if self._syncing_tabs or index < 0 or index == self.ctl.current_doc:
+            return
+        self.switch_document(index)
+
+    def switch_document(self, index):
+        if self.ctl.switch_document(index):
+            self.canvas.bind()
+            self._sync_all()
+            return True
+        return False
+
+    def _step_document(self, delta):
+        n = len(self.ctl.documents)
+        if n > 1:
+            self.switch_document((self.ctl.current_doc + delta) % n)
+
+    def close_document(self, index=None):
+        """Close a tab, asking first only if it holds unsaved work."""
+        index = self.ctl.current_doc if index is None else index
+        if index != self.ctl.current_doc:
+            self.switch_document(index)
+        if not self.confirm_discard("closing it"):
+            return False
+        self.ctl.close_document()
+        self.canvas.bind()
+        self._sync_all()
+        return True
+
+    # ---- marks, guides, notes ----------------------------------------------
+
+    def _on_tool_request(self, request=None, **_):
+        """A tool needs the window -- today, the Note tool wants text."""
+        from PySide6.QtWidgets import QInputDialog
+        if not request:
+            return
+        kind, arg = request
+        if kind == "new_note":
+            text, ok = QInputDialog.getMultiLineText(self, "Note", "Note text:")
+            if ok and text.strip():
+                self.ctl.add_note(arg[0], arg[1], text)
+        elif kind == "edit_note" and 0 <= arg < len(self.ctl.doc.notes):
+            text, ok = QInputDialog.getMultiLineText(self, "Note", "Note text:",
+                                                     self.ctl.doc.notes[arg][2])
+            if ok:
+                self.ctl.set_note_text(arg, text)
+        self.canvas.viewport().update()
+
+    def do_new_guide(self):
+        from PySide6.QtWidgets import QInputDialog
+        orient, ok = QInputDialog.getItem(self, "New Guide", "Orientation:",
+                                          ["Horizontal", "Vertical"], 0, False)
+        if not ok:
+            return
+        limit = self.ctl.doc.height if orient == "Horizontal" else self.ctl.doc.width
+        pos, ok = QInputDialog.getDouble(self, "New Guide", "Position (pixels):",
+                                         limit / 2.0, 0, limit, 1)
+        if ok:
+            self.ctl.add_guide("h" if orient == "Horizontal" else "v", pos)
+            self.canvas.viewport().update()
+
+    def do_grid_settings(self):
+        from PySide6.QtWidgets import QInputDialog
+        size, ok = QInputDialog.getInt(self, "Grid", "Grid spacing (pixels):",
+                                       int(self.ctl.grid[0]), 1, 4096)
+        if ok:
+            self.ctl.grid = (size, size)
+            self.canvas.viewport().update()
+
+    def do_straighten(self):
+        if self.ctl.last_measure is None:
+            self.statusBar().showMessage(
+                "Draw a line along something that should be level with the Measure tool first.", 6000)
+            return
+        self._busy(self.ctl.straighten)
+        self.canvas.bind(keep_view=True)
+
+    def do_export_slices(self):
+        if not self.ctl.doc.slices:
+            self.statusBar().showMessage(
+                "No slices: draw some with the Slice tool, or use Image > Slices From Guides.", 6000)
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Export Slices To")
+        if not folder:
+            return
+        written = self.ctl.export_slices(folder)
+        self.statusBar().showMessage("Exported %d slices to %s" % (len(written), folder), 6000)
+
     def _busy(self, fn, *args, **kw):
         """Run something slow under a wait cursor, then repaint."""
         from PySide6.QtWidgets import QApplication
@@ -186,6 +337,11 @@ class MainWindow(QMainWindow):
         self._rebuild_recent()
         self._act(file_menu, "&Save", self.do_save, "Ctrl+S")
         self._act(file_menu, "Save &As...", self.do_save_as, "Ctrl+Shift+S")
+        self._act(file_menu, "Export S&lices...", self.do_export_slices)
+        file_menu.addSeparator()
+        self._act(file_menu, "&Close", lambda: self.close_document(), "Ctrl+W")
+        self._act(file_menu, "Next Image", lambda: self._step_document(+1), "Ctrl+Tab")
+        self._act(file_menu, "Previous Image", lambda: self._step_document(-1), "Ctrl+Shift+Tab")
         file_menu.addSeparator()
         self._act(file_menu, "E&xit", self.close, "Ctrl+Q")
 
@@ -253,6 +409,41 @@ class MainWindow(QMainWindow):
         self.show_path_action = self._act(view_menu, "Show &Path", self.do_show_path)
         self.show_path_action.setCheckable(True)
         self.show_path_action.setChecked(True)
+        view_menu.addSeparator()
+
+        def toggle(text, attr, key, default, after=None):
+            act = QAction(text, self)
+            act.setShortcut(QKeySequence(key))
+            view_menu.addAction(act)
+            act.setCheckable(True)
+            act.setChecked(default)
+
+            def flip(on, a=attr):
+                setattr(self.canvas, a, bool(on))
+                if after is not None:
+                    after(bool(on))
+                self.canvas.viewport().update()
+            act.toggled.connect(flip)
+            return act
+        self.rulers_action = toggle("R&ulers", "show_rulers", "Ctrl+Alt+R", False,
+                                    self.canvas.set_rulers)
+        self.grid_action = toggle("&Grid", "show_grid", "Ctrl+'", False)
+        self.guides_action = toggle("Gui&des", "show_guides", "Ctrl+;", True)
+        self.extras_action = toggle("E&xtras (samplers, counts, notes, slices)",
+                                    "show_extras", "Ctrl+Alt+H", True)
+        snap_menu = view_menu.addMenu("&Snap To")
+        self.snap_actions = {}
+        for text, attr in (("&Guides", "snap_guides"), ("G&rid", "snap_grid"),
+                           ("&Canvas Edges", "snap_bounds")):
+            act = snap_menu.addAction(text)
+            act.setCheckable(True)
+            act.setChecked(bool(getattr(self.ctl, attr)))
+            act.toggled.connect(lambda on, a=attr: setattr(self.ctl, a, bool(on)))
+            self.snap_actions[attr] = act
+        self._act(view_menu, "&New Guide...", self.do_new_guide)
+        self._act(view_menu, "C&lear Guides", lambda: (self.ctl.clear_guides(),
+                                                       self.canvas.viewport().update()))
+        self._act(view_menu, "Grid &Settings...", self.do_grid_settings)
 
         # Effects and adjustments, grouped exactly as the registry says --
         # so an addon's effect appears in the right menu without this file
@@ -279,6 +470,12 @@ class MainWindow(QMainWindow):
                   lambda: self._geometry(self.ctl.rotate_image, 3), "Ctrl+G")
         self._act(image_menu, "Rotate &180\u00b0", lambda: self._geometry(self.ctl.rotate_image, 2), "Ctrl+J")
         self._act(image_menu, "Rotate by &Angle...", self.do_rotate_image_by)
+        self._act(image_menu, "S&traighten (from Measure)", self.do_straighten)
+        image_menu.addSeparator()
+        self._act(image_menu, "Slices From &Guides", lambda: (self.ctl.slices_from_guides(),
+                                                              self.canvas.viewport().update()))
+        self._act(image_menu, "Clear S&lices", lambda: (self.ctl.clear_marks("slices"),
+                                                        self.canvas.viewport().update()))
         image_menu.addSeparator()
         self._act(image_menu, "Bind &Grayscale Palette", self.do_bind_palette)
         self._act(image_menu, "Convert Layer to &Indexed...", self.do_convert_indexed)
@@ -384,11 +581,16 @@ class MainWindow(QMainWindow):
         return choice == QMessageBox.Discard
 
     def closeEvent(self, event):
-        if self.confirm_discard("closing"):
-            self.shutdown()
-            event.accept()
-        else:
-            event.ignore()
+        # Every tab with unsaved work gets asked about, brought to the front
+        # first so the question is about something you can see.
+        for index in self.ctl.modified_documents():
+            if index != self.ctl.current_doc:
+                self.switch_document(index)
+            if not self.confirm_discard("closing"):
+                event.ignore()
+                return
+        self.shutdown()
+        event.accept()
 
     def shutdown(self):
         """Stop everything that can call back into Python.
@@ -408,8 +610,7 @@ class MainWindow(QMainWindow):
 
     def do_new(self):
         from .dialogs import NewImageDialog
-        if not self.confirm_discard("starting a new image"):
-            return
+        # A new image opens in its own tab, so nothing is put at risk.
         dlg = NewImageDialog(self.ctl, self)
         if not dlg.exec():
             return
@@ -635,8 +836,6 @@ class MainWindow(QMainWindow):
         return landed
 
     def do_paste_new_image(self):
-        if not self.confirm_discard("pasting into a new image"):
-            return
         foreign = self._system_clipboard_get()
         clip = foreign or self.ctl.clip
         if clip is None:
@@ -699,9 +898,11 @@ class MainWindow(QMainWindow):
         self._rebuild_recent()
 
     def open_file(self, path):
-        """Open a path with error reporting. Shared by Open, Recent and drop."""
-        if not self.confirm_discard("opening another file"):
-            return False
+        """Open a path with error reporting. Shared by Open, Recent and drop.
+
+        It opens in a new tab (or replaces an untouched Untitled), so there
+        is nothing to ask about.
+        """
         try:
             self.ctl.open_path(path)
         except Exception as exc:                            # noqa: BLE001

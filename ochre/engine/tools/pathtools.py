@@ -440,6 +440,8 @@ def _subpath_at(path, x, y, radius):
 class PathSelectTool(_PathTool):
     """Move whole subpaths. Shift moves the whole path, Alt drags a copy."""
 
+    snaps = False         # moves by an offset; snapping the pointer is wrong
+
     name = "path_select"
     label = "Path Selection"
 
@@ -502,3 +504,49 @@ class DirectSelectTool(_PathTool):
         self._drag = None
         self._record(ctx)
         return ctx.doc.bounds
+
+
+class _ForcedModifierTool(DirectSelectTool):
+    """Direct selection with a modifier held for you: Photoshop's single-
+    purpose anchor tools are the same edits, without the chord."""
+
+    forced = 0
+
+    def _force(self, event):
+        from .base import ToolEvent
+        return ToolEvent(event.x, event.y, event.pressure,
+                         event.modifiers | self.forced, event.button)
+
+    def on_begin(self, ctx, event):
+        return super().on_begin(ctx, self._force(event))
+
+    def on_motion(self, ctx, event):
+        return super().on_motion(ctx, self._force(event))
+
+    def on_end(self, ctx, event):
+        return super().on_end(ctx, self._force(event))
+
+
+class AddAnchorTool(_ForcedModifierTool):
+    """Click a segment to add an anchor there (and drag to place it)."""
+
+    name = "add_anchor"
+    label = "Add Anchor Point"
+    forced = MOD_CTRL
+
+
+class DeleteAnchorTool(_ForcedModifierTool):
+    """Click an anchor to delete it."""
+
+    name = "delete_anchor"
+    label = "Delete Anchor Point"
+    forced = MOD_CTRL | MOD_SHIFT
+
+
+class ConvertPointTool(_ForcedModifierTool):
+    """Click an anchor to make it a corner, drag one to pull smooth handles,
+    drag a handle to move it alone."""
+
+    name = "convert_point"
+    label = "Convert Point"
+    forced = MOD_ALT

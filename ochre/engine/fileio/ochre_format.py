@@ -160,6 +160,24 @@ def save(doc, path, selection=None, thumbnail_max=256):
             add("Subpath.%d = %s" % (k, encode_subpath(sub)))
         add("")
 
+    # Guides and the other non-pixel marks (engine/annotations.py).
+    from ..annotations import encode_note
+    if getattr(doc, "guides", None):
+        add("[Guides]")
+        for n, (orient, pos) in enumerate(doc.guides):
+            add("%s.%d = %g" % ("H" if orient == "h" else "V", n, pos))
+        add("")
+    marks = [("Sampler", "%g,%g" % p) for p in getattr(doc, "samplers", [])]
+    marks += [("Count", "%g,%g" % p) for p in getattr(doc, "counts", [])]
+    marks += [("Note", encode_note(*n)) for n in getattr(doc, "notes", [])]
+    marks += [("Slice", "%s,%d,%d,%d,%d" % ((_esc(nm).replace(",", "_"),) + tuple(r)))
+              for nm, r in getattr(doc, "slices", [])]
+    if marks:
+        add("[Marks]")
+        for n, (kind, value) in enumerate(marks):
+            add("%s.%d = %s" % (kind, n, value))
+        add("")
+
     # Cells: one section per (layer, frame) that actually has pixels.
     blobs = {}
     frame_index = {f.id: i for i, f in enumerate(doc.frames)}
@@ -368,6 +386,37 @@ def load(path, settings=None):
             if db.get(section, "Active", "0") == "1":
                 doc.active_path = len(doc.paths)
             doc.paths.append(vpath)
+
+        from ..annotations import decode_note
+
+        def ordered(section):
+            def key(k):
+                tail = k.split(".", 1)[-1]
+                return int(tail) if tail.isdigit() else 0
+            return sorted(db.keys(section), key=key)
+        if db.has("Guides"):
+            for k in ordered("Guides"):
+                try:
+                    doc.guides.append(("h" if k.startswith("H") else "v",
+                                       float(db.get("Guides", k))))
+                except (TypeError, ValueError):
+                    pass
+        if db.has("Marks"):
+            for k in ordered("Marks"):
+                kind, value = k.split(".", 1)[0], db.get("Marks", k)
+                try:
+                    if kind in ("Sampler", "Count"):
+                        x, y = (float(v) for v in value.split(",")[:2])
+                        (doc.samplers if kind == "Sampler" else doc.counts).append((x, y))
+                    elif kind == "Note":
+                        n = decode_note(value)
+                        if n is not None:
+                            doc.notes.append(n)
+                    elif kind == "Slice":
+                        parts = value.split(",")
+                        doc.slices.append((parts[0], tuple(int(v) for v in parts[1:5])))
+                except (TypeError, ValueError, IndexError):
+                    pass
 
         selection_mask = None
         if SELECTION in names:

@@ -231,7 +231,10 @@ NON_PAINTING = {"eyedropper", "select_rect", "select_ellipse", "lasso",
                 # only through Fill/Stroke Path (test_paths.py).
                 "pen", "curvature_pen", "freeform_pen", "path_select", "direct_select",
                 # Type masks make a selection, not paint (test_typecurve.py).
-                "type_mask", "vertical_type_mask"}
+                "type_mask", "vertical_type_mask",
+                "add_anchor", "delete_anchor", "convert_point",
+                # Marks and measurements (test_utility.py).
+                "measure", "color_sampler", "count", "note", "slice", "slice_select"}
 
 
 def main():

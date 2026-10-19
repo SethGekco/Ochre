@@ -59,6 +59,8 @@ def _session(ctx, label):
 class _FloatTransform(Tool):
     """Lift, transform with handles, commit. Subclasses choose what drags do."""
 
+    snaps = False         # moves by an offset; snapping the pointer is wrong
+
     wants_stroke = False
     multi_click = True
     commit_on_switch = True
@@ -542,6 +544,8 @@ class CageTool(Tool):
     abandons. GIMP's Cage Transform, rendered by mean-value coordinates.
     """
 
+    snaps = False         # moves by an offset; snapping the pointer is wrong
+
     name = "cage"
     label = "Cage Transform"
     wants_stroke = False
@@ -697,6 +701,8 @@ class WarpTool(Tool):
     entry, and strokes accumulate on the same distortion until you switch
     tool or layer.
     """
+
+    snaps = False         # moves by an offset; snapping the pointer is wrong
 
     name = "warp"
     label = "Warp Transform"
@@ -967,6 +973,8 @@ class MoveLayerTool(Tool):
     """Drag the whole layer -- Photoshop's Move tool (V), GIMP's Move in
     layer mode. With Auto-select on, pressing on the image first makes the
     topmost layer with paint under the pointer the active one."""
+
+    snaps = False         # moves by an offset; snapping the pointer is wrong
 
     name = "move_layer"
     label = "Move Layer"

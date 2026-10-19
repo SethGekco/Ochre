@@ -132,9 +132,38 @@ def _rebuild(doc, width, height, convert, bbox_fn):
 
 
 def _map_paths(doc, fn):
-    """Apply a point mapping to every vector path, so paths follow the image."""
+    """Apply a point mapping to every vector path and mark, so they follow
+    the image through a resize, crop, flip or rotation."""
     for path in getattr(doc, "paths", ()):
         path.map_points(fn)
+    _map_marks(doc, fn)
+
+
+def _map_marks(doc, fn):
+    w, h = doc.width, doc.height
+    doc.samplers = [tuple(fn((x, y))) for x, y in getattr(doc, "samplers", [])]
+    doc.counts = [tuple(fn((x, y))) for x, y in getattr(doc, "counts", [])]
+    doc.notes = [tuple(fn((x, y))) + (t,) for x, y, t in getattr(doc, "notes", [])]
+    slices = []
+    for name, (x, y, sw, sh) in getattr(doc, "slices", []):
+        pts = [fn(p) for p in ((x, y), (x + sw, y), (x + sw, y + sh), (x, y + sh))]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x0, y0 = int(round(min(xs))), int(round(min(ys)))
+        slices.append((name, (x0, y0, int(round(max(xs))) - x0, int(round(max(ys))) - y0)))
+    doc.slices = slices
+    guides = []
+    for orient, pos in getattr(doc, "guides", []):
+        a, b = ((pos, 0.0), (pos, float(h))) if orient == "v" else ((0.0, pos), (float(w), pos))
+        (ax, ay), (bx, by) = fn(a), fn(b)
+        if abs(ax - bx) < 1e-6:
+            guides.append(("v", ax))
+        elif abs(ay - by) < 1e-6:
+            guides.append(("h", ay))
+        else:
+            # Turned off the axes (rotate by an angle): keep its centre.
+            guides.append((orient, (ax + bx) / 2.0 if orient == "v" else (ay + by) / 2.0))
+    doc.guides = guides
 
 
 def resize_image(doc, width, height, method=BILINEAR):
