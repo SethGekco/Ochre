@@ -20,6 +20,7 @@ Without that, dragging a slider builds a backlog and the preview lags further
 behind the further you drag.
 """
 
+import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
@@ -334,8 +335,14 @@ class EffectDialog(QDialog):
 
         # The original pixels, kept so Cancel is an exact restore and each
         # preview starts from a clean source rather than from the last one.
-        cell = controller.doc.cell(controller.active_layer) if controller.active_layer else None
+        # The paint target: the active layer, or its mask while editing one.
+        target = getattr(controller, "paint_target", controller.active_layer)
+        self._target = target
+        cell = controller.doc.cell(target) if target is not None else None
         self._cell = cell
+        # The selection fences the effect, softly, as it fences every tool.
+        sel = getattr(controller, "selection", None)
+        self._sel = None if sel is None or sel.mask is None else sel.mask
         self._original = None if cell is None else cell.pixels.copy()
 
         self._timer = QTimer(self)
@@ -382,7 +389,7 @@ class EffectDialog(QDialog):
                                        cancel=self._cancel)
         except Cancelled:
             return
-        self._cell.plane("rgba")[rect.slice()] = result[rect.slice()]
+        self._cell.plane("rgba")[rect.slice()] = self._fenced(result, rect)
         self._cell.dirty.add(rect)
         self.ctl.invalidate(rect)
         canvas = getattr(self.parent(), "canvas", None)
@@ -409,12 +416,16 @@ class EffectDialog(QDialog):
 
         # Restore first, so the undo entry captures the true "before".
         self._cell.plane("rgba")[...] = self._original
-        before = PixelDelta.capture(self.ctl.doc, self.ctl.active_layer.id,
-                                    self.ctl.doc.frame.id, self.ctl.doc.bounds,
-                                    self.effect.label)
+        bounds = self.ctl.doc.bounds
+        before = PixelDelta.capture(self.ctl.doc, self._target.id,
+                                    self.ctl.doc.frame.id, bounds, self.effect.label)
         result = self.effect.apply(self._original)
-        self._cell.plane("rgba")[...] = result
-        self._cell.dirty.add(self.ctl.doc.bounds)
+        # Through lerp_masked: it honours the selection's soft edge, and on an
+        # index-locked layer it lands the result as INDICES -- writing the
+        # rgba plane there would only touch a cache that is rebuilt on save.
+        self._cell.lerp_masked(bounds, result, self._sel)
+        self._cell._touched(bounds)
+        self._cell.dirty.add(bounds)
         self.ctl.history.push(before, self.effect.label,
                               frame_id=self.ctl.doc.frame.id)
         self.ctl.invalidate()
@@ -422,6 +433,15 @@ class EffectDialog(QDialog):
         self.ctl.emit("history.changed")
         self._committed = True
         super().accept()
+
+    def _fenced(self, result, rect):
+        """result over rect, limited to the selection (for the preview)."""
+        win = result[rect.slice()]
+        if self._sel is None:
+            return win
+        orig = self._original[rect.slice()].astype(np.float32)
+        k = self._sel[rect.slice()].astype(np.float32)[..., None] / 255.0
+        return np.clip(np.rint(orig + (win.astype(np.float32) - orig) * k), 0, 255).astype(np.uint8)
 
     def reject(self):
         if self._cancel is not None:

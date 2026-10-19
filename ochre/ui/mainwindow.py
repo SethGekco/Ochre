@@ -465,11 +465,23 @@ class MainWindow(QMainWindow):
         # knowing it exists.
         from ..engine.effects import EffectRegistry
         self.effects = EffectRegistry(self.ctl.db)
+        # Paint.NET's arrangement: Adjustments on its own, everything else
+        # under one Effects menu with a submenu per category -- nine
+        # top-level menus of filters would push the rest off the bar.
         groups = self.effects.grouped()
-        for category in sorted(groups):
-            menu = bar.addMenu("&" + category)
-            for name in groups[category]:
+        if "Adjustments" in groups:
+            menu = bar.addMenu("&Adjustments")
+            for name in groups["Adjustments"]:
                 self._act(menu, self.effects.label(name),
+                          lambda _c=False, n=name: self.run_effect(n))
+        effects_menu = bar.addMenu("Effe&cts")
+        order = ["Artistic", "Blurs", "Distort", "Edge & Generic", "Noise", "Photo",
+                 "Render", "Stylize"]
+        for category in sorted((c for c in groups if c != "Adjustments"),
+                               key=lambda c: (order.index(c) if c in order else 99, c)):
+            sub = effects_menu.addMenu(category.replace("&", "&&"))
+            for name in groups[category]:
+                self._act(sub, self.effects.label(name),
                           lambda _c=False, n=name: self.run_effect(n))
 
         image_menu = bar.addMenu("&Image")

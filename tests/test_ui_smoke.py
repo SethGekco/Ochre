@@ -1369,6 +1369,29 @@ def main():
     v = int(ctl2.doc.cell(ctl2.active_layer).plane("rgba")[10, 10, 0])
     check("...and OK applies the curve to the layer (100 became ~180)", abs(v - 180) <= 4, str(v))
 
+    # ---- effects respect the selection and the paint target -----------------------
+    ctl2.new_document(40, 40, background=(200, 100, 50, 255))
+    win2.canvas.bind()
+    win2._sync_all()
+    ctl2.selection.select_rect((0, 0, 20, 40))
+    dlg = EffectDialog(win2.effects.create("invert"), ctl2, win2)
+    dlg.accept()
+    px3 = ctl2.doc.cell(ctl2.active_layer).plane("rgba")
+    check("AN EFFECT CHANGES ONLY THE SELECTION",
+          tuple(px3[10, 5, :3]) == (55, 155, 205) and tuple(px3[10, 30, :3]) == (200, 100, 50))
+    ctl2.undo()
+    check("...and undoes exactly", tuple(px3[10, 5, :3]) == (200, 100, 50))
+    ctl2.deselect()
+    ctl2.add_layer_mask("reveal")
+    dlg = EffectDialog(win2.effects.create("invert"), ctl2, win2)
+    dlg.accept()
+    check("while editing a mask, an effect goes to the MASK, not the layer",
+          tuple(ctl2.doc.cell(ctl2.active_layer).plane("rgba")[5, 5, :3]) == (200, 100, 50)
+          and tuple(ctl2.doc.cell(ctl2.active_layer.mask).plane("rgba")[5, 5, :3]) == (0, 0, 0))
+    gs = win2.effects.create("gaussian_blur")
+    dlg = EffectDialog(gs, ctl2, win2)
+    dlg.reject()
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc
