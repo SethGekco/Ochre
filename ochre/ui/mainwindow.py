@@ -705,12 +705,16 @@ class MainWindow(QMainWindow):
                 self._act(menu, self.effects.label(name),
                           lambda _c=False, n=name: self.run_effect(n))
         effects_menu = bar.addMenu("Effe&cts")
+        self._act(effects_menu, "Filter &Gallery...", self.do_filter_gallery)
+        effects_menu.addSeparator()
         order = ["Artistic", "Blurs", "Distort", "Edge & Generic", "Noise", "Photo",
                  "Render", "Stylize"]
         for category in sorted((c for c in groups if c != "Adjustments"),
                                key=lambda c: (order.index(c) if c in order else 99, c)):
             sub = effects_menu.addMenu(category.replace("&", "&&"))
             for name in groups[category]:
+                if name == "filter_stack":        # the Filter Gallery's own engine
+                    continue
                 self._act(sub, self.effects.label(name),
                           lambda _c=False, n=name: self.run_effect(n))
             if category == "Distort":
@@ -1158,6 +1162,18 @@ class MainWindow(QMainWindow):
             self.recent.add(path)
             self._rebuild_recent()
         self._update_title()
+
+    def do_filter_gallery(self):
+        from .gallery import FilterGalleryDialog
+        if self.ctl.active_layer is None:
+            return None
+        dlg = FilterGalleryDialog(self.ctl, self.effects, self)
+        if dlg.exec() and dlg.stack:
+            self.ctl.apply_effect("filter_stack", {"stack": dlg.stack_json()})
+            self.canvas.refresh()
+            self.canvas.viewport().update()
+            self._update_title()
+        return dlg
 
     def run_effect(self, name):
         """Open a generated dialog for an effect and let it preview live."""

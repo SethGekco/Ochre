@@ -206,6 +206,19 @@ class ChoiceProperty(Property):
         return self.default if value not in self.choices else value
 
 
+class TextProperty(Property):
+    """Free text -- or structured data kept as JSON text (the Filter
+    Gallery's stack), so it travels through actions and files as a string."""
+
+    kind = "text"
+
+    def coerce(self, value):
+        if isinstance(value, (list, dict)):
+            import json
+            return json.dumps(value)
+        return "" if value is None else str(value)
+
+
 class ColorProperty(Property):
     kind = "color"
 

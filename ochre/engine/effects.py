@@ -562,11 +562,18 @@ BUILTIN = (BrightnessContrast, Levels, HueSaturation, Invert, Posterize,
 
 def _more_builtins():
     """Effects from sibling modules, so this file need not import them all."""
+    out = ()
     try:
         from .filters import FILTERS
+        out += tuple(FILTERS)
     except ImportError:
-        return ()
-    return tuple(FILTERS)
+        pass
+    try:
+        from .photo import PHOTO
+        out += tuple(PHOTO)
+    except ImportError:
+        pass
+    return out
 
 
 class EffectRegistry:
