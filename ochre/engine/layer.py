@@ -77,7 +77,8 @@ PASS_THROUGH = "PassThrough"
 # it; a fill layer generates its content (a colour or a gradient) at any
 # size. Adjustment and fill layers are Photoshop's; they keep edits
 # re-editable instead of baked in.
-RASTER, ADJUSTMENT, FILL = "raster", "adjustment", "fill"
+RASTER, ADJUSTMENT, FILL, TEXT = "raster", "adjustment", "fill", "text"
+GENERATED = (FILL, TEXT)      # kinds whose pixels are made from params, not stored
 
 
 class Layer(LayerNode):

@@ -482,6 +482,9 @@ def save(doc, path, compositor=None):
                                             section=1))
                 continue
             kind = getattr(node, "kind", "raster")
+            if kind == "text":
+                warnings.append("text layer %r is saved as pixels (it stays editable in .ochre)"
+                                % node.name)
             if kind == "adjustment":
                 warnings.append("adjustment layer %r is not kept in PSD" % node.name)
                 continue

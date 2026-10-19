@@ -1331,6 +1331,13 @@ class Controller:
     def set_primary(self, rgba, index=None):
         self.primary = tuple(rgba)
         self.primary_index = index
+        tool = self.tool
+        if tool is not None and tool.active and getattr(tool, "_edit", None) is not None \
+                and hasattr(tool, "set_colour") and getattr(self, "_ctx", None) is not None:
+            # Picking a colour while editing a text layer recolours the text.
+            rect = tool.set_colour(self._ctx, self.primary)
+            if rect is not None:
+                self.invalidate(rect)
         self.emit("colour.changed", which="primary", rgba=self.primary, index=index)
 
     def set_secondary(self, rgba, index=None):
@@ -1366,6 +1373,12 @@ class Controller:
             self.session.remember_tool_option(name, key, value)
         if name == self.tool_name and self.tool is not None:
             self.tool.set_option(key, value)
+            # Mid-edit tools (a text layer being typed) redraw for the change.
+            if self.tool.active and hasattr(self.tool, "options_changed") \
+                    and getattr(self, "_ctx", None) is not None:
+                rect = self.tool.options_changed(self._ctx)
+                if rect is not None:
+                    self.invalidate(rect)
         self.emit("tool.options", name=name, key=key, value=value)
         return value
 
@@ -1480,6 +1493,57 @@ class Controller:
         blob, shape = entry
         return np.frombuffer(zlib.decompress(blob), dtype=np.uint8).reshape(shape)
 
+    def text_layer_at(self, x, y):
+        """The topmost visible text layer whose text is under (x, y)."""
+        from ..engine import textlayer
+        pad = max(4.0, 2.0 * self.pick_radius)
+        for layer in reversed(self.doc.layers()):
+            if getattr(layer, "kind", "raster") == "text" and layer.effectively_visible() \
+                    and textlayer.contains(layer.params, x, y, pad):
+                return layer
+        return None
+
+    def _prepare_text_layer(self, x, y):
+        """Text tool press: edit the text layer clicked, or start a new one
+        above the active layer. True when a new one was made."""
+        from ..engine.layer import TEXT
+        hit = self.text_layer_at(x, y)
+        if hit is not None:
+            if hit is not self.active_layer:
+                self.set_active_layer(hit)
+            return False
+        active = self.active_layer
+        parent, index = None, None
+        if active is not None and active.parent is not None:
+            parent = active.parent if active.parent is not self.doc.root else None
+            index = active.parent.index_of(active) + 1
+        # Made outside history: committing the text records the layer and
+        # its text as ONE undo step, and an empty click leaves no trace.
+        self._text_prev = active
+        layer = self.doc.add_layer("Text", parent=parent, index=index)
+        layer.kind = TEXT
+        layer.params = {}
+        self.set_active_layer(layer)
+        self.compositor.invalidate()
+        self.emit("layers.changed")
+        return True
+
+    def _repair_active(self):
+        """A tool may remove the layer it was working on (an empty new text
+        layer, cancelled or committed blank): go back to the one before."""
+        if self.active_layer is None or self.doc.layer(self.active_layer.id) is not None:
+            return False
+        prev = getattr(self, "_text_prev", None)
+        if prev is not None and self.doc.layer(prev.id) is not None:
+            self.set_active_layer(prev)
+        else:
+            leaves = self.doc.layers()
+            self.set_active_layer(leaves[-1] if leaves else None)
+        self.compositor.invalidate()
+        self.invalidate()
+        self.emit("layers.changed")
+        return True
+
     def begin_stroke(self, x, y, pressure=1.0, modifiers=0, button=1):
         if self.tool is None or self.active_layer is None:
             return None
@@ -1501,7 +1565,12 @@ class Controller:
             self._ctx.pick_radius = self.pick_radius
             rect = self.tool.begin(self._ctx, ToolEvent(x, y, pressure, modifiers, button))
             return rect
+        text_new = False
+        if (getattr(self.tool, "name", "") == "text" and self.tool.option("layer", True)
+                and not getattr(self.tool, "changes_selection", False) and not self.tool.active):
+            text_new = self._prepare_text_layer(x, y)
         self._ctx = self._context()
+        self._ctx.text_layer_new = text_new
         if self.tool.wants_stroke:
             self.compositor.build_cache(self.active_layer)
         rect = self.tool.begin(self._ctx, ToolEvent(x, y, pressure, modifiers, button))
@@ -1583,6 +1652,11 @@ class Controller:
         if tool is None or not tool.active or not hasattr(tool, "finish"):
             return None
         result = tool.finish(self._ctx)
+        if self._repair_active():
+            self.emit("history.changed")
+        if getattr(tool, "name", "") == "text":
+            self.compositor.invalidate()
+            self.emit("layers.changed")
         if getattr(tool, "shows_paths", False):
             self.emit("paths.changed")
         # The tool decides whether it is done: Enter on an open cage CLOSES
@@ -1612,6 +1686,7 @@ class Controller:
         if self.tool is None or not self.tool.active:
             return None
         rect = self.tool.cancel(self._ctx)
+        self._repair_active()
         if hasattr(self, "_sel_before"):
             del self._sel_before
         if rect is not None:

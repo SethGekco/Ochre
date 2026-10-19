@@ -470,7 +470,7 @@ class GeometryDelta(Command):
     """
 
     __slots__ = ("label", "width", "height", "_cells", "_selection",
-                 "_sel_blob", "_sel_shape", "_paths", "_marks")
+                 "_sel_blob", "_sel_shape", "_paths", "_marks", "_params")
 
     def __init__(self, width, height, cells, selection=None, label="Transform",
                  paths=None):
@@ -479,6 +479,7 @@ class GeometryDelta(Command):
         # with it.
         self._paths = paths
         self._marks = None
+        self._params = None       # text layers' params (position and size move too)
         self.width = width
         self.height = height
         self._cells = cells             # {(layer_id, frame_id): (PixelDelta|None, bbox)}
@@ -504,6 +505,8 @@ class GeometryDelta(Command):
         paths = ([p.copy() for p in doc.paths], doc.active_path)
         out = GeometryDelta(doc.width, doc.height, cells, selection, label, paths)
         out._marks = {a: list(getattr(doc, a, [])) for a in MARKS}
+        out._params = {l.id: dict(l.params) for l in doc.layers()
+                       if getattr(l, "kind", "raster") == "text"}
         return out
 
     def undo(self, doc):
@@ -537,6 +540,10 @@ class GeometryDelta(Command):
         if self._marks is not None:
             for a, v in self._marks.items():
                 setattr(doc, a, list(v))
+        for lid, params in (self._params or {}).items():
+            node = doc.layer(lid)
+            if node is not None:
+                node.params = dict(params)
         return opposite, doc.bounds
 
     def nbytes(self):

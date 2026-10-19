@@ -77,6 +77,7 @@ class ToolContext:
         self.clip = None              # the clipboard Clip, for pattern stamping
         self.history_source = None    # callable(layer_id, frame_id) -> rgba or None
         self.composite = None         # callable() -> the merged image, rgba
+        self.text_layer_new = False   # the text layer under the tool was just made
         # How close, in DOCUMENT pixels, counts as "on" a point -- a few
         # screen pixels, so the canvas updates it as the zoom changes.
         self.pick_radius = 4.0

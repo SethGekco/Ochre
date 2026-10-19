@@ -670,6 +670,18 @@ class MainWindow(QMainWindow):
             AdjustmentLayerDialog(self.ctl, layer, self.effects, self).exec()
         elif kind == "fill":
             FillLayerDialog(self.ctl, layer, self).exec()
+        elif kind == "text":
+            # Into the text, ready to type, at the end of it.
+            from ..engine import textlayer
+            box = textlayer.bounds(layer.params)
+            self.ctl.set_tool("text")
+            if box is not None:
+                x, y = box.x1 - 1, box.y1 - 1
+                self.ctl.begin_stroke(x, y)
+                self.ctl.end_stroke(x, y)
+                self.ctl.tool.caret_end()
+                self.canvas._start_caret()
+                self.canvas.setFocus()
         else:
             return False
         self.canvas.refresh()

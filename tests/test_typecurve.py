@@ -98,7 +98,7 @@ def main():
 
     # ---- vertical text -----------------------------------------------------------
     ctl, cell = fresh()
-    ctl.set_tool("text_vertical", text="ABC", size=24)
+    ctl.set_tool("text_vertical", layer=False, text="ABC", size=24)
     ctl.begin_stroke(70, 10)
     ctl.end_stroke(70, 10)
     rect = ctl.tool.caret_rect(ctl._ctx)
@@ -108,7 +108,7 @@ def main():
     check("vertical text stacks top to bottom (taller than wide)",
           ys.size and (ys.max() - ys.min()) > 2 * (xs.max() - xs.min()))
     ctl.undo()
-    ctl.set_tool("text_vertical", text="AB\nCD", size=20)
+    ctl.set_tool("text_vertical", layer=False, text="AB\nCD", size=20)
     ctl.begin_stroke(40, 10)
     ctl.end_stroke(40, 10)
     ctl.finish_tool()
@@ -118,7 +118,7 @@ def main():
     ctl.undo()
 
     # caret typing in vertical mode goes down the column
-    ctl.set_tool("text_vertical", size=20)
+    ctl.set_tool("text_vertical", layer=False, size=20)
     ctl.begin_stroke(60, 10)
     ctl.end_stroke(60, 10)
     ctl.tool.insert(ctl._ctx, "X")

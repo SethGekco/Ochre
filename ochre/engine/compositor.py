@@ -58,7 +58,9 @@ import numpy as np
 from . import accel
 from .blend import DEFAULT as DEFAULT_BLENDS
 from .geometry import Rect
-from .layer import ADJUSTMENT, FILL, PASS_THROUGH
+from .layer import ADJUSTMENT, FILL, PASS_THROUGH, TEXT
+
+_GENERATED = (FILL, TEXT)
 
 GROUP = "group"      # kind of a _Leaf standing for a whole isolated group
 
@@ -157,7 +159,7 @@ class Compositor:
                 continue
             kind = getattr(node, "kind", "raster")
             surface = None
-            if kind not in (ADJUSTMENT, FILL):
+            if kind not in (ADJUSTMENT,) + _GENERATED:
                 surface = self.doc.cells.get((node.id, frame.id))
                 if surface is None or surface.is_empty():
                     if not node.clip:
@@ -206,8 +208,12 @@ class Compositor:
             for child in self._visible_leaves(layer, frame):
                 self._blend_leaf(out, child, r, frame)
             return out
-        if getattr(layer, "kind", "raster") == FILL:
+        kind = getattr(layer, "kind", "raster")
+        if kind == FILL:
             return fill_pixels(layer.params, r, self.doc.width, self.doc.height)
+        if kind == TEXT:
+            from . import textlayer
+            return textlayer.pixels(layer.params, r)
         return leaf.surface.view(r, "rgba")
 
     def _layer_mask(self, layer, r, frame):
@@ -264,14 +270,17 @@ class Compositor:
         if not styles or not layerstyles.enabled(styles):
             return None
         surface = leaf.surface
-        revision = None if surface is None else (id(surface), surface.revision,
-                                                 surface.content_bbox)
+        revision = None if surface is None or getattr(layer, "kind", "raster") != "raster" \
+            else (id(surface), surface.revision, surface.content_bbox)
         key = (frame.id, revision, repr(sorted((k, sorted(v.items())) for k, v in styles.items())),
                repr(sorted(layer.params.items())))
         hit = self._styles.get(layer.id)
         if hit is not None and hit[0] == key:
             return hit[1:]
-        if surface is not None:
+        if getattr(layer, "kind", "raster") == TEXT:
+            from . import textlayer
+            box = textlayer.bounds(layer.params) or Rect(0, 0, 1, 1)
+        elif surface is not None:
             box = surface.content_bbox
         else:
             box = self.doc.bounds
@@ -291,7 +300,7 @@ class Compositor:
         mask = self._coverage(leaf, r, frame)
         styled = None if layer.is_group else (
             self._style_images(leaf, frame) if leaf.surface is not None or
-            getattr(layer, "kind", "raster") == FILL else None)
+            getattr(layer, "kind", "raster") in _GENERATED else None)
         sub = None
         if styled is not None:
             srect = styled[0].intersect(r)
@@ -437,9 +446,9 @@ class Compositor:
             node = self.doc.layer(active_id)
             if node is not None and node.effectively_visible() and node.opacity > 0:
                 # The surface may have been created since the cache was built.
-                if leaf.surface is None and getattr(node, "kind", "raster") not in (ADJUSTMENT, FILL):
+                if leaf.surface is None and getattr(node, "kind", "raster") not in (ADJUSTMENT,) + _GENERATED:
                     leaf.surface = self.doc.cells.get((active_id, frame.id))
-                if leaf.surface is not None or getattr(node, "kind", "raster") in (ADJUSTMENT, FILL):
+                if leaf.surface is not None or getattr(node, "kind", "raster") in (ADJUSTMENT,) + _GENERATED:
                     self._blend_leaf(window, leaf, r, frame)
 
         if self._above is not None:

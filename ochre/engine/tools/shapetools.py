@@ -380,7 +380,22 @@ class TextTool(_DragTool):
                           choices=("pixels", "selection"),
                           labels={"pixels": "Text", "selection": "Selection (type mask)"},
                           tip="Selection makes the letters a selection instead of "
-                              "paint: Photoshop's Type Mask tools."))
+                              "paint: Photoshop's Type Mask tools."),
+                    O.Opt("layer", O.BOOL, True, "Editable text layer",
+                          tip="On: the text goes on its own text layer and stays "
+                              "editable -- click it again to change it. Off: it is "
+                              "painted onto the current layer, as in Paint.NET."),
+                    O.Opt("box_width", O.INT, 0, "Box", 0, 20000, 10, suffix=" px",
+                          tip="Paragraph box width: lines wrap to fit. 0 is point text. "
+                              "Dragging when you start a text layer sets it."),
+                    O.Opt("warp", O.CHOICE, "none", "Warp",
+                          choices=("none", "arc", "arch", "bulge", "flag", "wave", "rise", "fish"),
+                          tip="Photoshop's Warp Text styles (text layers)."),
+                    O.Opt("bend", O.INT, 50, "Bend", -100, 100, 5, suffix=" %"))
+
+    # Keys a text layer's params share with this tool's options.
+    _LAYER_KEYS = ("text", "font", "size", "align", "line_spacing", "orientation",
+                   "antialias", "box_width", "warp", "bend")
 
     @property
     def changes_selection(self):
@@ -391,9 +406,30 @@ class TextTool(_DragTool):
     def vertical(self):
         return self.option("orientation", "horizontal") == "vertical"
 
+    def _display_text(self):
+        """The string as laid out: wrapped to the box, when there is one.
+        Wrapping only turns spaces into newlines, so indices are unchanged."""
+        body = str(self.option("text", ""))
+        width = int(self.option("box_width", 0) or 0)
+        if width > 0 and not self.vertical and getattr(self, "_edit", None) is not None:
+            from .. import textlayer
+            body = textlayer.wrap(body, str(self.option("font", "DejaVu Sans")),
+                                  int(self.option("size", 24)), width)
+        return body
+
+    def _anchor_x(self):
+        """Where alignment hangs from: the anchor, or the box edge or middle."""
+        from .. import text as textmod
+        ax = self._anchor[0]
+        width = int(self.option("box_width", 0) or 0)
+        if width > 0 and not self.vertical and getattr(self, "_edit", None) is not None:
+            align = self._align()
+            ax += width / 2.0 if align == textmod.CENTER else width if align == textmod.RIGHT else 0
+        return ax
+
     def _layout(self):
         from .. import text as textmod
-        body = str(self.option("text", ""))
+        body = self._display_text()
         if self.vertical:
             return textmod.vertical_layout(
                 body, family=str(self.option("font", "DejaVu Sans")),
@@ -412,16 +448,94 @@ class TextTool(_DragTool):
         # Vertical text anchors at its top-left; alignment is a horizontal idea.
         return textmod.LEFT if self.vertical else str(self.option("align", textmod.LEFT))
 
+    # ---- text layers -----------------------------------------------------
+    # When the layer under the tool is a TEXT layer (the controller makes
+    # or picks one), editing changes that layer's params instead of painting:
+    # the compositor renders them. self._edit holds the session.
+
+    def _layer_params(self):
+        p = {k: self.option(k) for k in self._LAYER_KEYS}
+        p["text"] = str(p["text"] or "")
+        p["color"] = tuple(self._colour)
+        p["x"], p["y"] = float(self._anchor[0]), float(self._anchor[1])
+        return p
+
+    def _apply(self, ctx):
+        """Push the tool's state into the layer; return the rect to repaint."""
+        from .. import layerstyles, textlayer
+        layer = self._edit["layer"]
+        old = textlayer.bounds(layer.params)
+        layer.params = self._layer_params()
+        new = textlayer.bounds(layer.params)
+        rects = [r for r in (old, new, self._edit.get("rect")) if r is not None]
+        self._edit["rect"] = new
+        if not rects:
+            return None
+        rect = rects[0]
+        for r in rects[1:]:
+            rect = rect.union(r)
+        rect = rect.inflated(layerstyles.reach(getattr(layer, "styles", {})) + 2)
+        clipped = rect.clipped_to(ctx.doc.width, ctx.doc.height)
+        if clipped is not None:
+            ctx.doc.cell(layer).dirty.add(clipped)
+        return clipped
+
+    def _begin_layer_edit(self, ctx, event):
+        layer = ctx.layer
+        new = bool(getattr(ctx, "text_layer_new", False)) or not layer.params.get("text")
+        self._edit = {"layer": layer, "new": new, "rect": None,
+                      "before": None if new else dict(layer.params),
+                      "start": (event.x, event.y)}
+        if new:
+            self._anchor = (event.x, event.y)
+            self._colour = tuple(ctx.colour_for(event))
+            self.set_option("box_width", 0)
+        else:
+            from .. import textlayer
+            p = textlayer.full(layer.params)
+            for k in self._LAYER_KEYS:
+                self.set_option(k, p[k])
+            self._anchor = (float(p["x"]), float(p["y"]))
+            colour = p["color"]
+            self._colour = tuple(int(v) for v in (colour.split(",") if isinstance(colour, str) else colour))
+            self.caret_from_point(ctx, event.x, event.y)
+        return self._apply(ctx)
+
+    def options_changed(self, ctx):
+        """Font, size, warp... changed in the options bar mid-edit."""
+        if getattr(self, "_edit", None) is not None:
+            return self._apply(ctx)
+        return None
+
+    def set_colour(self, ctx, rgba):
+        """The primary colour changed while editing a text layer: recolour it."""
+        if getattr(self, "_edit", None) is None:
+            return None
+        self._colour = tuple(rgba)
+        return self._apply(ctx)
+
     def on_begin(self, ctx, event):
         if ctx.cell is None:
             return None
+        self._edit = None
+        if getattr(ctx.layer, "kind", "raster") == "text" and not self.changes_selection:
+            return self._begin_layer_edit(ctx, event)
         self._session = self._begin_session(ctx)
         self._anchor = (event.x, event.y)
         self._last_rect = None
         return self._render(ctx, event)
 
     def on_motion(self, ctx, event):
-        """Dragging repositions the text rather than resizing it."""
+        """Dragging repositions the text rather than resizing it -- except
+        when starting a text layer, where a drag draws its paragraph box."""
+        if getattr(self, "_edit", None) is not None:
+            if not self._edit["new"]:
+                return None
+            sx, sy = self._edit["start"]
+            width = abs(event.x - sx)
+            self._anchor = (min(sx, event.x), sy)
+            self.set_option("box_width", int(width) if width > 8 else 0)
+            return self._apply(ctx)
         if self._session is None:
             return None
         self._anchor = (event.x, event.y)
@@ -429,6 +543,11 @@ class TextTool(_DragTool):
 
     def on_end(self, ctx, event):
         """Finish POSITIONING. The session stays open so typing can continue."""
+        if getattr(self, "_edit", None) is not None:
+            if self._edit["new"]:
+                self.on_motion(ctx, event)
+            self.active = True          # still editing: typing goes to the layer
+            return self._edit.get("rect")
         if self._session is None:
             return None
         self._anchor = (event.x, event.y)
@@ -526,7 +645,7 @@ class TextTool(_DragTool):
         lay = self._layout()
         cx, cy, extent = lay.caret_at(self.caret)
 
-        ax, ay = self._anchor
+        ax, ay = self._anchor_x(), self._anchor[1]
         origin = textmod.place(lay.coverage, ax, ay, self._align()) if lay.width else None
         ox = origin.x if origin is not None else int(round(ax))
         oy = origin.y if origin is not None else int(round(ay))
@@ -542,7 +661,7 @@ class TextTool(_DragTool):
         if self._anchor is None:
             return self.caret
         lay = self._layout()
-        ax, ay = self._anchor
+        ax, ay = self._anchor_x(), self._anchor[1]
         origin = textmod.place(lay.coverage, ax, ay, self._align()) if lay.width else None
         ox = origin.x if origin is not None else int(round(ax))
         oy = origin.y if origin is not None else int(round(ay))
@@ -553,6 +672,8 @@ class TextTool(_DragTool):
         """Replace the string and redraw. What a UI calls on every keystroke."""
         self.set_option("text", text)
         self._caret = min(getattr(self, "_caret", len(text)), len(text))
+        if getattr(self, "_edit", None) is not None:
+            return self._apply(ctx)
         if self._session is None:
             return None
         restored = self._session.restore(self._last_rect)
@@ -565,8 +686,32 @@ class TextTool(_DragTool):
     def finish(self, ctx):
         return self.commit_text(ctx)
 
+    def _commit_layer(self, ctx):
+        from ..commands import PropertyDelta, StructureDelta
+        edit, self._edit = self._edit, None
+        self.active = False
+        layer = edit["layer"]
+        body = str(self.option("text", ""))
+        rect = edit.get("rect")
+        if edit["new"]:
+            if not body.strip():
+                # Clicked and typed nothing: no layer, no history.
+                ctx.doc.remove_layer(layer)
+                self._clear()
+                return rect or ctx.doc.bounds
+            layer.name = body.strip().splitlines()[0][:40]
+            if ctx.history is not None:
+                ctx.history.push(StructureDelta.insertion(ctx.doc, layer, "Text"), "Text")
+        elif layer.params != edit["before"] and ctx.history is not None:
+            ctx.history.push(PropertyDelta(layer.id, "params", edit["before"], "Edit Text"),
+                             "Edit Text")
+        self._clear()
+        return rect or ctx.doc.bounds
+
     def commit_text(self, ctx):
         """Finish the edit and push one history entry."""
+        if getattr(self, "_edit", None) is not None:
+            return self._commit_layer(ctx)
         if self._session is None:
             return None
         if self.changes_selection:
@@ -580,6 +725,17 @@ class TextTool(_DragTool):
         return cmd
 
     def on_cancel(self, ctx):
+        edit = getattr(self, "_edit", None)
+        if edit is not None:
+            self._edit = None
+            rect = edit.get("rect") or ctx.doc.bounds
+            if edit["new"]:
+                ctx.doc.remove_layer(edit["layer"])
+            else:
+                edit["layer"].params = edit["before"]
+                ctx.doc.cell(edit["layer"]).dirty.add(ctx.doc.bounds)
+            self._clear()
+            return rect
         rect = super().on_cancel(ctx)
         self._clear()
         return rect

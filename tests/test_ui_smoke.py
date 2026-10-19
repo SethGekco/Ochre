@@ -584,7 +584,7 @@ def main():
 
     # Text placed so it OVERLAPS the stroke: that overlap is what made the
     # old behaviour corrupt rather than merely surprising.
-    ctl.set_tool("text")
+    ctl.set_tool("text", layer=False)      # painted text; text layers: test_textlayers
     ctl.tool.set_option("size", 40)
     ctl.begin_stroke(20, 45, 1.0, 0, 1)
     ctl.end_stroke(20, 45, 1.0, 0)
@@ -1408,6 +1408,48 @@ def main():
     exp.write(target)
     check("...and writes exactly those bytes", os.path.getsize(target) == len(exp.data))
     exp.reject()
+
+    # ---- text layers through the window ----------------------------------------
+    ctl2.new_document(240, 140, background=(255, 255, 255, 255))
+    win2.canvas.bind()
+    win2._sync_all()
+    for _ in range(4):
+        app.processEvents()
+    v = win2.canvas.view
+    vp2 = win2.canvas.viewport()
+
+    def at6(dx, dy):
+        wx, wy = v.doc_to_widget(dx, dy)
+        return QPoint(int(round(wx)), int(round(wy)))
+    bg6 = ctl2.active_layer
+    ctl2.set_tool("text", size=40)
+    QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at6(20, 30))
+    QTest.keyClicks(win2.canvas, "Ochre")
+    app.processEvents()
+    tl = ctl2.active_layer
+    check("A REAL CLICK AND TYPING MAKE AN EDITABLE TEXT LAYER",
+          tl is not bg6 and tl.kind == "text" and tl.params.get("text") == "Ochre",
+          str(getattr(tl, "params", None)))
+    QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at6(200, 120))
+    app.processEvents()
+    win2.canvas.cancel_text()
+    app.processEvents()
+    check("clicking away commits it (and an empty second click leaves nothing)",
+          tl.name == "Ochre" and len([l for l in ctl2.doc.layers() if l.kind == "text"]) == 1
+          and ctl2.active_layer is not None)
+    from ochre.engine import textlayer as _tlm
+    b6 = _tlm.bounds(tl.params)
+    QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at6(b6.x1 - 2, b6.y + b6.h // 2))
+    QTest.keyClick(win2.canvas, Qt.Key_End)
+    QTest.keyClicks(win2.canvas, "!")
+    win2.canvas.commit_text()
+    app.processEvents()
+    check("clicking the text again edits it in place", tl.params["text"] == "Ochre!"
+          and ctl2.history_labels()[-1] == "Edit Text", str(tl.params["text"]))
+    win2.canvas.repaint()
+    check("the Layers dock marks it as text", any("[text]" in win2.layers_dock.list.item(i).text()
+                                                  for i in range(win2.layers_dock.list.count())))
+    ctl2.set_tool("brush")
 
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.

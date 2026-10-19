@@ -1237,7 +1237,9 @@ class CanvasView(QAbstractScrollArea):
         tool = self._text_tool()
         if tool is None:
             return None
-        rect = tool.cancel(self.ctl._context())
+        # Through the controller, which also repairs the active layer if the
+        # cancel removed an empty new text layer.
+        rect = self.ctl.cancel_stroke()
         self._stop_caret()
         self.refresh()
         self.viewport().update()

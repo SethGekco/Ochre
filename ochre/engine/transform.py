@@ -139,6 +139,23 @@ def _map_paths(doc, fn):
     _map_marks(doc, fn)
 
 
+def _map_text(doc, fn, scale=None):
+    """Text layers follow the image: their anchor moves with it and, on a
+    resize, the type and its box scale too -- text that stays text."""
+    for layer in doc.layers():
+        if getattr(layer, "kind", "raster") != "text" or not layer.params:
+            continue
+        p = dict(layer.params)
+        x, y = fn((float(p.get("x", 0)), float(p.get("y", 0))))
+        p["x"], p["y"] = x, y
+        if scale is not None:
+            sx, sy = scale
+            p["size"] = max(1, int(round(float(p.get("size", 24)) * sy)))
+            if p.get("box_width"):
+                p["box_width"] = max(1, int(round(float(p["box_width"]) * sx)))
+        layer.params = p
+
+
 def _map_marks(doc, fn):
     w, h = doc.width, doc.height
     doc.samplers = [tuple(fn((x, y))) for x, y in getattr(doc, "samplers", [])]
@@ -181,6 +198,7 @@ def resize_image(doc, width, height, method=BILINEAR):
                                 int(np.ceil(r.x1 * sx)), int(np.ceil(r.y1 * sy)))
 
     _map_paths(doc, lambda p: (p[0] * sx, p[1] * sy))
+    _map_text(doc, lambda p: (p[0] * sx, p[1] * sy), (sx, sy))
     return _rebuild(doc, width, height, convert, bbox)
 
 
@@ -205,6 +223,7 @@ def reframe(doc, width, height, dx, dy):
         return out
 
     _map_paths(doc, lambda p: (p[0] + dx, p[1] + dy))
+    _map_text(doc, lambda p: (p[0] + dx, p[1] + dy))
     return _rebuild(doc, width, height, convert, lambda r: r.translated(dx, dy))
 
 
