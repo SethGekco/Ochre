@@ -292,16 +292,35 @@ class Compositor:
     def _layer_mask(self, layer, r, frame):
         if layer.is_group:
             return None
+        out = None
         m = getattr(layer, "mask", None)
-        if m is None or not getattr(layer, "mask_enabled", True):
-            return None
-        cell = self.doc.cells.get((m.id, frame.id))
-        if cell is None or cell.is_empty():
-            return None
-        px = cell.view(r, "rgba")
-        if px is None:
-            return None
-        return mask_value(px)
+        if m is not None and getattr(layer, "mask_enabled", True):
+            cell = self.doc.cells.get((m.id, frame.id))
+            if cell is not None and not cell.is_empty():
+                px = cell.view(r, "rgba")
+                if px is not None:
+                    out = mask_value(px)
+        vm = getattr(layer, "vector_mask", None)
+        if vm is not None and getattr(layer, "vector_mask_enabled", True):
+            cov = self._vector_coverage(vm)[r.slice()]
+            out = cov if out is None else accel.spec._mul(
+                out.astype(np.uint32), cov.astype(np.uint32)).astype(np.uint8)
+        return out
+
+    def _vector_coverage(self, path):
+        """A vector mask rasterised at the canvas size, cached per path object
+        (vector masks are replaced, never edited in place)."""
+        from . import paths
+        key = (id(path), self.doc.width, self.doc.height)
+        cache = getattr(self, "_vmask", None)
+        if cache is None or len(cache) > 32:
+            cache = self._vmask = {}
+        hit = cache.get(key)
+        if hit is not None and hit[0] is path:
+            return hit[1]
+        cov = paths.fill_mask(path, self.doc.width, self.doc.height, antialias=True)
+        cache[key] = (path, cov)
+        return cov
 
     def _coverage(self, leaf, r, frame):
         """Mask for a leaf over r: its layer mask, times its clipping base."""
@@ -636,6 +655,13 @@ def fill_pixels(params, r, width, height):
     """A fill layer's content over r: a solid colour or a linear gradient."""
     kind = params.get("type", "solid")
     out = np.empty((r.h, r.w, 4), dtype=np.uint8)
+    if kind == "pattern":
+        from . import patterns
+        t = patterns.decode_tile(params.get("tile")) if params.get("tile") else None
+        if t is None:
+            t = patterns.builtin_tile(params.get("pattern", "checker"))
+        return np.ascontiguousarray(patterns.fill(
+            t, r, max(0.05, float(params.get("scale", 100)) / 100.0)))
     if kind == "gradient":
         a = np.array(_colour(params.get("start"), (0, 0, 0, 255)), np.float64)
         b = np.array(_colour(params.get("end"), (255, 255, 255, 255)), np.float64)

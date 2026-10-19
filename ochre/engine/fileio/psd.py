@@ -520,6 +520,8 @@ def save(doc, path, compositor=None):
                 continue
             if getattr(node, "styles", None):
                 warnings.append("layer styles on %r are flattened into its pixels" % node.name)
+            if getattr(node, "vector_mask", None) is not None:
+                warnings.append("the vector mask on %r is applied to its pixels" % node.name)
             cell = doc.cells.get((node.id, frame.id))
             if kind == "raster" and (cell is None or cell.is_empty()):
                 px = np.zeros((height, width, 4), np.uint8)

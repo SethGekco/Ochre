@@ -472,7 +472,8 @@ class GeometryDelta(Command):
     """
 
     __slots__ = ("label", "width", "height", "_cells", "_selection",
-                 "_sel_blob", "_sel_shape", "_paths", "_marks", "_params", "_regions")
+                 "_sel_blob", "_sel_shape", "_paths", "_marks", "_params", "_regions",
+                 "_vmasks")
 
     def __init__(self, width, height, cells, selection=None, label="Transform",
                  paths=None):
@@ -483,6 +484,7 @@ class GeometryDelta(Command):
         self._marks = None
         self._params = None       # text layers' params (position and size move too)
         self._regions = None      # artboards' and frames' regions
+        self._vmasks = None       # layers' vector masks (Path objects, never mutated)
         self.width = width
         self.height = height
         self._cells = cells             # {(layer_id, frame_id): (PixelDelta|None, bbox)}
@@ -512,6 +514,8 @@ class GeometryDelta(Command):
                        if getattr(l, "kind", "raster") in ("text", "smart")}
         out._regions = {g.id: dict(g.region) for g in doc.root.walk()
                         if g.is_group and getattr(g, "region", None)}
+        out._vmasks = {l.id: l.vector_mask for l in doc.layers()
+                       if getattr(l, "vector_mask", None) is not None}
         return out
 
     def undo(self, doc):
@@ -553,6 +557,10 @@ class GeometryDelta(Command):
             node = doc.layer(gid)
             if node is not None:
                 node.region = dict(region)
+        for lid, vm in (self._vmasks or {}).items():
+            node = doc.layer(lid)
+            if node is not None:
+                node.vector_mask = vm
         return opposite, doc.bounds
 
     def nbytes(self):

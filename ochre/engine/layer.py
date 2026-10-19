@@ -101,6 +101,11 @@ class Layer(LayerNode):
         # Photoshop's Fill opacity: scales the layer's own pixels but not its
         # layer styles (a stroke stays at full strength at Fill 0).
         self.fill_opacity = 255
+        # A vector mask: a Path whose inside shows the layer, resolution-
+        # independent (it follows resizes exactly). Never mutated in place --
+        # geometry changes replace it -- so history can hold references.
+        self.vector_mask = None
+        self.vector_mask_enabled = True
         # Knockout: "none", "shallow" (punch through to the bottom of the
         # enclosing group) or "deep" (to the bottom layer of the image).
         self.knockout = "none"

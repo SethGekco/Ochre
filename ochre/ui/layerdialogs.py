@@ -126,7 +126,8 @@ class FillLayerDialog(QDialog):
         self.kind = QComboBox()
         self.kind.addItem("Solid colour", "solid")
         self.kind.addItem("Gradient", "gradient")
-        self.kind.setCurrentIndex(0 if p.get("type", "solid") == "solid" else 1)
+        self.kind.addItem("Pattern", "pattern")
+        self.kind.setCurrentIndex(max(0, self.kind.findData(p.get("type", "solid"))))
         form.addRow("Type", self.kind)
         self.color = ColourButton(p.get("color", ctl.primary), self._changed, alpha=True)
         self.start = ColourButton(p.get("start", ctl.primary), self._changed, alpha=True)
@@ -139,8 +140,21 @@ class FillLayerDialog(QDialog):
         form.addRow("Start", self.start)
         form.addRow("End", self.end)
         form.addRow("Angle", self.angle)
+        from ..engine import patterns
+        self.pattern = QComboBox()
+        for pname in patterns.names(getattr(ctl, "state_dir", None)):
+            self.pattern.addItem(pname.capitalize() if pname in patterns.BUILTIN else pname, pname)
+        self.pattern.setCurrentIndex(max(0, self.pattern.findData(p.get("pattern", "checker"))))
+        self.scale = QDoubleSpinBox()
+        self.scale.setRange(5, 1000)
+        self.scale.setValue(float(p.get("scale", 100)))
+        self.scale.setSuffix(" %")
+        form.addRow("Pattern", self.pattern)
+        form.addRow("Scale", self.scale)
         self.kind.currentIndexChanged.connect(lambda _i: self._changed())
         self.angle.valueChanged.connect(lambda _v: self._changed())
+        self.pattern.currentIndexChanged.connect(lambda _i: self._changed())
+        self.scale.valueChanged.connect(lambda _v: self._changed())
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -149,6 +163,12 @@ class FillLayerDialog(QDialog):
     def values(self):
         if self.kind.currentData() == "solid":
             return {"type": "solid", "color": self.color.value}
+        if self.kind.currentData() == "pattern":
+            from ..engine import patterns
+            pname = self.pattern.currentData()
+            tile = "" if pname in patterns.BUILTIN else patterns.encode_tile(
+                patterns.tile(pname, getattr(self.ctl, "state_dir", None)))
+            return {"type": "pattern", "pattern": pname, "scale": self.scale.value(), "tile": tile}
         return {"type": "gradient", "start": self.start.value, "end": self.end.value,
                 "angle": self.angle.value()}
 
@@ -218,6 +238,24 @@ class LayerStyleDialog(QDialog):
         current = layerstyles.params(self.working, name)
         for key, default in layerstyles.STYLES[name][1].items():
             value = current[key]
+            if key == "tile":
+                continue                 # embedded with the pattern, never edited directly
+            if key == "pattern":
+                from ..engine import patterns
+                w = QComboBox()
+                for pname in patterns.names(getattr(self.ctl, "state_dir", None)):
+                    w.addItem(pname.capitalize() if pname in patterns.BUILTIN else pname, pname)
+                w.setCurrentIndex(max(0, w.findData(value)))
+                w.currentIndexChanged.connect(
+                    lambda _i, n=name, ww=w: self._set_pattern(n, ww.currentData()))
+                form.addRow("Pattern", w)
+                continue
+            if key == "invert":
+                w = QCheckBox("Invert")
+                w.setChecked(bool(int(value)))
+                w.toggled.connect(lambda on, n=name, k=key: self._set(n, k, 1 if on else 0))
+                form.addRow("", w)
+                continue
             if isinstance(default, tuple):
                 w = ColourButton(value, lambda v, n=name, k=key: self._set(n, k, v))
             elif key == "position":
@@ -236,6 +274,14 @@ class LayerStyleDialog(QDialog):
                 w.valueChanged.connect(lambda v, n=name, k=key: self._set(n, k, int(v)))
             form.addRow(key.replace("_", " ").capitalize(), w)
         return page
+
+    def _set_pattern(self, name, pname):
+        """Choosing a pattern embeds its tile when it is a user pattern, so the
+        document renders the same where that pattern was never defined."""
+        from ..engine import patterns
+        self.working.setdefault(name, {})["tile"] = "" if pname in patterns.BUILTIN else \
+            patterns.encode_tile(patterns.tile(pname, getattr(self.ctl, "state_dir", None)))
+        self._set(name, "pattern", pname)
 
     def _blend_if_page(self):
         page = QWidget()

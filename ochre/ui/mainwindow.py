@@ -603,6 +603,9 @@ class MainWindow(QMainWindow):
                   "Shift+Backspace")
         self._act(edit_menu, "S&mooth Fill (Inpaint)",
                   lambda: self._busy(self.ctl.inpaint_selection, "smooth"))
+        self._act(edit_menu, "F&ill...", self.do_fill_dialog, "Shift+F5")
+        self._act(edit_menu, "Stro&ke...", self.do_stroke_dialog)
+        self._act(edit_menu, "Define &Pattern...", self.do_define_pattern)
         edit_menu.addSeparator()
         self._act(edit_menu, "Sk&y Replacement...", self.do_sky_replacement)
         edit_menu.addSeparator()
@@ -634,6 +637,8 @@ class MainWindow(QMainWindow):
         sel_menu.addSeparator()
         self._act(sel_menu, "Refine &Edge...", self.do_refine_edge)
         self._act(sel_menu, "S&ky", lambda: self._sel(self.ctl.select_sky))
+        self._act(sel_menu, "Color &Range...", self.do_color_range)
+        self._act(sel_menu, "&Focus Area...", self.do_focus_area)
         sel_menu.addSeparator()
         self._act(sel_menu, "Sa&ve Selection", lambda: self.ctl.save_selection())
         self._act(sel_menu, "Loa&d Selection...", self.do_load_selection)
@@ -729,6 +734,10 @@ class MainWindow(QMainWindow):
         self._act(image_menu, "Content-Aware Sc&ale...", self.do_content_aware_scale,
                   "Ctrl+Alt+Shift+C")
         self._act(image_menu, "Canvas &Size...", self.do_canvas_size, "Ctrl+Shift+R")
+        self._act(image_menu, "&Trim...", self.do_trim)
+        self._act(image_menu, "D&uplicate...", self.do_duplicate_image)
+        self._act(image_menu, "Appl&y Image...", self.do_apply_image)
+        self._act(image_menu, "Calc&ulations...", self.do_calculations)
         image_menu.addSeparator()
         self._act(image_menu, "Flip &Horizontal", lambda: self._geometry(self.ctl.flip_image, True))
         self._act(image_menu, "Flip &Vertical", lambda: self._geometry(self.ctl.flip_image, False))
@@ -857,11 +866,24 @@ class MainWindow(QMainWindow):
         fill = menu.addMenu("New &Fill Layer")
         fill.addAction("&Solid Color...", lambda: fx.do_new_fill_layer("solid"))
         fill.addAction("&Gradient...", lambda: fx.do_new_fill_layer("gradient"))
+        fill.addAction("&Pattern...", lambda: fx.do_new_fill_layer("pattern"))
         menu.addAction("Layer St&yle...", self.do_layer_style)
         menu.addAction("Clear Layer Style", lambda: fx._layer_fx(
             fx.ctl.set_layer_styles, fx.ctl.active_layer, {}))
         menu.addAction("Edit Adjustment / Fill...", self.do_edit_layer_content)
         menu.addAction("&Rasterize Layer", lambda: fx._layer_fx(fx.ctl.rasterize_layer))
+        vmask = menu.addMenu("&Vector Mask")
+        vmask.addAction("From Active &Path", lambda: fx._layer_fx(fx.ctl.add_vector_mask, "path"))
+        vmask.addAction("&Reveal All", lambda: fx._layer_fx(fx.ctl.add_vector_mask, "reveal"))
+        vmask.addAction("&Hide All", lambda: fx._layer_fx(fx.ctl.add_vector_mask, "hide"))
+        vmask.addAction("From &Selection", lambda: fx._layer_fx(fx.ctl.add_vector_mask, "selection"))
+        vmask.addSeparator()
+        vmask.addAction("&Enabled / Disabled", lambda: fx._layer_fx(
+            fx.ctl.set_layer_property, fx.ctl.active_layer, "vector_mask_enabled",
+            not getattr(fx.ctl.active_layer, "vector_mask_enabled", True)))
+        vmask.addAction("Rasteri&ze into Layer Mask", lambda: fx._layer_fx(
+            fx.ctl.delete_vector_mask, None, True))
+        vmask.addAction("&Delete", lambda: fx._layer_fx(fx.ctl.delete_vector_mask))
         boards = menu.addMenu("Artboards and &Frames")
         boards.addAction("&Artboard from Layer", lambda: fx._layer_fx(
             fx.ctl.region_from_layer, "artboard"))
@@ -1162,6 +1184,136 @@ class MainWindow(QMainWindow):
             self.recent.add(path)
             self._rebuild_recent()
         self._update_title()
+
+    # ---- Edit / Select / Image commands with a few settings ---------------------------
+
+    def _blend_choices(self):
+        return [(n, n) for n in self.ctl.blends.names() if n != "PassThrough"]
+
+    def _after_pixels(self):
+        self.layers_dock.sync()
+        self.canvas.refresh()
+        self.canvas.viewport().update()
+        self._update_title()
+
+    def do_fill_dialog(self):
+        from ..engine import patterns
+        from .formdialog import ask
+        v = ask(self, "Fill", [
+            ("contents", "Contents", "choice", "foreground", [
+                ("foreground", "Foreground colour"), ("background", "Background colour"),
+                ("color", "Colour..."), ("pattern", "Pattern"), ("content_aware", "Content-Aware"),
+                ("history", "History"), ("black", "Black"), ("grey", "50% Grey"), ("white", "White")]),
+            ("colour", "Colour", "color", tuple(self.ctl.primary), None),
+            ("pattern", "Pattern", "choice", "checker",
+             [(n, n) for n in patterns.names(self.ctl.state_dir)]),
+            ("scale", "Pattern scale (%)", "int", 100, (5, 1000)),
+            ("mode", "Mode", "choice", "Normal", self._blend_choices()),
+            ("opacity", "Opacity (%)", "int", 100, (0, 100)),
+            ("preserve", "Preserve transparency", "bool", False, None)])
+        if v is not None:
+            self._busy(self.ctl.fill_with, v["contents"], v["colour"], v["pattern"], v["scale"],
+                       v["mode"], v["opacity"], v["preserve"])
+            self._after_pixels()
+
+    def do_stroke_dialog(self):
+        from .formdialog import ask
+        v = ask(self, "Stroke", [
+            ("width", "Width (px)", "int", 3, (1, 250)),
+            ("colour", "Colour", "color", tuple(self.ctl.primary), None),
+            ("location", "Location", "choice", "center",
+             [("inside", "Inside"), ("center", "Center"), ("outside", "Outside")]),
+            ("mode", "Mode", "choice", "Normal", self._blend_choices()),
+            ("opacity", "Opacity (%)", "int", 100, (0, 100)),
+            ("preserve", "Preserve transparency", "bool", False, None)])
+        if v is not None:
+            self.ctl.stroke_selection(v["width"], v["colour"], v["location"], v["mode"],
+                                      v["opacity"], v["preserve"])
+            self._after_pixels()
+
+    def do_define_pattern(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Define Pattern", "Pattern name:", text="Pattern")
+        if ok and name.strip():
+            saved = self.ctl.define_pattern(name.strip())
+            self.statusBar().showMessage("Pattern %r defined." % saved if saved else
+                                         "No pattern: select an area first.", 5000)
+
+    def do_color_range(self):
+        from ..engine import selectrange
+        from .formdialog import ask
+        v = ask(self, "Color Range", [
+            ("mode", "Select", "choice", "sampled",
+             [(m, "Sampled colour (the primary)" if m == "sampled" else m.capitalize())
+              for m in selectrange.MODES]),
+            ("fuzziness", "Fuzziness", "int", 40, (0, 200)),
+            ("invert", "Invert", "bool", False, None)])
+        if v is not None:
+            self._sel(lambda: self.ctl.select_color_range(v["mode"], None, v["fuzziness"], v["invert"]))
+
+    def do_focus_area(self):
+        from .formdialog import ask
+        v = ask(self, "Focus Area", [("in_focus", "In-focus range", "int", 50, (0, 100)),
+                                     ("noise", "Image noise level", "int", 0, (0, 100))])
+        if v is not None:
+            self._sel(lambda: self._busy(self.ctl.select_focus_area, v["in_focus"], v["noise"]))
+
+    def do_trim(self):
+        from .formdialog import ask
+        v = ask(self, "Trim", [
+            ("based_on", "Based on", "choice", "transparent",
+             [("transparent", "Transparent pixels"), ("top_left", "Top left pixel colour"),
+              ("bottom_right", "Bottom right pixel colour")]),
+            ("top", "Trim top", "bool", True, None), ("bottom", "Trim bottom", "bool", True, None),
+            ("left", "Trim left", "bool", True, None), ("right", "Trim right", "bool", True, None)])
+        if v is not None:
+            self._geometry(self.ctl.trim, v["based_on"], v["top"], v["bottom"], v["left"], v["right"])
+
+    def do_duplicate_image(self):
+        from .formdialog import ask
+        v = ask(self, "Duplicate Image", [("flatten", "Merged layers only", "bool", False, None)])
+        if v is not None:
+            self.ctl.duplicate_document(v["flatten"])
+            self.canvas.bind()
+            self._sync_all()
+
+    def _source_choices(self):
+        return [("merged", "Merged")] + [(l.id, l.name) for l in reversed(self.ctl.doc.layers())]
+
+    def do_apply_image(self):
+        from .formdialog import ask
+        channels = [("rgb", "RGB"), ("red", "Red"), ("green", "Green"), ("blue", "Blue"),
+                    ("alpha", "Transparency")]
+        v = ask(self, "Apply Image", [
+            ("source", "Layer", "choice", "merged", self._source_choices()),
+            ("channel", "Channel", "choice", "rgb", channels),
+            ("invert", "Invert", "bool", False, None),
+            ("mode", "Blending", "choice", "Multiply", self._blend_choices()),
+            ("opacity", "Opacity (%)", "int", 100, (0, 100)),
+            ("preserve", "Preserve transparency", "bool", False, None)])
+        if v is not None:
+            self.ctl.apply_image(v["source"], v["channel"], v["invert"], v["mode"], v["opacity"],
+                                 v["preserve"])
+            self._after_pixels()
+
+    def do_calculations(self):
+        from .formdialog import ask
+        channels = [("red", "Red"), ("green", "Green"), ("blue", "Blue"), ("alpha", "Transparency")]
+        v = ask(self, "Calculations", [
+            ("source1", "Source 1", "choice", "merged", self._source_choices()),
+            ("channel1", "Channel", "choice", "red", channels),
+            ("invert1", "Invert", "bool", False, None),
+            ("source2", "Source 2", "choice", "merged", self._source_choices()),
+            ("channel2", "Channel", "choice", "green", channels),
+            ("invert2", "Invert", "bool", False, None),
+            ("mode", "Blending", "choice", "Multiply", self._blend_choices()),
+            ("opacity", "Opacity (%)", "int", 100, (0, 100)),
+            ("result", "Result", "choice", "channel",
+             [("channel", "New channel"), ("selection", "Selection")])])
+        if v is not None:
+            self.ctl.calculations(v["source1"], v["channel1"], v["invert1"], v["source2"],
+                                  v["channel2"], v["invert2"], v["mode"], v["opacity"], v["result"])
+            self._sync_all()
 
     def do_filter_gallery(self):
         from .gallery import FilterGalleryDialog

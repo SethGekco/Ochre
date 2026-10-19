@@ -664,6 +664,8 @@ class Controller:
         copy.kind, copy.params = source.kind, dict(source.params)
         copy.clip, copy.mask_enabled = source.clip, source.mask_enabled
         copy.blend_if = source.blend_if
+        copy.vector_mask = getattr(source, "vector_mask", None)     # immutable: shared safely
+        copy.vector_mask_enabled = getattr(source, "vector_mask_enabled", True)
         copy.fill_opacity = getattr(source, "fill_opacity", 255)
         copy.knockout = getattr(source, "knockout", "none")
         if getattr(source, "smart_source", None) is not None:
@@ -1499,11 +1501,19 @@ class Controller:
         from ..engine.layer import FILL
         label = "New Fill Layer"
         self.history.begin_group()
-        layer = self.add_layer(name or ("Color Fill" if fill == "solid" else "Gradient Fill"))
+        layer = self.add_layer(name or {"solid": "Color Fill", "gradient": "Gradient Fill",
+                                        "pattern": "Pattern Fill"}.get(fill, "Fill"))
         layer.kind = FILL
         p = {"type": fill}
         if fill == "solid":
             p["color"] = tuple(params.get("color", self.primary))
+        elif fill == "pattern":
+            from ..engine import patterns
+            pname = params.get("pattern", "checker")
+            p["pattern"] = pname
+            p["scale"] = float(params.get("scale", 100))
+            p["tile"] = "" if pname in patterns.BUILTIN else \
+                patterns.encode_tile(patterns.tile(pname, self.state_dir))
         else:
             p["start"] = tuple(params.get("start", self.primary))
             p["end"] = tuple(params.get("end", self.secondary))
@@ -2841,6 +2851,316 @@ class Controller:
             pic.save(target)
             out.append(target)
         return out
+
+    # ---- vector masks -------------------------------------------------------------
+
+    def add_vector_mask(self, source="path", layer=None):
+        """Layer > Vector Mask: 'path' (the active path), 'reveal' (the whole
+        canvas, to edit later), 'hide' (nothing) or 'selection' (the
+        selection traced to a path). One undo step."""
+        from ..engine import paths as P
+        target = layer or self.active_layer
+        if target is None or target.is_group:
+            return None
+        if source == "path":
+            if self.doc.active_path is None or not (0 <= self.doc.active_path < len(self.doc.paths)):
+                return None
+            path = self.doc.paths[self.doc.active_path].copy()
+        elif source == "selection":
+            if self.selection.mask is None:
+                return None
+            path = P.from_mask(self.selection.mask)
+        else:
+            w, h = float(self.doc.width), float(self.doc.height)
+            corners = [(0, 0), (w, 0), (w, h), (0, h)] if source == "reveal" else []
+            path = P.Path("Vector Mask", [P.Subpath([P.Anchor(x, y) for x, y in corners], True)]
+                          if corners else [])
+        path.name = "Vector Mask"
+        self.set_layer_property(target, "vector_mask", path)
+        return path
+
+    def delete_vector_mask(self, layer=None, apply=False):
+        """Remove the vector mask; with apply, multiply it into the layer mask
+        first (Photoshop's Rasterize > Vector Mask)."""
+        target = layer or self.active_layer
+        if target is None or getattr(target, "vector_mask", None) is None:
+            return False
+        label = "Rasterize Vector Mask" if apply else "Delete Vector Mask"
+        self.history.begin_group()
+        if apply:
+            from ..engine import paths as P
+            cov = P.fill_mask(target.vector_mask, self.doc.width, self.doc.height)
+            if target.mask is None:
+                self.add_layer_mask("reveal", target)
+            from ..engine.commands import PixelDelta
+            mcell = self.doc.cell(target.mask)
+            d = PixelDelta.capture(self.doc, target.mask.id, self.doc.frame.id, self.doc.bounds, label)
+            px = mcell.plane("rgba")
+            from ..engine.compositor import mask_value
+            v = (mask_value(px).astype(np.uint32) * cov.astype(np.uint32) + 127) // 255
+            px[..., 0] = px[..., 1] = px[..., 2] = v.astype(np.uint8)
+            px[..., 3] = 255
+            mcell._touched(self.doc.bounds)
+            if d is not None:
+                self.history.push(d, label, frame_id=self.doc.frame.id)
+        self.set_layer_property(target, "vector_mask", None)
+        self.history.end_group(label)
+        return True
+
+    # ---- Edit > Fill, Edit > Stroke, Define Pattern ----------------------------------
+
+    def _fill_block(self, contents, rect, colour=None, pattern="checker", scale=100):
+        """The pixels Edit > Fill lays down over rect, or None."""
+        from ..engine import patterns
+        named = {"black": (0, 0, 0, 255), "grey": (128, 128, 128, 255), "white": (255, 255, 255, 255),
+                 "foreground": tuple(self.primary), "background": tuple(self.secondary)}
+        if contents in named or contents == "color":
+            c = named.get(contents) or tuple(colour or self.primary)
+            return np.broadcast_to(np.array(c, np.uint8), (rect.h, rect.w, 4)).copy()
+        if contents == "pattern":
+            t = patterns.tile(pattern, self.state_dir)
+            return np.ascontiguousarray(patterns.fill(t, rect, max(0.05, scale / 100.0)))
+        if contents == "history":
+            src = self.history_source(self.active_layer.id, self.doc.frame.id)
+            return None if src is None else np.ascontiguousarray(src[rect.slice()])
+        return None
+
+    def fill_with(self, contents="foreground", colour=None, pattern="checker", scale=100,
+                  mode="Normal", opacity=100, preserve=False):
+        """Edit > Fill: the selection (or the whole layer) filled with a
+        colour, a pattern, the history state or content-aware, blended by a
+        mode and opacity, optionally keeping the layer's transparency. One
+        undo step."""
+        from ..engine.commands import PixelDelta
+        target = self.paint_target
+        if target is None or target.is_group or getattr(target, "kind", "raster") not in ("raster",) \
+                and not getattr(target, "is_mask", False):
+            return None
+        if contents == "content_aware":
+            return self.inpaint_selection("content_aware")
+        if self.selection.mask is None:
+            rect, mask = self.doc.bounds, None
+        else:
+            rect, mask = self._selection_window()
+            if rect is None:
+                return None
+        block = self._fill_block(contents, rect, colour, pattern, scale)
+        if block is None:
+            return None
+        cell = self.doc.cell(target)
+        label = "Fill"
+        delta = PixelDelta.capture(self.doc, target.id, self.doc.frame.id, rect, label)
+        window = cell.plane("rgba")[rect.slice()]
+        blended = accel.blend_rect(window.copy(), block, self.blends.opcode(mode),
+                                   int(round(opacity * 255 / 100.0)), mask)
+        if preserve:
+            blended[..., 3] = window[..., 3]
+        window[...] = blended
+        cell._touched(rect)
+        if delta is not None:
+            self.history.push(delta, label, frame_id=self.doc.frame.id)
+        self.invalidate(rect)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return rect
+
+    def stroke_selection(self, width=3, colour=None, location="center", mode="Normal",
+                         opacity=100, preserve=False):
+        """Edit > Stroke: a band along the selection's edge (or, with nothing
+        selected, the active layer's outline) -- inside, centred or outside.
+        One undo step."""
+        from ..engine import morph
+        from ..engine.commands import PixelDelta
+        target = self.paint_target
+        if target is None or target.is_group:
+            return None
+        cell = self.doc.cell(target)
+        if self.selection.mask is not None:
+            m = self.selection.mask
+        else:
+            a = cell.plane("rgba")[..., 3]
+            if not a.any():
+                return None
+            m = a
+        w = max(1.0, float(width))
+        if location == "inside":
+            band = np.clip(m.astype(np.int32) - morph.shrink(m, w).astype(np.int32), 0, 255)
+        elif location == "outside":
+            band = np.clip(morph.grow(m, w).astype(np.int32) - m.astype(np.int32), 0, 255)
+        else:
+            band = np.clip(morph.grow(m, w / 2.0).astype(np.int32)
+                           - morph.shrink(m, w / 2.0).astype(np.int32), 0, 255)
+        band = band.astype(np.uint8)
+        ys, xs = np.nonzero(band)
+        if not ys.size:
+            return None
+        rect = Rect(int(xs.min()), int(ys.min()), int(xs.max()) - int(xs.min()) + 1,
+                    int(ys.max()) - int(ys.min()) + 1)
+        label = "Stroke"
+        delta = PixelDelta.capture(self.doc, target.id, self.doc.frame.id, rect, label)
+        window = cell.plane("rgba")[rect.slice()]
+        block = np.broadcast_to(np.array(colour or self.primary, np.uint8), (rect.h, rect.w, 4))
+        blended = accel.blend_rect(window.copy(), np.ascontiguousarray(block), self.blends.opcode(mode),
+                                   int(round(opacity * 255 / 100.0)),
+                                   np.ascontiguousarray(band[rect.slice()]))
+        if preserve:
+            blended[..., 3] = window[..., 3]
+        window[...] = blended
+        cell._touched(rect)
+        if delta is not None:
+            self.history.push(delta, label, frame_id=self.doc.frame.id)
+        self.invalidate(rect)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return rect
+
+    def define_pattern(self, name="Pattern"):
+        """Edit > Define Pattern: the merged image inside the selection's box
+        (or all of it) saved as a reusable pattern. Returns its name."""
+        from ..engine import patterns
+        image = self.merged()
+        if self.selection.mask is not None:
+            r = self.selection.bbox.clipped_to(self.doc.width, self.doc.height)
+            if r is None or r.is_empty:
+                return None
+            image = image[r.slice()]
+        return patterns.save_user(self.state_dir, name, np.ascontiguousarray(image))
+
+    # ---- Select > Color Range, Focus Area -------------------------------------------
+
+    def select_color_range(self, mode="sampled", samples=None, fuzziness=40, invert=False,
+                           merged=True):
+        """Select > Color Range. samples default to the primary colour."""
+        from ..engine import selectrange
+        src = self.merged() if merged else self.doc.cell(self.active_layer).plane("rgba")
+        m = selectrange.color_range(src, mode, samples or [tuple(self.primary)], fuzziness)
+        if invert:
+            m = (255 - m).astype(np.uint8)
+        return self._selection_op("Color Range", lambda sel: setattr(sel, "mask", m))
+
+    def select_focus_area(self, in_focus=50, noise=0):
+        """Select > Focus Area: the sharp parts of the image."""
+        from ..engine import selectrange
+        m = selectrange.focus_area(self.merged(), in_focus, noise)
+        return self._selection_op("Focus Area", lambda sel: setattr(sel, "mask", m))
+
+    # ---- Image > Trim, Duplicate, Apply Image, Calculations -----------------------------
+
+    def trim(self, based_on="transparent", top=True, bottom=True, left=True, right=True):
+        """Image > Trim: cut away borders of transparent pixels, or of the
+        top-left / bottom-right pixel's colour. False when there is nothing
+        to trim."""
+        from ..engine import transform
+        img = self.merged()
+        h, w = img.shape[:2]
+        if based_on == "transparent":
+            keep = img[..., 3] > 0
+        else:
+            ref = img[0, 0] if based_on == "top_left" else img[-1, -1]
+            keep = (img != ref).any(axis=-1)
+        ys, xs = np.nonzero(keep)
+        if not ys.size:
+            return False
+        y0 = int(ys.min()) if top else 0
+        y1 = int(ys.max()) + 1 if bottom else h
+        x0 = int(xs.min()) if left else 0
+        x1 = int(xs.max()) + 1 if right else w
+        if (x0, y0, x1, y1) == (0, 0, w, h):
+            return False
+        return self._geometry("Trim", lambda: transform.crop(self.doc, Rect(x0, y0, x1 - x0, y1 - y0)))
+
+    def duplicate_document(self, flatten=False):
+        """Image > Duplicate: a copy in a new tab, every layer (or flattened)."""
+        import copy as _copy
+        src_doc = self.doc
+        if flatten:
+            flat = self.merged().copy()
+            doc = Document(src_doc.width, src_doc.height, settings=self.settings)
+            lay = doc.add_layer("Background")
+            doc.cell(lay).plane("rgba")[...] = flat
+            doc.cell(lay)._touched(doc.bounds)
+        else:
+            for frame in src_doc.frames:
+                src_doc.ensure_warm(frame)
+            memo = {id(getattr(src_doc, "_settings", None)): getattr(src_doc, "_settings", None)}
+            doc = _copy.deepcopy(src_doc, memo)
+        self._adopt(doc, path=None)
+        return doc
+
+    def _channel_image(self, source, channel="rgb", invert=False):
+        """Pixels for Apply Image / Calculations: 'merged' or a layer id, and
+        'rgb' or one of red / green / blue / alpha (as grey)."""
+        from ..engine.compositor import _Leaf
+        if source in (None, "merged"):
+            img = self.merged().copy()
+        else:
+            node = self.doc.layer(source)
+            if node is None or node.is_group:
+                return None
+            img = np.zeros((self.doc.height, self.doc.width, 4), np.uint8)
+            cell = self.doc.cells.get((node.id, self.doc.frame.id))
+            leaf = _Leaf(cell, self.blends.opcode("Normal"), 255, node)
+            self.compositor._blend_leaf(img, leaf, self.doc.bounds, self.doc.frame)
+        if channel != "rgb":
+            c = {"red": 0, "green": 1, "blue": 2, "alpha": 3}[channel]
+            g = img[..., c].copy()
+            img[..., 0] = img[..., 1] = img[..., 2] = g
+            img[..., 3] = 255
+        if invert:
+            img[..., :3] = 255 - img[..., :3]
+        return img
+
+    def apply_image(self, source="merged", channel="rgb", invert=False, mode="Multiply",
+                    opacity=100, preserve=False):
+        """Image > Apply Image: a layer (or the merged image, or one of its
+        channels) blended onto the active layer, inside the selection. One
+        undo step."""
+        from ..engine.commands import PixelDelta
+        target = self.paint_target
+        if target is None or target.is_group:
+            return None
+        img = self._channel_image(source, channel, invert)
+        if img is None:
+            return None
+        rect, mask = (self.doc.bounds, None) if self.selection.mask is None else self._selection_window()
+        if rect is None:
+            return None
+        cell = self.doc.cell(target)
+        label = "Apply Image"
+        delta = PixelDelta.capture(self.doc, target.id, self.doc.frame.id, rect, label)
+        window = cell.plane("rgba")[rect.slice()]
+        blended = accel.blend_rect(window.copy(), np.ascontiguousarray(img[rect.slice()]),
+                                   self.blends.opcode(mode), int(round(opacity * 255 / 100.0)), mask)
+        if preserve:
+            blended[..., 3] = window[..., 3]
+        window[...] = blended
+        cell._touched(rect)
+        if delta is not None:
+            self.history.push(delta, label, frame_id=self.doc.frame.id)
+        self.invalidate(rect)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return rect
+
+    def calculations(self, source1="merged", channel1="red", invert1=False,
+                     source2="merged", channel2="green", invert2=False,
+                     mode="Multiply", opacity=100, result="channel", name=None):
+        """Image > Calculations: two single channels blended into a new
+        channel ('channel') or the selection ('selection')."""
+        a = self._channel_image(source1, channel1 if channel1 != "rgb" else "red", invert1)
+        b = self._channel_image(source2, channel2 if channel2 != "rgb" else "red", invert2)
+        if a is None or b is None:
+            return None
+        out = accel.blend_rect(b.copy(), a, self.blends.opcode(mode), int(round(opacity * 255 / 100.0)), None)
+        grey = out[..., 0].copy()
+        if result == "selection":
+            return self._selection_op("Calculations", lambda sel: setattr(sel, "mask", grey))
+        before = self.selection.mask
+        self.selection.mask = grey
+        try:
+            return self.save_selection(name or "Calculation")
+        finally:
+            self.selection.mask = before
 
     def straighten(self, line=None):
         """Image > Straighten: rotate so the measured line comes out level."""

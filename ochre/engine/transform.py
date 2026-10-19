@@ -145,6 +145,12 @@ def _map_paths(doc, fn):
     from . import regions
     for group in regions.groups(doc):
         group.region = regions.mapped(group.region, fn)
+    for layer in doc.layers():
+        vm = getattr(layer, "vector_mask", None)
+        if vm is not None:
+            moved = vm.copy()            # replaced, never edited in place
+            moved.map_points(fn)
+            layer.vector_mask = moved
 
 
 def _map_smart(doc, hm):

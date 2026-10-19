@@ -36,14 +36,21 @@ STYLES = {
     "bevel": ("Bevel & Emboss", {"size": 5, "depth": 100, "angle": 120, "altitude": 30,
                                  "highlight": (255, 255, 255), "highlight_opacity": 75,
                                  "shadow": (0, 0, 0), "shadow_opacity": 75}),
+    "satin": ("Satin", {"color": (0, 0, 0), "opacity": 50, "angle": 19, "distance": 11,
+                        "size": 14, "invert": 1}),
     "color_overlay": ("Color Overlay", {"color": (255, 0, 0), "opacity": 100}),
     "gradient_overlay": ("Gradient Overlay", {"start": (0, 0, 0), "end": (255, 255, 255),
                                               "angle": 90, "opacity": 100}),
+    "pattern_overlay": ("Pattern Overlay", {"pattern": "checker", "tile": "", "scale": 100,
+                                            "opacity": 100}),
     "stroke": ("Stroke", {"color": (255, 0, 0), "size": 3, "position": "outside",
                           "opacity": 100}),
 }
 BEHIND = ("outer_glow", "drop_shadow")
-FRONT = ("gradient_overlay", "color_overlay", "inner_glow", "inner_shadow", "bevel", "stroke")
+# Bottom-first, Photoshop's stacking: Pattern, Gradient and Color Overlay,
+# Satin, Inner Glow, Inner Shadow, Bevel, Stroke.
+FRONT = ("pattern_overlay", "gradient_overlay", "color_overlay", "satin", "inner_glow",
+         "inner_shadow", "bevel", "stroke")
 
 
 def defaults(name):
@@ -183,6 +190,25 @@ def render(rgba, styles):
             s, e = np.array(p["start"][:3], np.float32), np.array(p["end"][:3], np.float32)
             piece[..., :3] = s + (e - s) * k
             piece[..., 3] = A * 255.0 * p["opacity"] / 100.0
+        elif name == "satin":
+            # Two offset, blurred copies of the shape, differenced: the soft
+            # interior sheen of satin.
+            dx, dy = _offset(p["angle"], p["distance"] / 2.0)
+            a1 = _blur(_shift(A, dx, dy), p["size"])
+            a2 = _blur(_shift(A, -dx, -dy), p["size"])
+            sheen = np.abs(a1 - a2)
+            if int(p.get("invert", 1)):
+                sheen = 1.0 - sheen
+            piece = _layer(p["color"], np.clip(sheen, 0, 1) * A * (p["opacity"] / 100.0))
+        elif name == "pattern_overlay":
+            from . import patterns
+            t = patterns.decode_tile(p.get("tile")) if p.get("tile") else None
+            if t is None:
+                t = patterns.builtin_tile(p.get("pattern", "checker"))
+            from .geometry import Rect
+            tiled = patterns.fill(t, Rect(0, 0, w, h), max(0.05, float(p["scale"]) / 100.0))
+            piece = tiled.astype(np.float32)
+            piece[..., 3] = piece[..., 3] * A * (p["opacity"] / 100.0)
         elif name == "inner_glow":
             alpha = _blur(1.0 - A, p["size"]) * A * (p["opacity"] / 100.0)
             piece = _layer(p["color"], alpha)

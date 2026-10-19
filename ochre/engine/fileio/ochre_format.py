@@ -133,6 +133,12 @@ def save(doc, path, selection=None, thumbnail_max=256):
                     add("FillOpacity = %d" % node.fill_opacity)
                 if getattr(node, "knockout", "none") != "none":
                     add("Knockout = %s" % node.knockout)
+                if getattr(node, "vector_mask", None) is not None:
+                    from ..paths import encode_subpath as _enc
+                    for k, sub in enumerate(node.vector_mask.subpaths):
+                        add("VectorMask.%d = %s" % (k, _enc(sub)))
+                    if not getattr(node, "vector_mask_enabled", True):
+                        add("VectorMaskEnabled = 0")
                 if getattr(node, "mask", None) is not None:
                     add("Mask = 1")
                     if not node.mask_enabled:
@@ -381,6 +387,12 @@ def load(path, settings=None):
                 node.fill_opacity = max(0, min(255, int(db.get(section, "FillOpacity", 255) or 255)))
                 ko = db.get(section, "Knockout", "none")
                 node.knockout = ko if ko in ("shallow", "deep") else "none"
+                vkeys = sorted((k for k in db.keys(section) if k.startswith("VectorMask.")),
+                               key=lambda k: int(k.split(".")[1]) if k.split(".")[1].isdigit() else 0)
+                if vkeys:
+                    from ..paths import Path as _Path, decode_subpath as _dec
+                    node.vector_mask = _Path("Vector Mask", [_dec(db.get(section, k)) for k in vkeys])
+                    node.vector_mask_enabled = db.getbool(section, "VectorMaskEnabled", True)
                 if node.kind == "smart":
                     from ..layer import SmartSource
                     sw, sh = node.params.get("src_w"), node.params.get("src_h")
