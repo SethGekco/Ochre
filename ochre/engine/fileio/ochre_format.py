@@ -451,6 +451,8 @@ def load(path, settings=None):
 
 
 def _encode_value(value):
+    if isinstance(value, (tuple, list)) and value and isinstance(value[0], (tuple, list)):
+        return ";".join(",".join(str(int(v)) for v in pair) for pair in value)
     if isinstance(value, (tuple, list)):
         return ",".join(str(int(v)) for v in value)
     if isinstance(value, bool):
@@ -461,6 +463,11 @@ def _encode_value(value):
 def _decode_value(text):
     """Typed back: comma lists of ints become tuples, numbers numbers."""
     t = str(text).strip()
+    if ";" in t:
+        try:
+            return tuple(tuple(int(v) for v in pair.split(",")) for pair in t.split(";") if pair)
+        except ValueError:
+            return t
     if "," in t:
         try:
             return tuple(int(v) for v in t.split(","))

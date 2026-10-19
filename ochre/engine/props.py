@@ -227,6 +227,40 @@ class ColorProperty(Property):
         return tuple(max(0, min(255, v)) for v in value)
 
 
+class CurveProperty(Property):
+    """A tone curve: control points (x, y) in 0..255, x strictly increasing,
+    always including both ends. Accepts "x,y;x,y;..." text too, which is how
+    it is stored in a file."""
+
+    kind = "curve"
+
+    def __init__(self, name, default=((0, 0), (255, 255)), **kw):
+        super().__init__(name, self._normalise(default), **kw)
+
+    @staticmethod
+    def _normalise(value):
+        if isinstance(value, str):
+            pts = []
+            for pair in value.split(";"):
+                if pair.strip():
+                    x, y = pair.split(",")
+                    pts.append((int(float(x)), int(float(y))))
+        else:
+            pts = [(int(round(float(x))), int(round(float(y)))) for x, y in value]
+        pts = sorted({max(0, min(255, x)): max(0, min(255, y)) for x, y in pts}.items())
+        if not pts or pts[0][0] != 0:
+            pts.insert(0, (0, pts[0][1] if pts else 0))
+        if pts[-1][0] != 255:
+            pts.append((255, pts[-1][1] if pts else 255))
+        return tuple(pts)
+
+    def coerce(self, value):
+        try:
+            return self._normalise(value)
+        except (TypeError, ValueError):
+            return self._value
+
+
 # ---- rules --------------------------------------------------------------
 
 class Rule:

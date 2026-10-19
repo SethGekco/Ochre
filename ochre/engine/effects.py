@@ -64,6 +64,10 @@ class Effect:
     # Pixels of context a tile needs on each side. A blur reads its
     # neighbours, so tiling without a halo would show seams at tile edges.
     halo = 0
+    # True when the result depends on statistics of the WHOLE image (auto
+    # levels, equalize). Such an effect cannot be an adjustment layer, where
+    # it would be handed one tile at a time.
+    global_stats = False
 
     def __init__(self):
         self.props = self.declare()
@@ -556,11 +560,21 @@ BUILTIN = (BrightnessContrast, Levels, HueSaturation, Invert, Posterize,
            Desaturate, Sepia, GaussianBlur, Sharpen, AddNoise)
 
 
+def _more_builtins():
+    """Effects from sibling modules, so this file need not import them all."""
+    try:
+        from .filters import FILTERS
+    except ImportError:
+        return ()
+    return tuple(FILTERS)
+
+
 class EffectRegistry:
     """Known effects, grouped and ordered from INI."""
 
     def __init__(self, db=None, extra=()):
-        self._classes = {cls.name: cls for cls in BUILTIN}
+        from .colors import ADJUSTMENTS        # imported here: colors imports this module
+        self._classes = {cls.name: cls for cls in BUILTIN + ADJUSTMENTS + _more_builtins()}
         for cls in extra:
             self._classes[cls.name] = cls
         self._labels = {}

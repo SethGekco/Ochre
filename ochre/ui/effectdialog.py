@@ -30,6 +30,119 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
 from ..engine.effects import CancelToken, Cancelled
 
 
+class CurveEditor(QWidget):
+    """A tone curve you drag: click to add a point, drag to move it, drag it
+    out sideways past its neighbours (or right-click) to remove it. The ends
+    stay at x = 0 and 255. Drawn through the same monotone interpolation the
+    adjustment uses, so what you see is the curve you get."""
+
+    changed = Signal()
+
+    def __init__(self, points, parent=None):
+        super().__init__(parent)
+        self.points = [tuple(p) for p in points]
+        self._grab = None
+        self.setMinimumSize(170, 170)
+        self.setMouseTracking(False)
+
+    def set_points(self, points):
+        pts = [tuple(p) for p in points]
+        if pts != self.points:
+            self.points = pts
+            self.update()
+
+    def _to_screen(self, x, y):
+        w, h = self.width() - 1, self.height() - 1
+        return x / 255.0 * w, h - y / 255.0 * h
+
+    def _to_value(self, sx, sy):
+        w, h = max(1, self.width() - 1), max(1, self.height() - 1)
+        return (max(0, min(255, int(round(sx / w * 255)))),
+                max(0, min(255, int(round((h - sy) / h * 255)))))
+
+    def paintEvent(self, event):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPainter, QPainterPath, QPen
+        from ..engine.colors import monotone_curve
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(250, 250, 250))
+        p.setPen(QPen(QColor(220, 220, 220), 1))
+        for i in range(1, 4):
+            x, _ = self._to_screen(i * 64, 0)
+            _, y = self._to_screen(0, i * 64)
+            p.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+            p.drawLine(QPointF(0, y), QPointF(self.width(), y))
+        p.setPen(QPen(QColor(200, 200, 200), 1, Qt.DashLine))
+        p.drawLine(QPointF(*self._to_screen(0, 0)), QPointF(*self._to_screen(255, 255)))
+        lut = monotone_curve(self.points)
+        path = QPainterPath(QPointF(*self._to_screen(0, int(lut[0]))))
+        for x in range(1, 256):
+            path.lineTo(QPointF(*self._to_screen(x, int(lut[x]))))
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(QPen(QColor(30, 30, 30), 1.5))
+        p.drawPath(path)
+        p.setBrush(QColor(255, 255, 255))
+        for x, y in self.points:
+            sx, sy = self._to_screen(x, y)
+            p.drawRect(int(sx) - 3, int(sy) - 3, 6, 6)
+        p.end()
+
+    def _nearest(self, sx, sy):
+        best, idx = 64.0, None
+        for i, (x, y) in enumerate(self.points):
+            px, py = self._to_screen(x, y)
+            d = (px - sx) ** 2 + (py - sy) ** 2
+            if d <= best:
+                best, idx = d, i
+        return idx
+
+    def mousePressEvent(self, event):
+        pos = event.position()
+        idx = self._nearest(pos.x(), pos.y())
+        if event.button() == Qt.RightButton:
+            if idx is not None and 0 < idx < len(self.points) - 1:
+                del self.points[idx]
+                self.update()
+                self.changed.emit()
+            return
+        if idx is None:
+            x, y = self._to_value(pos.x(), pos.y())
+            if any(px == x for px, _ in self.points):
+                return
+            self.points.append((x, y))
+            self.points.sort()
+            idx = self.points.index((x, y))
+            self.changed.emit()
+        self._grab = idx
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if self._grab is None:
+            return
+        i = self._grab
+        x, y = self._to_value(event.position().x(), event.position().y())
+        if i == 0:
+            x = 0
+        elif i == len(self.points) - 1:
+            x = 255
+        else:
+            lo, hi = self.points[i - 1][0], self.points[i + 1][0]
+            if x <= lo - 8 or x >= hi + 8:
+                # Dragged out past a neighbour: remove it, as GIMP does.
+                del self.points[i]
+                self._grab = None
+                self.update()
+                self.changed.emit()
+                return
+            x = max(lo + 1, min(hi - 1, x))
+        self.points[i] = (x, y)
+        self.update()
+        self.changed.emit()
+
+    def mouseReleaseEvent(self, event):
+        self._grab = None
+
+
 class _Row(QWidget):
     """One property, as a labelled control plus its live value."""
 
@@ -71,10 +184,17 @@ class _Row(QWidget):
             box.addWidget(self.check, 1)
             self.widget = self.check
 
+        elif kind == "curve":
+            self.curve = CurveEditor(prop.value)
+            self.curve.changed.connect(self._from_curve)
+            box.addWidget(self.curve, 1)
+            self.widget = self.curve
+
         elif kind == "choice":
             self.combo = QComboBox()
+            labels = prop.ui.get("labels", {})
             for option in prop.choices:
-                self.combo.addItem(str(option), option)
+                self.combo.addItem(str(labels.get(option, option)), option)
             self.combo.currentIndexChanged.connect(self._from_combo)
             box.addWidget(self.combo, 1)
             self.widget = self.combo
@@ -123,6 +243,12 @@ class _Row(QWidget):
         self.prop.set(self.combo.currentData())
         self.changed.emit()
 
+    def _from_curve(self):
+        if self._guard():
+            return
+        self.prop.set(self.curve.points)
+        self.changed.emit()
+
     def _pick_colour(self):
         chosen = QColorDialog.getColor(QColor(*self.prop.value), self,
                                        self.prop.ui.get("label", "Colour"),
@@ -164,6 +290,8 @@ class _Row(QWidget):
                 index = self.combo.findData(prop.value)
                 if index >= 0:
                     self.combo.setCurrentIndex(index)
+            elif prop.kind == "curve":
+                self.curve.set_points(prop.value)
             elif prop.kind == "color":
                 colour = QColor(*prop.value)
                 self.button.setStyleSheet("background-color: %s;" % colour.name())

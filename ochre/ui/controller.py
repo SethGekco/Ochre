@@ -662,6 +662,34 @@ class Controller:
         self._after_structure_change()
         return copy
 
+    def match_color(self, source_index, amount=1.0):
+        """Image > Match Color: take another open image's colour statistics.
+
+        Applied to the active layer, inside the selection; the source is the
+        merged look of the other document.
+        """
+        from ..engine import colors
+        from ..engine.commands import PixelDelta
+        if not (0 <= source_index < len(self.documents)) or source_index == self.current_doc:
+            return None
+        layer = self.active_layer
+        if layer is None or layer.is_group or getattr(layer, "kind", "raster") != "raster":
+            return None
+        state = self.documents[source_index]
+        src_doc = state["doc"]
+        source = state["compositor"].composite(src_doc.bounds)
+        cell = self.doc.cell(layer)
+        rect = self.doc.bounds
+        delta = PixelDelta.capture(self.doc, layer.id, self.doc.frame.id, rect, "Match Color")
+        matched = colors.match_color(cell.plane("rgba"), source, amount)
+        cell.lerp_masked(rect, matched, self.selection.mask_for(rect))
+        if delta is not None:
+            self.history.push(delta, "Match Color", frame_id=self.doc.frame.id)
+        self.invalidate(rect)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return rect
+
     # ---- masks, clipping, adjustment and fill layers, styles ----------------
 
     def add_layer_mask(self, mode="reveal", layer=None):

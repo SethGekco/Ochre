@@ -298,6 +298,21 @@ class MainWindow(QMainWindow):
         self._busy(self.ctl.straighten)
         self.canvas.bind(keep_view=True)
 
+    def do_match_color(self):
+        from PySide6.QtWidgets import QInputDialog
+        titles = self.ctl.document_titles()
+        others = [(i, t) for i, t in enumerate(titles) if i != self.ctl.current_doc]
+        if not others:
+            self.statusBar().showMessage("Open the image whose colours you want to match first.", 6000)
+            return
+        label, ok = QInputDialog.getItem(self, "Match Color", "Take colours from:",
+                                         ["%d: %s" % (i + 1, t) for i, t in others], 0, False)
+        if not ok:
+            return
+        amount, ok = QInputDialog.getInt(self, "Match Color", "Strength (%):", 100, 0, 100)
+        if ok:
+            self._busy(self.ctl.match_color, int(label.split(":")[0]) - 1, amount / 100.0)
+
     def do_export_slices(self):
         if not self.ctl.doc.slices:
             self.statusBar().showMessage(
@@ -471,6 +486,7 @@ class MainWindow(QMainWindow):
         self._act(image_menu, "Rotate &180\u00b0", lambda: self._geometry(self.ctl.rotate_image, 2), "Ctrl+J")
         self._act(image_menu, "Rotate by &Angle...", self.do_rotate_image_by)
         self._act(image_menu, "S&traighten (from Measure)", self.do_straighten)
+        self._act(image_menu, "&Match Color...", self.do_match_color)
         image_menu.addSeparator()
         self._act(image_menu, "Slices From &Guides", lambda: (self.ctl.slices_from_guides(),
                                                               self.canvas.viewport().update()))
@@ -582,7 +598,7 @@ class MainWindow(QMainWindow):
         adj = menu.addMenu("New Ad&justment Layer")
         for name in self.effects.names():
             effect_cls = self.effects._classes.get(name)
-            if getattr(effect_cls, "pointwise", False):
+            if getattr(effect_cls, "pointwise", False) and not getattr(effect_cls, "global_stats", False):
                 adj.addAction(self.effects.label(name),
                               lambda n=name: fx.do_new_adjustment_layer(n))
         fill = menu.addMenu("New &Fill Layer")

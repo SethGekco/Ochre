@@ -1338,6 +1338,37 @@ def main():
     check("the fill layer dialog sets its colour, and everything paints",
           tuple(fill3.params["color"]) == (9, 99, 199, 255))
 
+    # ---- Curves through its dialog, with a real drag ------------------------------
+    from ochre.ui.effectdialog import CurveEditor, EffectDialog
+    ctl2.new_document(64, 64, background=(100, 100, 100, 255))
+    win2.canvas.bind()
+    win2._sync_all()
+    for _ in range(3):
+        app.processEvents()
+    adj_items = [a.text().replace("&", "") for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&Adjustments").menu().actions() if a.text()]
+    for entry in ("Curves", "Color Balance", "Exposure", "Vibrance", "Channel Mixer", "Gradient Map",
+                  "Color to Alpha", "Auto Levels", "Equalize", "Threshold", "Colorize"):
+        check("Adjustments offers %s" % entry, entry in adj_items, "-- %s" % adj_items)
+    dlg = EffectDialog(win2.effects.create("curves"), ctl2, win2)
+    dlg.show()
+    app.processEvents()
+    editor = [r for r in dlg.rows if r.prop.name == "rgb"][0].curve
+    check("the Curves dialog has a curve editor", isinstance(editor, CurveEditor))
+    sx, sy = editor._to_screen(100, 100)
+    tx, ty = editor._to_screen(100, 180)
+    QTest.mousePress(editor, Qt.LeftButton, Qt.NoModifier, QPoint(int(sx), int(sy)))
+    QTest.mouseMove(editor, QPoint(int(tx), int(ty)))
+    QTest.mouseRelease(editor, Qt.LeftButton, Qt.NoModifier, QPoint(int(tx), int(ty)))
+    app.processEvents()
+    check("A REAL DRAG ON THE CURVE ADDS AND MOVES A POINT",
+          any(abs(x - 100) <= 2 and abs(y - 180) <= 3 for x, y in editor.points), str(editor.points))
+    dlg._render_preview()
+    dlg.accept()
+    app.processEvents()
+    v = int(ctl2.doc.cell(ctl2.active_layer).plane("rgba")[10, 10, 0])
+    check("...and OK applies the curve to the layer (100 became ~180)", abs(v - 180) <= 4, str(v))
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc
