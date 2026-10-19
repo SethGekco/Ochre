@@ -562,6 +562,7 @@ class MainWindow(QMainWindow):
         self.recent_menu = file_menu.addMenu("Open &Recent")
         self._rebuild_recent()
         self._act(file_menu, "Place &Embedded...", self.do_place_embedded)
+        self._act(file_menu, "Place &Linked...", self.do_place_linked)
         automate = file_menu.addMenu("Au&tomate")
         automate.addAction("&Photomerge...", self.do_photomerge)
         automate.addAction("Load Files into &Stack...", self.do_load_stack)
@@ -727,6 +728,11 @@ class MainWindow(QMainWindow):
                           lambda _c=False, n=name: self.run_effect(n))
         effects_menu = bar.addMenu("Effe&cts")
         self._act(effects_menu, "Filter &Gallery...", self.do_filter_gallery)
+        self.nde_action = self._act(effects_menu, "Apply Filters &Non-Destructively",
+                                    lambda: self.ctl.set_non_destructive(self.nde_action.isChecked()))
+        self.nde_action.setCheckable(True)
+        self.nde_action.setChecked(bool(getattr(self.ctl, "non_destructive", False)))
+        self._act(effects_menu, "Layer &Filters...", self.do_layer_filters)
         effects_menu.addSeparator()
         order = ["Artistic", "Blurs", "Distort", "Edge & Generic", "Noise", "Photo",
                  "Render", "Stylize"]
@@ -911,6 +917,10 @@ class MainWindow(QMainWindow):
         smart.addAction("&Update from This Tab", self.do_update_smart_object)
         smart.addAction("&Replace Contents...", self.do_replace_smart_contents)
         smart.addAction("Clear Smart &Filters", lambda: fx._layer_fx(fx.ctl.set_smart_filters, []))
+        smart.addAction("Edit Smart Filters...", self.do_layer_filters)
+        smart.addSeparator()
+        smart.addAction("Update &Modified Content", self.do_update_linked)
+        smart.addAction("Re&link to File...", self.do_relink)
         return menu
 
     def _active_region(self, kind=None):
@@ -1430,6 +1440,51 @@ class MainWindow(QMainWindow):
             "Brush tip defined: pick Tip = Defined in the Paintbrush options." if ok else
             "No brush tip: select something dark on light first.", 6000)
 
+    def do_layer_filters(self):
+        from .filterlist import LayerFiltersDialog
+        layer = self.ctl.active_layer
+        if layer is None or layer.is_group or getattr(layer, "kind", "raster") not in ("raster", "smart"):
+            QMessageBox.information(self, "Layer Filters", "Select a pixel layer or a smart object.")
+            return
+        if not (layer.params or {}).get("filters"):
+            QMessageBox.information(self, "Layer Filters",
+                                    "This layer has no filters yet. Turn on Effects > Apply Filters "
+                                    "Non-Destructively (or use a smart object) and apply one.")
+            return
+        LayerFiltersDialog(self.ctl, layer, self.effects, self).exec()
+        self._after_pixels()
+
+    def do_place_linked(self):
+        exts = " ".join("*.%s" % e for e in supported_extensions())
+        path, _ = QFileDialog.getOpenFileName(self, "Place Linked", "", "Images (%s)" % exts)
+        if path:
+            try:
+                self.ctl.place_linked(path)
+            except Exception as exc:                        # noqa: BLE001
+                QMessageBox.warning(self, "Place failed", str(exc))
+                return
+            self._after_pixels()
+
+    def do_update_linked(self):
+        status = self.ctl.linked_status()
+        n = self.ctl.update_linked()
+        missing = [l.name for l, st in status if st == "missing"]
+        msg = "Updated %d linked smart object(s)." % n
+        if missing:
+            msg += " Missing files for: " + ", ".join(missing) + " (use Relink to File)."
+        self.statusBar().showMessage(msg, 8000)
+        self._after_pixels()
+
+    def do_relink(self):
+        if getattr(self.ctl.active_layer, "kind", "raster") != "smart":
+            QMessageBox.information(self, "Relink", "The active layer is not a smart object.")
+            return
+        exts = " ".join("*.%s" % e for e in supported_extensions())
+        path, _ = QFileDialog.getOpenFileName(self, "Relink to File", "", "Images (%s)" % exts)
+        if path:
+            self.ctl.relink(path)
+            self._after_pixels()
+
     def do_filter_gallery(self):
         from .gallery import FilterGalleryDialog
         if self.ctl.active_layer is None:
@@ -1721,6 +1776,11 @@ class MainWindow(QMainWindow):
             self._rebuild_recent()
         self.canvas.bind()
         self._sync_all()
+        changed = [l.name for l, st in self.ctl.linked_status() if st != "ok"]
+        if changed:
+            self.statusBar().showMessage(
+                "Linked smart objects changed or missing: %s -- Layer > Smart Object > "
+                "Update Modified Content / Relink." % ", ".join(changed), 10000)
         return True
 
     # ---- drag and drop ---------------------------------------------------

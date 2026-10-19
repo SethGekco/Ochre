@@ -52,6 +52,20 @@ class Session:
         self._cp.set(section, key, str(value))
         return self._write()
 
+    # ---- simple preferences -------------------------------------------------
+
+    def flag(self, key, default=False):
+        try:
+            return self._cp.getboolean("Prefs", key)
+        except (configparser.Error, ValueError):
+            return default
+
+    def set_flag(self, key, value):
+        if not self._cp.has_section("Prefs"):
+            self._cp.add_section("Prefs")
+        self._cp.set("Prefs", key, "on" if value else "off")
+        return self._write()
+
     def _write(self):
         if not self.path:
             return False

@@ -386,7 +386,12 @@ class Surface:
                        out=self.planes[RGBA][r.slice()])
 
     def refresh_derived(self, rect=None):
-        """Rebuild rgba from index over rect (or the whole surface)."""
+        """Rebuild rgba from index over rect (or the whole surface).
+
+        Every path that rewrites planes wholesale -- undo, transforms, offset
+        -- ends here, so it also counts as a write for the revision that
+        caches (filters, styles, smart objects) key on."""
+        self.revision += 1
         if not self.is_derived(RGBA) or self.palette is None:
             return None
         r = self.bounds if rect is None else rect.clipped_to(self.width, self.height)

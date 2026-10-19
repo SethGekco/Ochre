@@ -287,7 +287,35 @@ class Compositor:
             return textlayer.pixels(layer.params, r)
         if kind == SMART:
             return self._smart_image(layer)[r.slice()]
+        if layer.params and _active_filters(layer.params):
+            return self._filtered(leaf)[r.slice()]
         return leaf.surface.view(r, "rgba")
+
+    def _filtered(self, leaf):
+        """A pixel layer with non-destructive filters (GIMP 3's NDE filters):
+        its pixels through the filter list, cached until the pixels or the
+        list change."""
+        layer, surface = leaf.layer, leaf.surface
+        frame = self._frame_for_group or self.doc.frame
+        filters = _active_filters(layer.params)
+        key = (id(surface), surface.revision, repr(filters), frame.id,
+               self.doc.width, self.doc.height)
+        cache = getattr(self, "_nde", None)
+        if cache is None:
+            cache = self._nde = {}
+        hit = cache.get(layer.id)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        if self._effects_registry is None:
+            from .effects import EffectRegistry
+            self._effects_registry = EffectRegistry()
+        img = np.ascontiguousarray(surface.plane("rgba"))
+        for f in filters:
+            fx = self._effects_registry.create(f.get("name"), **dict(f.get("params") or {}))
+            if fx is not None:
+                img = fx.apply(img)
+        cache[layer.id] = (key, img)
+        return img
 
     def _layer_mask(self, layer, r, frame):
         if layer.is_group:
@@ -584,6 +612,11 @@ class Compositor:
 
 
 # ---- helpers shared with merge / flatten ----------------------------------------
+
+def _active_filters(params):
+    """The enabled entries of a layer's non-destructive filter list."""
+    return [f for f in (params.get("filters") or []) if isinstance(f, dict) and f.get("enabled", True)]
+
 
 def _knocks(node):
     """The node's knockout kind, or None."""

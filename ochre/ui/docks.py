@@ -245,6 +245,8 @@ class LayersDock(QDockWidget):
                 kind = getattr(node, "kind", "raster")
                 if kind != "raster":
                     text += "  [%s]" % kind
+                if (getattr(node, "params", None) or {}).get("filters"):
+                    text += "  [fx]"
                 if getattr(node, "mask", None) is not None:
                     if self.ctl.editing_mask and node is self.ctl.active_layer:
                         text += "  [painting mask]"

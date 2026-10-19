@@ -134,8 +134,8 @@ def save(doc, path, compositor=None):
                 warnings.append("adjustment layer %r is not kept in OpenRaster" % node.name)
                 continue
             if getattr(node, "mask", None) is not None or getattr(node, "styles", None) \
-                    or getattr(node, "clip", False):
-                warnings.append("mask / styles / clipping on %r are flattened into its pixels"
+                    or getattr(node, "clip", False) or (getattr(node, "params", None) or {}).get("filters"):
+                warnings.append("mask / styles / clipping / filters on %r are flattened into its pixels"
                                 % node.name)
             cell = doc.cells.get((node.id, frame.id))
             px = np.zeros((doc.height, doc.width, 4), np.uint8)

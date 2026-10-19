@@ -65,6 +65,8 @@ class Controller:
         except Exception:                                   # noqa: BLE001
             pass
         self.session = Session(state_dir)
+        # Effects as non-destructive filters (GIMP 3) instead of baked in.
+        self.non_destructive = self.session.flag("NonDestructiveFilters", False)
         self._saved_marker = None
         self._tool_overrides = {}
         # Document pixels that count as "on" a point; the canvas sets it to a
@@ -882,6 +884,17 @@ class Controller:
             return self.doc.bounds
         if getattr(target, "kind", "raster") not in ("raster",) and not getattr(target, "is_mask", False):
             return None
+        if getattr(self, "non_destructive", False) and getattr(target, "kind", "raster") == "raster" \
+                and not getattr(target, "is_mask", False) and not target.index_locked \
+                and self.selection.mask is None:
+            # GIMP 3's non-destructive filters: kept as a list on the layer,
+            # editable and removable, until merged. (A selection limits a
+            # filter to part of the layer, which a list entry cannot carry,
+            # so with a selection the filter is applied for good.)
+            filters = list(target.params.get("filters", []))
+            filters.append({"name": name, "params": dict(effect.props.token()), "enabled": True})
+            self.set_layer_params(target, {"filters": filters})
+            return self.doc.bounds
         cell = self.doc.cell(target)
         bounds = self.doc.bounds
         before = PixelDelta.capture(self.doc, target.id, self.doc.frame.id, bounds, effect.label)
@@ -1142,11 +1155,115 @@ class Controller:
         return True
 
     def set_smart_filters(self, filters, layer=None):
+        """Replace a layer's filter list: a smart object's smart filters, or
+        a pixel layer's non-destructive filters. One undo step."""
         target = layer or self.active_layer
-        if target is None or getattr(target, "kind", "raster") != "smart":
+        if target is None or target.is_group or getattr(target, "kind", "raster") not in ("smart", "raster"):
             return False
         self.set_layer_params(target, {"filters": [dict(f) for f in filters]})
         return True
+
+    def set_non_destructive(self, on):
+        """Effects > Apply Filters Non-Destructively, remembered between runs."""
+        self.non_destructive = bool(on)
+        if self.session is not None:
+            self.session.set_flag("NonDestructiveFilters", self.non_destructive)
+        return self.non_destructive
+
+    def layer_filters(self, layer=None):
+        target = layer or self.active_layer
+        if target is None or target.is_group:
+            return []
+        return [dict(f) for f in (target.params or {}).get("filters", [])]
+
+    def merge_layer_filters(self, layer=None):
+        """Bake a pixel layer's non-destructive filters into its pixels and
+        clear the list (GIMP's Merge Filter). One undo step."""
+        from ..engine.commands import PixelDelta
+        target = layer or self.active_layer
+        if target is None or getattr(target, "kind", "raster") != "raster" \
+                or not (target.params or {}).get("filters"):
+            return False
+        label = "Merge Filters"
+        self.history.begin_group()
+        img = self._layer_pixels_unmasked(target)
+        d = PixelDelta.capture(self.doc, target.id, self.doc.frame.id, self.doc.bounds, label)
+        cell = self.doc.cell(target)
+        cell.plane("rgba")[...] = img
+        cell._touched(self.doc.bounds)
+        if d is not None:
+            self.history.push(d, label, frame_id=self.doc.frame.id)
+        params = dict(target.params)
+        params.pop("filters", None)
+        self.set_layer_property(target, "params", params)
+        self.history.end_group(label)
+        return True
+
+    def _layer_pixels_unmasked(self, layer):
+        """A pixel layer's pixels through its filters only (no mask, no
+        styles, no opacity): what merging the filters writes."""
+        from ..engine.compositor import _Leaf
+        cell = self.doc.cells.get((layer.id, self.doc.frame.id))
+        if cell is None:
+            return np.zeros((self.doc.height, self.doc.width, 4), np.uint8)
+        self.compositor._frame_for_group = self.doc.frame
+        return np.array(self.compositor._filtered(
+            _Leaf(cell, self.blends.opcode("Normal"), 255, layer)))
+
+    # ---- linked smart objects ---------------------------------------------------------
+
+    def place_linked(self, path):
+        """File > Place Linked: a smart object whose original is a file on
+        disk. The pixels are kept in the document too, so it still renders
+        when the file is missing; Update Modified Content re-reads it."""
+        layer = self.place_embedded(path)
+        layer.params = dict(layer.params, link=os.path.abspath(path),
+                            link_mtime=float(os.path.getmtime(path)))
+        return layer
+
+    def linked_status(self):
+        """[(layer, 'ok' | 'modified' | 'missing')] for every linked smart object."""
+        out = []
+        for lay in self.doc.layers():
+            link = (lay.params or {}).get("link") if getattr(lay, "kind", "raster") == "smart" else None
+            if not link:
+                continue
+            if not os.path.exists(link):
+                out.append((lay, "missing"))
+            elif abs(os.path.getmtime(link) - float(lay.params.get("link_mtime", 0))) > 1e-6:
+                out.append((lay, "modified"))
+            else:
+                out.append((lay, "ok"))
+        return out
+
+    def update_linked(self, force=False):
+        """Layer > Smart Object > Update Modified Content: re-read every linked
+        file that changed (or all, with force). Returns how many updated."""
+        n = 0
+        stale = [l for l, st in self.linked_status() if st == "modified" or (force and st == "ok")]
+        if not stale:
+            return 0
+        self.history.begin_group()
+        for lay in stale:
+            path = lay.params["link"]
+            if self.replace_smart_contents(path, lay):
+                self.set_layer_params(lay, {"link_mtime": float(os.path.getmtime(path))})
+                n += 1
+        self.history.end_group("Update Modified Content")
+        return n
+
+    def relink(self, path, layer=None):
+        """Layer > Smart Object > Relink to File."""
+        target = layer or self.active_layer
+        if target is None or getattr(target, "kind", "raster") != "smart":
+            return False
+        self.history.begin_group()
+        ok = self.replace_smart_contents(path, target)
+        if ok:
+            self.set_layer_params(target, {"link": os.path.abspath(path),
+                                           "link_mtime": float(os.path.getmtime(path))})
+        self.history.end_group("Relink")
+        return ok
 
     def replace_smart_contents(self, path_or_rgba, layer=None):
         """Layer > Smart Object > Replace Contents: a new original, keeping
@@ -1605,7 +1722,8 @@ class Controller:
             return False
         plain = (getattr(upper, "kind", "raster") == "raster" and upper.mask is None
                  and not upper.styles and not upper.clip
-                 and getattr(upper, "fill_opacity", 255) == 255)
+                 and getattr(upper, "fill_opacity", 255) == 255
+                 and not (upper.params or {}).get("filters"))
         rects = transform.merge_rects(self.doc, upper, lower)
         if not plain:
             # An adjustment, a fill or a style reaches past the upper layer's
