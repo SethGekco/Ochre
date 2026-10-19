@@ -366,6 +366,10 @@ def load(path, settings=None):
                 node.clip = db.getbool(section, "Clip", False)
                 bi = db.getints(section, "BlendIf")
                 node.blend_if = tuple(bi) if len(bi) == 8 else None
+                if node.kind == "smart":
+                    from ..layer import SmartSource
+                    sw, sh = node.params.get("src_w"), node.params.get("src_h")
+                    node.smart_source = SmartSource(node, (int(sw), int(sh)) if sw and sh else None)
                 if db.getbool(section, "Mask", False):
                     node.mask = LayerMask(node)
                     node.mask_enabled = db.getbool(section, "MaskEnabled", True)
@@ -480,6 +484,14 @@ def load(path, settings=None):
 
 
 def _encode_value(value):
+    import json
+    if isinstance(value, dict) or (isinstance(value, (tuple, list)) and value
+                                   and isinstance(value[0], dict)):
+        return "json:" + json.dumps(value, separators=(",", ":"))
+    if isinstance(value, (tuple, list)) and any(isinstance(v, float) for v in value):
+        return "json:" + json.dumps(list(value))
+    if isinstance(value, (tuple, list)) and not value:
+        return "json:[]"
     if isinstance(value, (tuple, list)) and value and isinstance(value[0], (tuple, list)):
         return ";".join(",".join(str(int(v)) for v in pair) for pair in value)
     if isinstance(value, (tuple, list)):
@@ -492,6 +504,12 @@ def _encode_value(value):
 def _decode_value(text):
     """Typed back: comma lists of ints become tuples, numbers numbers."""
     t = str(text).strip()
+    if t.startswith("json:"):
+        import json
+        try:
+            return json.loads(t[5:])
+        except ValueError:
+            return t
     if ";" in t:
         try:
             return tuple(tuple(int(v) for v in pair.split(",")) for pair in t.split(";") if pair)

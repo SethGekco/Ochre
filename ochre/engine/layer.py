@@ -77,8 +77,9 @@ PASS_THROUGH = "PassThrough"
 # it; a fill layer generates its content (a colour or a gradient) at any
 # size. Adjustment and fill layers are Photoshop's; they keep edits
 # re-editable instead of baked in.
-RASTER, ADJUSTMENT, FILL, TEXT = "raster", "adjustment", "fill", "text"
-GENERATED = (FILL, TEXT)      # kinds whose pixels are made from params, not stored
+RASTER, ADJUSTMENT, FILL, TEXT, SMART = "raster", "adjustment", "fill", "text", "smart"
+GENERATED = (FILL, TEXT, SMART)   # kinds whose pixels are made from params, not stored
+SRC_SUFFIX = "~src"
 
 
 class Layer(LayerNode):
@@ -91,6 +92,7 @@ class Layer(LayerNode):
         self.clip = False         # clipped to the layer below (a clipping mask)
         self.mask = None          # LayerMask, or None
         self.mask_enabled = True
+        self.smart_source = None  # SmartSource, for a smart object
         self.styles = {}          # layer styles, engine/layerstyles.py
         # Blend If (Photoshop's Blending Options): this layer's and the
         # underlying image's luminance ranges, each (black lo, black hi,
@@ -148,6 +150,26 @@ class LayerMask(Layer):
         super().__init__(name=owner.name + " (mask)", planes=("rgba",),
                          layer_id=owner.id + MASK_SUFFIX)
         self.owner = owner
+
+    def effectively_visible(self):
+        return False
+
+
+class SmartSource(Layer):
+    """A smart object's original pixels, at their own size.
+
+    The smart object layer renders them through its transform and smart
+    filters, so scaling down and back up loses nothing. Stored like a mask:
+    cells keyed by the owner's id + SRC_SUFFIX, found through the owner.
+    """
+
+    is_source = True
+
+    def __init__(self, owner, size=None):
+        super().__init__(name=owner.name + " (source)", planes=("rgba",),
+                         layer_id=owner.id + SRC_SUFFIX)
+        self.owner = owner
+        self.size = tuple(size) if size else None     # (w, h); None = canvas size
 
     def effectively_visible(self):
         return False

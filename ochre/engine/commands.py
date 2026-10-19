@@ -349,6 +349,8 @@ class StructureDelta(Command):
             # the mask object stays attached to the node while it is out.
             if getattr(n, "mask", None) is not None:
                 out.append(n.mask.id)
+            if getattr(n, "smart_source", None) is not None:
+                out.append(n.smart_source.id)
         return out
 
     @staticmethod
@@ -506,7 +508,7 @@ class GeometryDelta(Command):
         out = GeometryDelta(doc.width, doc.height, cells, selection, label, paths)
         out._marks = {a: list(getattr(doc, a, [])) for a in MARKS}
         out._params = {l.id: dict(l.params) for l in doc.layers()
-                       if getattr(l, "kind", "raster") == "text"}
+                       if getattr(l, "kind", "raster") in ("text", "smart")}
         return out
 
     def undo(self, doc):
@@ -737,3 +739,37 @@ class CompsDelta(Command):
 
     def nbytes(self):
         return 64 * len(self.comps)
+
+
+class SourceDelta(Command):
+    """A smart object's source present or absent, with its cells, and the
+    layer's kind and params -- so converting to a smart object (or
+    rasterizing one) is one exact undo step."""
+
+    __slots__ = ("label", "owner_id", "source", "cells", "kind", "params")
+
+    def __init__(self, doc, owner, label="Smart Object"):
+        self.label = label
+        self.owner_id = owner.id
+        self.source = getattr(owner, "smart_source", None)
+        self.cells = {} if self.source is None else \
+            {k: v for k, v in doc.cells.items() if k[0] == self.source.id}
+        self.kind = owner.kind
+        self.params = dict(owner.params)
+
+    def undo(self, doc):
+        owner = doc.layer(self.owner_id)
+        if owner is None:
+            return None, None
+        opposite = SourceDelta(doc, owner, self.label)
+        if owner.smart_source is not None:
+            for key in [k for k in doc.cells if k[0] == owner.smart_source.id]:
+                del doc.cells[key]
+        owner.smart_source = self.source
+        doc.cells.update(self.cells)
+        owner.kind = self.kind
+        owner.params = dict(self.params)
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return sum(c.nbytes() for c in self.cells.values())

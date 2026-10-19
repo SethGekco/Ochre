@@ -117,6 +117,11 @@ def _rebuild(doc, width, height, convert, bbox_fn):
         frame = doc.frame_by_id(frame_id)
         if layer is None or frame is None:
             continue
+        if getattr(layer, "is_source", False):
+            # A smart object's original is never resampled: its matrix moves
+            # instead (_map_smart), which is the point of a smart object.
+            doc.cells[(layer_id, frame_id)] = surface
+            continue
         fresh = doc.cell(layer, frame)
         for name in surface.authoritative:
             plane = surface.planes.get(name)
@@ -137,6 +142,16 @@ def _map_paths(doc, fn):
     for path in getattr(doc, "paths", ()):
         path.map_points(fn)
     _map_marks(doc, fn)
+
+
+def _map_smart(doc, hm):
+    """Smart objects follow a geometry change by composing it into their
+    matrix (hm: old document -> new document, 3x3)."""
+    for layer in doc.layers():
+        if getattr(layer, "kind", "raster") != "smart" or not layer.params:
+            continue
+        m = np.asarray(layer.params.get("matrix"), np.float64).reshape(3, 3)
+        layer.params = dict(layer.params, matrix=[float(v) for v in (np.asarray(hm) @ m).ravel()])
 
 
 def _map_text(doc, fn, scale=None):
@@ -199,6 +214,7 @@ def resize_image(doc, width, height, method=BILINEAR):
 
     _map_paths(doc, lambda p: (p[0] * sx, p[1] * sy))
     _map_text(doc, lambda p: (p[0] * sx, p[1] * sy), (sx, sy))
+    _map_smart(doc, np.diag([sx, sy, 1.0]))
     return _rebuild(doc, width, height, convert, bbox)
 
 
@@ -224,6 +240,7 @@ def reframe(doc, width, height, dx, dy):
 
     _map_paths(doc, lambda p: (p[0] + dx, p[1] + dy))
     _map_text(doc, lambda p: (p[0] + dx, p[1] + dy))
+    _map_smart(doc, np.array([[1, 0, dx], [0, 1, dy], [0, 0, 1.0]]))
     return _rebuild(doc, width, height, convert, lambda r: r.translated(dx, dy))
 
 
@@ -249,6 +266,8 @@ def flip_document(doc, horizontal=True):
                 else Rect(r.x, h - r.y1, r.w, r.h))
 
     _map_paths(doc, (lambda p: (w - p[0], p[1])) if horizontal else (lambda p: (p[0], h - p[1])))
+    _map_smart(doc, np.array([[-1, 0, w], [0, 1, 0], [0, 0, 1.0]]) if horizontal
+               else np.array([[1, 0, 0], [0, -1, h], [0, 0, 1.0]]))
     return _rebuild(doc, w, h, lambda s, n, p: flip_plane(p, horizontal), bbox)
 
 
@@ -269,6 +288,9 @@ def rotate_document(doc, quarter_turns):
     _map_paths(doc, {1: lambda p: (h - p[1], p[0]),
                      2: lambda p: (w - p[0], h - p[1]),
                      3: lambda p: (p[1], w - p[0])}[k])
+    _map_smart(doc, {1: np.array([[0, -1, h], [1, 0, 0], [0, 0, 1.0]]),
+                     2: np.array([[-1, 0, w], [0, -1, h], [0, 0, 1.0]]),
+                     3: np.array([[0, 1, 0], [-1, 0, w], [0, 0, 1.0]])}[k])
     return _rebuild(doc, nw, nh, lambda s, n, p: rotate_plane(p, k), bbox)
 
 
@@ -415,6 +437,7 @@ def perspective_crop(doc, quad, method=BILINEAR):
         return None
     hm = warp.homography(q, [(0, 0), (w, 0), (w, h), (0, h)])
     _map_paths(doc, lambda p: tuple(warp.apply(hm, [p])[0]))
+    _map_smart(doc, hm)
     return _rebuild(doc, w, h,
                     lambda s, n, p: _warp_plane(s, n, p, hm, w, h, method), lambda r: r)
 
@@ -432,6 +455,7 @@ def rotate_image_by(doc, degrees, method=BILINEAR, expand=True):
     hm = warp.translate(nw / 2.0, nh / 2.0) @ warp.rotate_about(rad, 0, 0) @ \
         warp.translate(-w / 2.0, -h / 2.0)
     _map_paths(doc, lambda p: tuple(warp.apply(hm, [p])[0]))
+    _map_smart(doc, hm)
     return _rebuild(doc, nw, nh,
                     lambda s_, n, p: _warp_plane(s_, n, p, hm, nw, nh, method), lambda r: r)
 

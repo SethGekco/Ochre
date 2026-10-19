@@ -561,6 +561,7 @@ class MainWindow(QMainWindow):
         self._act(file_menu, "&Open...", self.do_open, "Ctrl+O")
         self.recent_menu = file_menu.addMenu("Open &Recent")
         self._rebuild_recent()
+        self._act(file_menu, "Place &Embedded...", self.do_place_embedded)
         self._act(file_menu, "&Save", self.do_save, "Ctrl+S")
         self._act(file_menu, "Save &As...", self.do_save_as, "Ctrl+Shift+S")
         self._act(file_menu, "&Export As...", self.do_export_as, "Ctrl+Alt+Shift+W")
@@ -853,7 +854,55 @@ class MainWindow(QMainWindow):
             fx.ctl.set_layer_styles, fx.ctl.active_layer, {}))
         menu.addAction("Edit Adjustment / Fill...", self.do_edit_layer_content)
         menu.addAction("&Rasterize Layer", lambda: fx._layer_fx(fx.ctl.rasterize_layer))
+        smart = menu.addMenu("Smart O&bject")
+        smart.addAction("&Convert to Smart Object", lambda: fx._layer_fx(fx.ctl.convert_to_smart))
+        smart.addAction("&Edit Contents", self.do_edit_smart_contents)
+        smart.addAction("&Update from This Tab", self.do_update_smart_object)
+        smart.addAction("&Replace Contents...", self.do_replace_smart_contents)
+        smart.addAction("Clear Smart &Filters", lambda: fx._layer_fx(fx.ctl.set_smart_filters, []))
         return menu
+
+    def do_edit_smart_contents(self):
+        if self.ctl.edit_smart_contents() is None:
+            QMessageBox.information(self, "Edit Contents", "The active layer is not a smart object.")
+            return
+        self.canvas.bind()
+        self._sync_all()
+
+    def do_update_smart_object(self):
+        if getattr(self.ctl, "smart_link", None) is None:
+            QMessageBox.information(self, "Update Smart Object",
+                                    "This tab is not a smart object's contents.")
+            return False
+        if not self.ctl.update_smart_link():
+            QMessageBox.warning(self, "Update Smart Object",
+                                "The document or layer this came from is no longer open.")
+            return False
+        self._sync_all()
+        return True
+
+    def do_replace_smart_contents(self):
+        if getattr(self.ctl.active_layer, "kind", "raster") != "smart":
+            QMessageBox.information(self, "Replace Contents", "The active layer is not a smart object.")
+            return
+        exts = " ".join("*.%s" % e for e in supported_extensions())
+        path, _ = QFileDialog.getOpenFileName(self, "Replace Contents", "", "Images (%s)" % exts)
+        if path:
+            self._layer_fx(self.ctl.replace_smart_contents, path)
+
+    def do_place_embedded(self):
+        exts = " ".join("*.%s" % e for e in supported_extensions())
+        path, _ = QFileDialog.getOpenFileName(self, "Place Embedded", "", "Images (%s)" % exts)
+        if not path:
+            return
+        try:
+            self.ctl.place_embedded(path)
+        except Exception as exc:                            # noqa: BLE001
+            QMessageBox.warning(self, "Place failed", str(exc))
+            return
+        self.layers_dock.sync()
+        self.canvas.refresh()
+        self.canvas.viewport().update()
 
     def _layer_fx(self, fn, *args):
         if self.ctl.active_layer is None:
@@ -1014,6 +1063,9 @@ class MainWindow(QMainWindow):
         self.open_file(path)
 
     def do_save(self):
+        if self.ctl.path is None and getattr(self.ctl, "smart_link", None) is not None:
+            # A smart object's contents tab: Save puts it back, as in Photoshop.
+            return self.do_update_smart_object()
         if self.ctl.path is None:
             return self.do_save_as()
         try:

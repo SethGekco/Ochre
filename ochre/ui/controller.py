@@ -252,7 +252,7 @@ class Controller:
     _PER_DOC = ("doc", "history", "selection", "compositor", "blends", "display",
                 "path", "dirty_since_save", "_saved_marker", "active_layer",
                 "_pending", "quick_mask", "last_measure", "_history_src",
-                "editing_mask")
+                "editing_mask", "smart_link")
 
     def _capture(self):
         return {k: getattr(self, k, None) for k in self._PER_DOC}
@@ -264,7 +264,7 @@ class Controller:
     def _pristine(self):
         """An untitled document nobody has touched: replaced, not kept."""
         return (self.doc is not None and self.path is None and not self.is_modified()
-                and not self.history.entries)
+                and not self.history.entries and getattr(self, "smart_link", None) is None)
 
     def document_titles(self):
         """One title per open document, '*' marking unsaved work."""
@@ -273,8 +273,7 @@ class Controller:
             if i == self.current_doc:
                 out.append(self.title)
                 continue
-            path = state.get("path")
-            name = os.path.basename(path) if path else "Untitled"
+            name = self._doc_name(state.get("path"), state.get("smart_link"))
             out.append(("*" if self._state_modified(state) else "") + name)
         return out
 
@@ -349,7 +348,7 @@ class Controller:
         self.emit("documents.changed")
         return True
 
-    def _adopt(self, doc, path):
+    def _adopt(self, doc, path, link=None):
         # A new tab, unless the current document is an untouched Untitled
         # -- then it is simply replaced, as Paint.NET does with its blank
         # start-up canvas.
@@ -373,7 +372,9 @@ class Controller:
         self.path = path
         self.dirty_since_save = False
         self._saved_marker = self.history.marker()
-        if self.session is not None:
+        # A smart object's contents tab: (parent document, layer id).
+        self.smart_link = link
+        if self.session is not None and link is None:
             self.session.remember_size(doc.width, doc.height)
         leaves = doc.layers()
         self.active_layer = leaves[-1] if leaves else None
@@ -407,8 +408,16 @@ class Controller:
 
     @property
     def title(self):
-        name = os.path.basename(self.path) if self.path else "Untitled"
-        return ("*" if self.is_modified() else "") + name
+        return ("*" if self.is_modified() else "") + self._doc_name(self.path, getattr(self, "smart_link", None))
+
+    @staticmethod
+    def _doc_name(path, link):
+        if path:
+            return os.path.basename(path)
+        if link is not None:
+            layer = link[0].layer(link[1])
+            return "%s (contents)" % (layer.name if layer is not None else "Smart Object")
+        return "Untitled"
 
     def addons_host(self, addon_id):
         """A Host bound to one addon, for calls made after registration."""
@@ -655,6 +664,12 @@ class Controller:
         copy.kind, copy.params = source.kind, dict(source.params)
         copy.clip, copy.mask_enabled = source.clip, source.mask_enabled
         copy.blend_if = source.blend_if
+        if getattr(source, "smart_source", None) is not None:
+            from ..engine.layer import SmartSource
+            copy.smart_source = SmartSource(copy, source.smart_source.size)
+            for (lid, fid), scell in list(self.doc.cells.items()):
+                if lid == source.smart_source.id:
+                    self.doc.cells[(copy.smart_source.id, fid)] = _copy_surface(scell)
         copy.styles = {k: dict(v) for k, v in source.styles.items()}
         if source.mask is not None:
             from ..engine.layer import LayerMask
@@ -846,6 +861,14 @@ class Controller:
         target = self.paint_target
         if effect is None or target is None or target.is_group:
             return None
+        if getattr(target, "kind", "raster") == "smart":
+            # On a smart object a filter is a SMART FILTER: listed, editable,
+            # removable, applied by the compositor over the transformed
+            # original -- never baked in.
+            filters = list(target.params.get("filters", []))
+            filters.append({"name": name, "params": dict(effect.props.token()), "enabled": True})
+            self.set_layer_params(target, {"filters": filters})
+            return self.doc.bounds
         if getattr(target, "kind", "raster") not in ("raster",) and not getattr(target, "is_mask", False):
             return None
         cell = self.doc.cell(target)
@@ -991,6 +1014,158 @@ class Controller:
         self.history.end_group(label)
         self._after_structure_change()
         return True
+
+    # ---- smart objects -------------------------------------------------------------
+
+    def convert_to_smart(self, layer=None):
+        """Layer > Smart Object > Convert: the layer's pixels become the
+        object's untouchable original; from now on it is transformed and
+        filtered without loss. One undo step."""
+        from ..engine import smartobject
+        from ..engine.commands import PixelDelta, SourceDelta
+        from ..engine.layer import SMART, SmartSource
+        target = layer or self.active_layer
+        if target is None or target.is_group or getattr(target, "kind", "raster") != "raster" \
+                or target.index_locked:
+            return None
+        label = "Convert to Smart Object"
+        self.history.begin_group()
+        before = SourceDelta(self.doc, target, label)
+        target.smart_source = SmartSource(target)
+        for frame in self.doc.frames:
+            cell = self.doc.cells.get((target.id, frame.id))
+            if cell is None or cell.is_empty():
+                continue
+            src = self.doc.cell(target.smart_source, frame)
+            src.plane("rgba")[...] = cell.plane("rgba")
+            src._touched(self.doc.bounds)
+            delta = PixelDelta.capture(self.doc, target.id, frame.id, self.doc.bounds, label)
+            cell.erase_masked(self.doc.bounds, None)
+            if delta is not None:
+                self.history.push(delta, label, frame_id=frame.id)
+        target.kind = SMART
+        target.params = {"matrix": list(smartobject.IDENTITY), "src_w": self.doc.width,
+                         "src_h": self.doc.height, "filters": []}
+        self.history.push(before, label)
+        self.history.end_group(label)
+        self._after_structure_change()
+        return target
+
+    def place_embedded(self, path_or_rgba, name=None):
+        """File > Place Embedded: an image as a new smart object, scaled to
+        fit the canvas and centred, at its own full resolution inside."""
+        from ..engine import smartobject
+        from ..engine.commands import StructureDelta
+        from ..engine.layer import SMART, SmartSource
+        if isinstance(path_or_rgba, str):
+            from PIL import Image
+            rgba = np.asarray(Image.open(path_or_rgba).convert("RGBA"))
+            name = name or os.path.splitext(os.path.basename(path_or_rgba))[0]
+        else:
+            rgba = np.asarray(path_or_rgba, np.uint8)
+        sh, sw = rgba.shape[:2]
+        layer = self.doc.add_layer(name or "Placed")
+        layer.kind = SMART
+        layer.params = {"matrix": smartobject.fit_matrix(sw, sh, self.doc.width, self.doc.height),
+                        "src_w": sw, "src_h": sh, "filters": []}
+        # The source keeps the image's own size, even when that is larger
+        # than the canvas: that is what makes scaling it up again lossless.
+        layer.smart_source = SmartSource(layer, (sw, sh))
+        surf = self.doc.cell(layer.smart_source)
+        surf.plane("rgba")[...] = rgba
+        surf._touched(surf.bounds)
+        self.history.push(StructureDelta.insertion(self.doc, layer, "Place"), "Place")
+        self.set_active_layer(layer)
+        self._after_structure_change()
+        return layer
+
+    def set_smart_filters(self, filters, layer=None):
+        target = layer or self.active_layer
+        if target is None or getattr(target, "kind", "raster") != "smart":
+            return False
+        self.set_layer_params(target, {"filters": [dict(f) for f in filters]})
+        return True
+
+    def replace_smart_contents(self, path_or_rgba, layer=None):
+        """Layer > Smart Object > Replace Contents: a new original, keeping
+        the object's transform (rescaled so it fills the same box)."""
+        from ..engine.commands import SourceDelta
+        from ..engine.surface import Surface
+        target = layer or self.active_layer
+        if target is None or getattr(target, "kind", "raster") != "smart":
+            return False
+        if isinstance(path_or_rgba, str):
+            from PIL import Image
+            rgba = np.asarray(Image.open(path_or_rgba).convert("RGBA"))
+        else:
+            rgba = np.asarray(path_or_rgba, np.uint8)
+        label = "Replace Contents"
+        before = SourceDelta(self.doc, target, label)
+        from ..engine.layer import SmartSource
+        # The new source has the same id as the old one, so the old cells must
+        # leave the map first -- else doc.cell() hands back the OLD cell and
+        # the new pixels are written into the very object the undo kept.
+        for key in [k for k in self.doc.cells if k[0] == target.smart_source.id]:
+            del self.doc.cells[key]
+        sh, sw = rgba.shape[:2]
+        target.smart_source = SmartSource(target, (sw, sh))
+        surf = self.doc.cell(target.smart_source)
+        surf.plane("rgba")[...] = rgba
+        surf._touched(surf.bounds)
+        m = np.asarray(target.params["matrix"], np.float64).reshape(3, 3)
+        k = np.diag([target.params["src_w"] / float(sw), target.params["src_h"] / float(sh), 1.0])
+        target.params = dict(target.params, matrix=[float(v) for v in (m @ k).ravel()],
+                             src_w=sw, src_h=sh)
+        self.history.push(before, label)
+        self._after_structure_change()
+        return True
+
+    def edit_smart_contents(self, layer=None):
+        """Layer > Smart Object > Edit Contents: the object's original opens
+        in its own tab, at its own size. Edit it with anything; Save (or
+        Update Smart Object) puts the result back into the parent, keeping
+        the object's transform and smart filters. The parent's original is
+        never touched until then, and that update is one undo step there."""
+        from ..engine.layer import SMART
+        target = layer or self.active_layer
+        if target is None or getattr(target, "kind", "raster") != SMART:
+            return None
+        parent = self.doc
+        src = self.doc.cell(target.smart_source)
+        rgba = src.plane("rgba").copy()
+        h, w = rgba.shape[:2]
+        doc = Document(w, h, settings=self.settings)
+        lay = doc.add_layer(target.name)
+        surf = doc.cell(lay)
+        surf.plane("rgba")[...] = rgba
+        surf._touched(doc.bounds)
+        self._adopt(doc, path=None, link=(parent, target.id))
+        return doc
+
+    def update_smart_link(self):
+        """Write this contents tab back into its parent's smart object.
+        False when this is not a contents tab, or the parent (or the layer)
+        has since been closed or deleted."""
+        link = getattr(self, "smart_link", None)
+        if link is None:
+            return False
+        parent, layer_id = link
+        index = next((i for i, st in enumerate(self.documents)
+                      if st is not None and st.get("doc") is parent), None)
+        if index is None:
+            return False
+        rgba = self.merged().copy()
+        here = self.current_doc
+        self.switch_document(index)
+        target = self.doc.layer(layer_id)
+        ok = bool(target is not None and getattr(target, "kind", "raster") == "smart"
+                  and self.replace_smart_contents(rgba, target))
+        self.switch_document(here)
+        if ok:
+            self.dirty_since_save = False
+            self._saved_marker = self.history.marker()
+            self.emit("documents.changed")
+        return ok
 
     # ---- refine edge, sky replacement, merge to HDR, PDF -----------------------------
 
@@ -1312,6 +1487,8 @@ class Controller:
             if getattr(target, "kind", "raster") == "raster" and \
                     (target.id, frame.id) not in self.doc.cells:
                 continue
+            if getattr(target, "kind", "raster") == "smart" and frame is not self.doc.frame:
+                continue
             cell = self.doc.cell(target, frame)
             leaf = _Leaf(cell if getattr(target, "kind", "raster") == "raster" else None,
                          self.blends.opcode("Normal"), 255, target)
@@ -1326,6 +1503,12 @@ class Controller:
             if getattr(target, attr) != empty:
                 self.history.push(PropertyDelta(target.id, attr, getattr(target, attr)), label)
                 setattr(target, attr, empty)
+        if getattr(target, "smart_source", None) is not None:
+            from ..engine.commands import SourceDelta
+            self.history.push(SourceDelta(self.doc, target, label), label)
+            for key in [k for k in self.doc.cells if k[0] == target.smart_source.id]:
+                del self.doc.cells[key]
+            target.smart_source = None
         if target.mask is not None:
             self.history.push(MaskDelta.capture(self.doc, target, label), label)
             for key in [k for k in self.doc.cells if k[0] == target.mask.id]:
@@ -1507,6 +1690,7 @@ class Controller:
             # uniform, so this is the honest approximation for outlines).
             transform._map_paths(self.doc, lambda p: (p[0] * sx, p[1] * sy))
             transform._map_text(self.doc, lambda p: (p[0] * sx, p[1] * sy), (sx, sy))
+            transform._map_smart(self.doc, np.diag([sx, sy, 1.0]))
             return transform._rebuild(self.doc, width, height,
                                       lambda s, n, p: seamcarve.apply_maps(p, cols, rows_t),
                                       lambda r: Rect(0, 0, width, height))
@@ -2690,6 +2874,18 @@ RECORDABLE = (
     "add_layer_mask", "delete_layer_mask", "add_guide", "clear_guides", "slices_from_guides",
     "save_selection", "load_selection", "refine_selection", "select_sky",
 )
+
+
+def _copy_surface(surface):
+    from ..engine.surface import Surface
+    out = Surface(surface.width, surface.height, tuple(surface.planes), surface.authoritative,
+                  surface.palette)
+    for name in surface.authoritative:
+        plane = surface.planes.get(name)
+        if plane is not None:
+            out.plane(name)[...] = plane
+    out.content_bbox = surface.content_bbox
+    return out
 
 
 def _plain(v):

@@ -58,9 +58,9 @@ import numpy as np
 from . import accel
 from .blend import DEFAULT as DEFAULT_BLENDS
 from .geometry import Rect
-from .layer import ADJUSTMENT, FILL, PASS_THROUGH, TEXT
+from .layer import ADJUSTMENT, FILL, PASS_THROUGH, SMART, TEXT
 
-_GENERATED = (FILL, TEXT)
+_GENERATED = (FILL, TEXT, SMART)
 
 GROUP = "group"      # kind of a _Leaf standing for a whole isolated group
 
@@ -214,6 +214,8 @@ class Compositor:
         if kind == TEXT:
             from . import textlayer
             return textlayer.pixels(layer.params, r)
+        if kind == SMART:
+            return self._smart_image(layer)[r.slice()]
         return leaf.surface.view(r, "rgba")
 
     def _layer_mask(self, layer, r, frame):
@@ -247,6 +249,27 @@ class Compositor:
             mask = a if mask is None else accel.spec._mul(
                 mask.astype(np.uint32), a.astype(np.uint32)).astype(np.uint8)
         return mask
+
+    def _smart_image(self, layer):
+        """A smart object rendered from its source, cached until its
+        transform, filters or source pixels change."""
+        from . import smartobject
+        frame = self._frame_for_group or self.doc.frame
+        src = getattr(layer, "smart_source", None)
+        cell = None if src is None else self.doc.cells.get((src.id, frame.id))
+        rev = None if cell is None else (id(cell), cell.revision)
+        key = (repr(layer.params.get("matrix")), repr(layer.params.get("filters")),
+               layer.params.get("src_w"), layer.params.get("src_h"), rev,
+               self.doc.width, self.doc.height, frame.id)
+        cache = getattr(self, "_smart", None)
+        if cache is None:
+            cache = self._smart = {}
+        hit = cache.get(layer.id)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        img = smartobject.render(self.doc, layer, frame, self._effects_registry)
+        cache[layer.id] = (key, img)
+        return img
 
     def _effect(self, layer):
         from .effects import EffectRegistry

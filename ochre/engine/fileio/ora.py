@@ -124,6 +124,9 @@ def save(doc, path, compositor=None):
                 emit(node, el)
                 continue
             kind = getattr(node, "kind", "raster")
+            if kind == "smart":
+                warnings.append("smart object %r is saved as pixels (it stays smart in .ochre)"
+                                % node.name)
             if kind == "text":
                 warnings.append("text layer %r is saved as pixels (it stays editable in .ochre)"
                                 % node.name)

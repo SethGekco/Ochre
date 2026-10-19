@@ -23,7 +23,7 @@ apply it across frames, and a palette edit must reach every frame at once.
 
 from .frame import COLD, Frame, UNLOADED, WARM
 from .geometry import Rect
-from .layer import MASK_SUFFIX, Layer, LayerGroup
+from .layer import MASK_SUFFIX, SRC_SUFFIX, Layer, LayerGroup
 from .palette import Palette
 from .surface import Surface
 
@@ -104,6 +104,9 @@ class Document:
             # Masks are not in the tree; they hang off their owner.
             owner = self.root.find(layer_id[:-len(MASK_SUFFIX)])
             node = getattr(owner, "mask", None)
+        if node is None and isinstance(layer_id, str) and layer_id.endswith(SRC_SUFFIX):
+            owner = self.root.find(layer_id[:-len(SRC_SUFFIX)])
+            node = getattr(owner, "smart_source", None)
         if node is None:
             for ch in self.channels:
                 if ch.id == layer_id:
@@ -121,7 +124,7 @@ class Document:
             return False
         doomed = [n.id for n in ([node] if not node.is_group
                                  else list(node.walk(include_self=True)))]
-        doomed += [d + MASK_SUFFIX for d in doomed]
+        doomed += [d + MASK_SUFFIX for d in doomed] + [d + SRC_SUFFIX for d in doomed]
         for key in [k for k in self.cells if k[0] in doomed]:
             del self.cells[key]
         return parent.remove(node)
@@ -198,7 +201,10 @@ class Document:
         key = (layer_id, frame_obj.id)
         surface = self.cells.get(key)
         if surface is None and create:
-            surface = Surface(self.width, self.height,
+            # A smart object's source keeps its OWN size (a placed photo can
+            # be larger than the canvas); everything else is canvas-sized.
+            w, h = getattr(node, "size", None) or (self.width, self.height)
+            surface = Surface(w, h,
                               planes=node.planes,
                               authoritative=node.authoritative,
                               palette=self.palette if node.index_locked else None,

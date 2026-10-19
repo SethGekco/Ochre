@@ -72,6 +72,7 @@ class _FloatTransform(Tool):
         self._reset()
 
     def _reset(self):
+        self._smart = None
         self._lifted = False
         self._float = None
         self._float_index = None
@@ -83,10 +84,42 @@ class _FloatTransform(Tool):
 
     # ---- lifting -----------------------------------------------------------
 
+    # ---- smart objects: transform the MATRIX, not the pixels ------------------
+    # A smart object keeps its original; the transform tools edit where it
+    # lands (its source-to-document homography), and the compositor renders
+    # from the original every time -- Photoshop's non-destructive transform.
+
+    def _smart_layer(self, ctx):
+        layer = ctx.layer
+        return layer if getattr(layer, "kind", "raster") == "smart" else None
+
+    def _lift_smart(self, ctx, layer):
+        from .. import smartobject
+        p = layer.params
+        self._smart = layer
+        self._params0 = dict(p)
+        sw, sh = int(p.get("src_w", ctx.doc.width)), int(p.get("src_h", ctx.doc.height))
+        self._float = np.broadcast_to(np.zeros(4, np.uint8), (sh, sw, 4))
+        self._quad0 = np.asarray(smartobject.corners(p), np.float64)
+        self._quad = self._quad0.copy()
+        self._had_selection = False
+        self._origin = ctx.doc.bounds
+        self._lifted = True
+        return True
+
+    def _render_smart(self, ctx):
+        layer = self._smart
+        layer.params = dict(self._params0, matrix=[float(v) for v in self.matrix().ravel()])
+        ctx.doc.cell(layer).dirty.add(ctx.doc.bounds)
+        return ctx.doc.bounds
+
     def _lift(self, ctx):
         cell = ctx.cell
         if cell is None:
             return False
+        smart = self._smart_layer(ctx)
+        if smart is not None:
+            return self._lift_smart(ctx, smart)
         sel = ctx.selection
         if sel is None or sel.selects_all():
             # The box hugs what is actually painted, as Photoshop's does. The
@@ -132,6 +165,8 @@ class _FloatTransform(Tool):
         return warp.homography([(0, 0), (w, 0), (w, h), (0, h)], self._quad)
 
     def _render(self, ctx, final=False):
+        if getattr(self, "_smart", None) is not None:
+            return self._render_smart(ctx)
         cell = ctx.cell
         scope = self._last_rect.union(self._origin) if self._last_rect is not None else self._origin
         self._session.restore(scope)
@@ -218,6 +253,16 @@ class _FloatTransform(Tool):
         if not self._lifted:
             self._reset()
             return None
+        if getattr(self, "_smart", None) is not None:
+            from ..commands import PropertyDelta
+            layer = self._smart
+            self._render_smart(ctx)
+            if layer.params != self._params0 and ctx.history is not None:
+                ctx.history.push(PropertyDelta(layer.id, "params", self._params0, self.label),
+                                 self.label)
+            self._reset()
+            self.active = False
+            return ctx.doc.bounds
         rect = self._render(ctx, final=True)
         cmd = self._session.commit()
         if cmd is not None and ctx.history is not None:
@@ -233,6 +278,11 @@ class _FloatTransform(Tool):
         return rect
 
     def on_cancel(self, ctx):
+        if getattr(self, "_smart", None) is not None:
+            self._smart.params = dict(self._params0)
+            ctx.doc.cell(self._smart).dirty.add(ctx.doc.bounds)
+            self._reset()
+            return ctx.doc.bounds
         if self._session is not None:
             rect = self._session.cancel()
             self._reset()
