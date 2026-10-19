@@ -186,6 +186,7 @@ class PSDLayer:
         self.mask_default = 255
         self.mask_disabled = False
         self.section = 0                  # lsct: 0 layer, 1/2 group open/closed, 3 group end
+        self.blend_if = None
         self.pixels = None                # (h, w, 4)
         self.mask = None                  # (mh, mw)
 
@@ -243,7 +244,13 @@ def read(path):
                     r.take(mlen - 18)
                 else:
                     r.take(mlen)
-                r.take(r.u32())           # blending ranges
+                br = r.u32()              # blending ranges: Photoshop's Blend If
+                ranges = r.take(br)
+                if br >= 8:
+                    vals = tuple(ranges[:8])
+                    # Gray source then destination, each black lo/hi, white lo/hi.
+                    if vals != (0, 0, 255, 255, 0, 0, 255, 255):
+                        L.blend_if = vals
                 L.name = _pascal(r, 4)
                 while r.p + 12 <= extra_end:
                     sig = r.take(4)
@@ -381,6 +388,7 @@ def load(path, settings=None):
         node.visible = not L.hidden
         node.blend = L.blend
         node.clip = L.clipping
+        node.blend_if = L.blend_if
         t, l, b, rt = L.rect
         cell = doc.cell(node)
         dst = Rect(l, t, rt - l, b - t).clipped_to(width, height)
@@ -439,7 +447,8 @@ def save(doc, path, compositor=None):
     warnings = []
     records = []      # (record bytes, channel data bytes), bottom-first
 
-    def layer_record(name, rect, chans, blend, opacity, clip, hidden, section=None, mask=None):
+    def layer_record(name, rect, chans, blend, opacity, clip, hidden, section=None, mask=None,
+                     blend_if=None):
         t, l, b, r = rect
         rec = struct.pack(">iiii", t, l, b, r)
         rec += struct.pack(">H", len(chans))
@@ -460,7 +469,10 @@ def save(doc, path, compositor=None):
                                                           2 if disabled else 0) + b"\x00\x00"
         else:
             extra += struct.pack(">I", 0)
-        extra += struct.pack(">I", 0)
+        if blend_if:
+            extra += struct.pack(">I", 8) + bytes(int(v) & 255 for v in blend_if[:8])
+        else:
+            extra += struct.pack(">I", 0)
         extra += _pascal_bytes(name)
         uni = name.encode("utf-16-be")
         extra += _block(b"luni", struct.pack(">I", len(name)) + uni)
@@ -496,11 +508,14 @@ def save(doc, path, compositor=None):
             else:
                 px = np.zeros((height, width, 4), np.uint8)
                 leaf = _Leaf(cell, comp.blends.opcode("Normal"), 255, node)
-                saved_mask, node.mask = node.mask, None      # the mask goes in its own channel
+                # The mask and Blend If travel as themselves, not baked in.
+                saved_mask, node.mask = node.mask, None
+                saved_bi, node.blend_if = getattr(node, "blend_if", None), None
                 try:
                     comp._blend_leaf(px, leaf, doc.bounds, frame)
                 finally:
                     node.mask = saved_mask
+                    node.blend_if = saved_bi
             ys, xs = np.nonzero(px[..., 3])
             if ys.size:
                 t, l, b, r = int(ys.min()), int(xs.min()), int(ys.max()) + 1, int(xs.max()) + 1
@@ -517,7 +532,8 @@ def save(doc, path, compositor=None):
                     mask = (0, 0, height, width, 255, not node.mask_enabled)
             records.append(layer_record(node.name or "Layer", (t, l, b, r), chans, node.blend,
                                         node.opacity, getattr(node, "clip", False),
-                                        not node.visible, mask=mask))
+                                        not node.visible, mask=mask,
+                                        blend_if=getattr(node, "blend_if", None)))
     emit(doc.root)
 
     head = b"8BPS" + struct.pack(">H6xHIIHH", 1, 4, height, width, 8, 3)

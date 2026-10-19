@@ -380,3 +380,231 @@ class NavigatorDock(QDockWidget):
         self.view.thumb = QImage(small.data, small.shape[1], small.shape[0],
                                  small.shape[1] * 4, QImage.Format_RGBA8888)
         self.view.update()
+
+
+class ActionsDock(QDockWidget):
+    """Photoshop's Actions panel: record a sequence of commands once, play
+    it on any image, or on a whole folder (File > Automate > Batch)."""
+
+    def __init__(self, controller, parent=None):
+        super().__init__("Actions", parent)
+        self.setObjectName("Actions")
+        self.ctl = controller
+        from PySide6.QtWidgets import QListWidget, QPlainTextEdit
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(2, 2, 2, 2)
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(lambda _r: self._show_steps())
+        lay.addWidget(self.list, 1)
+        self.steps = QPlainTextEdit()
+        self.steps.setReadOnly(True)
+        self.steps.setMaximumHeight(110)
+        lay.addWidget(self.steps)
+        row = QHBoxLayout()
+        self.record_button = QPushButton("● Record")
+        self.record_button.clicked.connect(self._record)
+        self.play_button = QPushButton("▶ Play")
+        self.play_button.clicked.connect(self._play)
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.clicked.connect(self._delete)
+        for b in (self.record_button, self.play_button, self.delete_button):
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.setWidget(body)
+        self.sync()
+
+    def current(self):
+        item = self.list.currentItem()
+        return item.text() if item is not None else None
+
+    def sync(self, **_):
+        names = sorted(self.ctl.actions())
+        cur = self.current()
+        self.list.blockSignals(True)
+        self.list.clear()
+        self.list.addItems(names)
+        if cur in names:
+            self.list.setCurrentRow(names.index(cur))
+        self.list.blockSignals(False)
+        rec = getattr(self.ctl, "recording", None)
+        self.record_button.setText("■ Stop" if rec is not None else "● Record")
+        self.play_button.setEnabled(rec is None and self.current() is not None)
+        self._show_steps()
+
+    def _show_steps(self):
+        rec = getattr(self.ctl, "recording", None)
+        steps = rec["steps"] if rec is not None else self.ctl.actions().get(self.current() or "", [])
+        lines = []
+        for s in steps:
+            args = ", ".join([repr(a) for a in s.get("args", [])]
+                             + ["%s=%r" % kv for kv in s.get("kwargs", {}).items()])
+            lines.append("%s(%s)" % (s["op"], args))
+        prefix = "Recording '%s'...\n" % rec["name"] if rec is not None else ""
+        self.steps.setPlainText(prefix + "\n".join(lines))
+
+    def _record(self):
+        from PySide6.QtWidgets import QInputDialog
+        if getattr(self.ctl, "recording", None) is not None:
+            self.ctl.stop_recording()
+        else:
+            name, ok = QInputDialog.getText(self, "New Action", "Action name:",
+                                            text="Action %d" % (len(self.ctl.actions()) + 1))
+            if ok and name.strip():
+                self.ctl.start_recording(name.strip())
+        self.sync()
+
+    def _play(self):
+        name = self.current()
+        if name:
+            self.ctl.play_action(name)
+            window = self.parent()
+            if hasattr(window, "canvas"):
+                window.canvas.bind(keep_view=True)
+                window.canvas.refresh()
+
+    def _delete(self):
+        name = self.current()
+        if name:
+            self.ctl.delete_action(name)
+            self.sync()
+
+
+
+class ChannelsDock(QDockWidget):
+    """The image's channels and the saved selections (GIMP's Channels dialog,
+    Photoshop's Channels panel). Click Red, Green, Blue or Alpha to VIEW
+    just that channel; save the selection as a channel and load it back."""
+
+    VIEWS = (("RGB", None), ("Red", 0), ("Green", 1), ("Blue", 2), ("Alpha", 3))
+
+    def __init__(self, controller, canvas, parent=None):
+        super().__init__("Channels", parent)
+        self.setObjectName("Channels")
+        self.ctl, self.canvas = controller, canvas
+        from PySide6.QtWidgets import QListWidget
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(2, 2, 2, 2)
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(self._picked)
+        self.list.itemDoubleClicked.connect(self._rename)
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        for text, fn in (("Save selection", self._save), ("Load", self._load),
+                         ("Delete", self._delete)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.setWidget(body)
+        self._syncing = False
+
+    def sync(self, **_):
+        if self.ctl.doc is None:
+            return
+        self._syncing = True
+        row = self.list.currentRow()
+        self.list.clear()
+        for label, _c in self.VIEWS:
+            self.list.addItem(label)
+        for ch in self.ctl.doc.channels:
+            self.list.addItem("\u25a1 " + ch.name)
+        view = getattr(self.canvas, "view_channel", None)
+        self.list.setCurrentRow(row if 0 <= row < self.list.count() else
+                                next((i for i, (_l, c) in enumerate(self.VIEWS) if c == view), 0))
+        self._syncing = False
+
+    def _channel_index(self):
+        row = self.list.currentRow()
+        return row - len(self.VIEWS) if row >= len(self.VIEWS) else None
+
+    def _picked(self, row):
+        if self._syncing or row < 0:
+            return
+        if row < len(self.VIEWS):
+            self.canvas.view_channel = self.VIEWS[row][1]
+            self.canvas.viewport().update()
+
+    def _save(self):
+        self.ctl.save_selection()
+        self.sync()
+
+    def _load(self):
+        index = self._channel_index()
+        if index is not None:
+            self.ctl.load_selection(index)
+            self.canvas.viewport().update()
+
+    def _delete(self):
+        index = self._channel_index()
+        if index is not None:
+            self.ctl.delete_channel(index)
+            self.sync()
+
+    def _rename(self, item):
+        from PySide6.QtWidgets import QInputDialog
+        index = self._channel_index()
+        if index is None:
+            return
+        name, ok = QInputDialog.getText(self, "Channel", "Name:",
+                                        text=self.ctl.doc.channels[index].name)
+        if ok:
+            self.ctl.rename_channel(index, name)
+            self.sync()
+
+
+class CompsDock(QDockWidget):
+    """Photoshop's Layer Comps: snapshots of which layers are shown, with
+    their opacity, modes and styles -- versions of a design in one file."""
+
+    def __init__(self, controller, parent=None):
+        super().__init__("Layer Comps", parent)
+        self.setObjectName("LayerComps")
+        self.ctl = controller
+        from PySide6.QtWidgets import QListWidget
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(2, 2, 2, 2)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _i: self._apply())
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        for text, fn in (("New", self._new), ("Apply", self._apply), ("Update", self._update),
+                         ("Delete", self._delete)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.setWidget(body)
+
+    def sync(self, **_):
+        if self.ctl.doc is None:
+            return
+        row = self.list.currentRow()
+        self.list.clear()
+        for c in self.ctl.doc.comps:
+            self.list.addItem(c.get("name", "Layer Comp"))
+        if 0 <= row < self.list.count():
+            self.list.setCurrentRow(row)
+
+    def _new(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "New Layer Comp", "Name:",
+                                        text="Layer Comp %d" % (len(self.ctl.doc.comps) + 1))
+        if ok and name.strip():
+            self.ctl.new_comp(name.strip())
+            self.sync()
+
+    def _apply(self):
+        if self.list.currentRow() >= 0:
+            self.ctl.apply_comp(self.list.currentRow())
+
+    def _update(self):
+        if self.list.currentRow() >= 0:
+            self.ctl.update_comp(self.list.currentRow())
+
+    def _delete(self):
+        if self.list.currentRow() >= 0:
+            self.ctl.delete_comp(self.list.currentRow())
+            self.sync()

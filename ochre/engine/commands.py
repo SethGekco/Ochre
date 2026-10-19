@@ -695,3 +695,45 @@ class MaskDelta(Command):
 
     def nbytes(self):
         return sum(c.nbytes() for c in self.cells.values())
+
+
+class ChannelsDelta(Command):
+    """The document's saved channels, with their cells, as they were."""
+
+    __slots__ = ("label", "channels", "cells")
+
+    def __init__(self, doc, label="Channel"):
+        self.label = label
+        self.channels = list(doc.channels)
+        ids = {c.id for c in doc.channels}
+        self.cells = {k: v for k, v in doc.cells.items() if k[0] in ids}
+
+    def undo(self, doc):
+        opposite = ChannelsDelta(doc, self.label)
+        ids = {c.id for c in doc.channels}
+        for key in [k for k in doc.cells if k[0] in ids]:
+            del doc.cells[key]
+        doc.channels = list(self.channels)
+        doc.cells.update(self.cells)
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return sum(c.nbytes() for c in self.cells.values())
+
+
+class CompsDelta(Command):
+    """Layer comps, as they were."""
+
+    __slots__ = ("label", "comps")
+
+    def __init__(self, doc, label="Layer Comp"):
+        self.label = label
+        self.comps = [dict(c) for c in doc.comps]
+
+    def undo(self, doc):
+        opposite = CompsDelta(doc, self.label)
+        doc.comps = [dict(c) for c in self.comps]
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return 64 * len(self.comps)

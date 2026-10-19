@@ -1316,7 +1316,7 @@ def main():
     check("the Layer Style dialog previews live", "stroke" in lay3.styles)
     dlg.accept()
     check("...and OK records it as one step", lay3.styles["stroke"]["size"] == 4
-          and ctl2.history_labels()[-1] == "Change styles")
+          and ctl2.history_labels()[-1] == "Layer Style")
     dlg = LayerStyleDialog(ctl2, lay3, win2)
     dlg._set("drop_shadow", "distance", 9)
     dlg.reject()
@@ -1450,6 +1450,35 @@ def main():
     check("the Layers dock marks it as text", any("[text]" in win2.layers_dock.list.item(i).text()
                                                   for i in range(win2.layers_dock.list.count())))
     ctl2.set_tool("brush")
+
+    # ---- Actions, Channels and Layer Comps docks ---------------------------------
+    ctl2.new_document(50, 40, background=(10, 200, 60, 255))
+    win2.canvas.bind()
+    win2._sync_all()
+    ctl2.start_recording("ui")
+    ctl2.apply_effect("invert")
+    ctl2.stop_recording()
+    app.processEvents()
+    names7 = [win2.actions_dock.list.item(i).text() for i in range(win2.actions_dock.list.count())]
+    check("the Actions dock lists a recorded action", "ui" in names7)
+    win2.actions_dock.list.setCurrentRow(names7.index("ui"))
+    check("...and shows its steps", "apply_effect" in win2.actions_dock.steps.toPlainText())
+    win2.actions_dock._play()
+    check("...and plays it", tuple(ctl2.doc.cell(ctl2.active_layer).plane("rgba")[5, 5, :3])
+          == (10, 200, 60))
+    ctl2.selection.select_rect((0, 0, 20, 20))
+    win2.channels_dock._save()
+    check("the Channels dock saves the selection as a channel",
+          win2.channels_dock.list.count() == 6)
+    win2.channels_dock.list.setCurrentRow(1)              # Red
+    win2.canvas.repaint()
+    check("clicking Red views only that channel", win2.canvas.view_channel == 0)
+    win2.channels_dock.list.setCurrentRow(0)
+    check("...and RGB brings the colour back", win2.canvas.view_channel is None)
+    ctl2.new_comp("v1")
+    app.processEvents()
+    check("the Layer Comps dock lists a comp", win2.comps_dock.list.count() == 1)
+    ctl2.deselect()
 
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.

@@ -92,6 +92,10 @@ class Layer(LayerNode):
         self.mask = None          # LayerMask, or None
         self.mask_enabled = True
         self.styles = {}          # layer styles, engine/layerstyles.py
+        # Blend If (Photoshop's Blending Options): this layer's and the
+        # underlying image's luminance ranges, each (black lo, black hi,
+        # white lo, white hi); None means off.
+        self.blend_if = None
         self.planes = tuple(planes)
         self.authoritative = tuple(authoritative if authoritative is not None
                                    else (self.planes[0],))
@@ -144,6 +148,24 @@ class LayerMask(Layer):
         super().__init__(name=owner.name + " (mask)", planes=("rgba",),
                          layer_id=owner.id + MASK_SUFFIX)
         self.owner = owner
+
+    def effectively_visible(self):
+        return False
+
+
+class Channel(Layer):
+    """A saved selection: GIMP's channels, Photoshop's alpha channels.
+
+    Greyscale, white selected; stored like a mask (its cells live in the
+    document's cell map under its own id), so every geometry change, undo
+    step and the file format carry it for free. Lives in doc.channels, not
+    in the layer tree.
+    """
+
+    is_channel = True
+
+    def __init__(self, name="Alpha", layer_id=None):
+        super().__init__(name=name, planes=("rgba",), layer_id=layer_id)
 
     def effectively_visible(self):
         return False

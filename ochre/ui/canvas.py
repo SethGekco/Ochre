@@ -110,6 +110,7 @@ class CanvasView(QAbstractScrollArea):
         self.show_guides = True
         self.show_extras = True
         self.show_path = True
+        self.view_channel = None        # 0-3 to view one channel as grey (Channels panel)
         self.guide_preview = None      # ("h"|"v", pos) while a guide is dragged
         self._guide_drag = None
         self.rulers = None
@@ -311,7 +312,7 @@ class CanvasView(QAbstractScrollArea):
             # interpolation prevents aliasing when minifying.
             painter.setRenderHint(QPainter.SmoothPixmapTransform,
                                   not self.view.use_nearest)
-            painter.drawImage(target, self.surface.image)
+            painter.drawImage(target, self._channel_image() or self.surface.image)
 
             if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
                 self._draw_pixel_grid(painter, event.rect(), target)
@@ -599,6 +600,19 @@ class CanvasView(QAbstractScrollArea):
 
     def _moves_guides(self):
         return getattr(self.ctl, "tool_name", "") in ("move_layer", "move_pixels", "move_selection")
+
+    def _channel_image(self):
+        """One channel of the image as grey, while the Channels panel views it."""
+        c = self.view_channel
+        arr = self.surface.array
+        if c is None or arr is None:
+            return None
+        grey = np.empty(arr.shape, np.uint8)
+        grey[..., 0] = grey[..., 1] = grey[..., 2] = arr[..., c]
+        grey[..., 3] = 255
+        self._channel_buf = grey
+        return QImage(grey.data, grey.shape[1], grey.shape[0], grey.shape[1] * 4,
+                      QImage.Format_RGBA8888)
 
     def _draw_paths(self, painter):
         """The active vector path, while a path tool is in hand.

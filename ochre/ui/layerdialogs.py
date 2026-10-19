@@ -192,6 +192,13 @@ class LayerStyleDialog(QDialog):
             item.setData(Qt.UserRole, name)
             self.list.addItem(item)
             self.pages.addWidget(self._page(name))
+        # Blending Options: Photoshop's Blend If, the last page.
+        self.original_bi = getattr(layer, "blend_if", None)
+        self.working_bi = list(self.original_bi or (0, 0, 255, 255, 0, 0, 255, 255))
+        item = QListWidgetItem("Blending Options (Blend If)")
+        item.setData(Qt.UserRole, "__blend_if__")
+        self.list.addItem(item)
+        self.pages.addWidget(self._blend_if_page())
         self.list.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.list.itemChanged.connect(self._toggled)
         self.list.setCurrentRow(0)
@@ -228,6 +235,30 @@ class LayerStyleDialog(QDialog):
             form.addRow(key.replace("_", " ").capitalize(), w)
         return page
 
+    def _blend_if_page(self):
+        page = QWidget()
+        form = QFormLayout(page)
+        labels = ("This layer: black from", "This layer: black to", "This layer: white from",
+                  "This layer: white to", "Underlying: black from", "Underlying: black to",
+                  "Underlying: white from", "Underlying: white to")
+        self.bi_spins = []
+        for i, text in enumerate(labels):
+            spin = QSpinBox()
+            spin.setRange(0, 255)
+            spin.setValue(int(self.working_bi[i]))
+            spin.valueChanged.connect(lambda v, k=i: self._set_bi(k, v))
+            form.addRow(text, spin)
+            self.bi_spins.append(spin)
+        return page
+
+    def _set_bi(self, k, v):
+        self.working_bi[k] = int(v)
+        self._preview()
+
+    def _bi_value(self):
+        v = tuple(int(x) for x in self.working_bi)
+        return None if v == (0, 0, 255, 255, 0, 0, 255, 255) else v
+
     def _set(self, name, key, value):
         self.working.setdefault(name, {})[key] = value
         # Changing a setting switches the effect on, as in Photoshop.
@@ -240,6 +271,8 @@ class LayerStyleDialog(QDialog):
 
     def _toggled(self, item):
         name = item.data(Qt.UserRole)
+        if name == "__blend_if__":
+            return
         self.working.setdefault(name, {})["enabled"] = item.checkState() == Qt.Checked
         self._preview()
 
@@ -248,16 +281,25 @@ class LayerStyleDialog(QDialog):
 
     def _preview(self):
         self.layer.styles = {k: dict(v) for k, v in self.result_styles().items()}
+        self.layer.blend_if = self._bi_value()
         _refresh(self.ctl, self.canvas)
 
     def accept(self):
         new = self.result_styles()
+        bi = self._bi_value()
         self.layer.styles = {k: dict(v) for k, v in self.original.items()}
-        self.ctl.set_layer_styles(self.layer, new)
+        self.layer.blend_if = self.original_bi
+        self.ctl.history.begin_group()
+        if new != self.original:
+            self.ctl.set_layer_styles(self.layer, new)
+        if bi != self.original_bi:
+            self.ctl.set_layer_property(self.layer, "blend_if", bi)
+        self.ctl.history.end_group("Layer Style")
         _refresh(self.ctl, self.canvas)
         super().accept()
 
     def reject(self):
         self.layer.styles = {k: dict(v) for k, v in self.original.items()}
+        self.layer.blend_if = self.original_bi
         _refresh(self.ctl, self.canvas)
         super().reject()

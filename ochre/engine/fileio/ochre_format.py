@@ -124,6 +124,8 @@ def save(doc, path, selection=None, thumbnail_max=256):
                     add("Param.%s = %s" % (key, _esc(_encode_value(value))))
                 if getattr(node, "clip", False):
                     add("Clip = 1")
+                if getattr(node, "blend_if", None):
+                    add("BlendIf = %s" % ",".join(str(int(v)) for v in node.blend_if))
                 if getattr(node, "mask", None) is not None:
                     add("Mask = 1")
                     if not node.mask_enabled:
@@ -171,6 +173,19 @@ def save(doc, path, selection=None, thumbnail_max=256):
             add("Active = 1")
         for k, sub in enumerate(vpath.subpaths):
             add("Subpath.%d = %s" % (k, encode_subpath(sub)))
+        add("")
+
+    # Saved selections (their pixels are cells, written with the rest) and
+    # layer comps (plain state, as one JSON line each).
+    for ch in getattr(doc, "channels", ()):
+        add("[Channel:%s]" % ch.id)
+        add("Name = %s" % _esc(ch.name))
+        add("")
+    import json as _json
+    for n, comp in enumerate(getattr(doc, "comps", ())):
+        add("[Comp:%04d]" % n)
+        add("Name = %s" % _esc(comp.get("name", "")))
+        add("State = %s" % _esc(_json.dumps(comp.get("state", {}), separators=(",", ":"))))
         add("")
 
     # Guides and the other non-pixel marks (engine/annotations.py).
@@ -349,6 +364,8 @@ def load(path, settings=None):
                 node.params = {k[len("Param."):]: _decode_value(db.get(section, k))
                                for k in db.keys(section) if k.startswith("Param.")}
                 node.clip = db.getbool(section, "Clip", False)
+                bi = db.getints(section, "BlendIf")
+                node.blend_if = tuple(bi) if len(bi) == 8 else None
                 if db.getbool(section, "Mask", False):
                     node.mask = LayerMask(node)
                     node.mask_enabled = db.getbool(section, "MaskEnabled", True)
@@ -364,6 +381,18 @@ def load(path, settings=None):
             if parent is None or not getattr(parent, "is_group", False):
                 parent = doc.root
             parent.add(nodes[lid])
+
+        from ..layer import Channel
+        for cid in db.sections("Channel"):
+            doc.channels.append(Channel(db.get("Channel:" + cid, "Name", "Alpha"), layer_id=cid))
+        import json as _json
+        for comp_id in sorted(db.sections("Comp")):
+            sec = "Comp:" + comp_id
+            try:
+                state = _json.loads(db.get(sec, "State", "{}"))
+            except ValueError:
+                state = {}
+            doc.comps.append({"name": db.get(sec, "Name", "Layer Comp"), "state": state})
 
         # Cells. Derived planes are deliberately skipped and rebuilt.
         frame_by_index = {i: f for i, f in enumerate(doc.frames)}

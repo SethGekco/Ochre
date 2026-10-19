@@ -54,10 +54,14 @@ class MainWindow(QMainWindow):
         self.palette_dock = PaletteDock(controller, self)
         self.history_dock = HistoryDock(controller, self)
         self.paths_dock = PathsDock(controller, self)
-        from .panels import HistogramDock, InfoDock, NavigatorDock
+        from .panels import (ActionsDock, ChannelsDock, CompsDock, HistogramDock, InfoDock,
+                             NavigatorDock)
         self.navigator_dock = NavigatorDock(controller, self.canvas, self)
         self.info_dock = InfoDock(controller, self)
         self.histogram_dock = HistogramDock(controller, self)
+        self.actions_dock = ActionsDock(controller, self)
+        self.channels_dock = ChannelsDock(controller, self.canvas, self)
+        self.comps_dock = CompsDock(controller, self)
         self.frames_dock = FramesDock(controller, self)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.tools_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.layers_dock)
@@ -69,7 +73,8 @@ class MainWindow(QMainWindow):
         # the window at least 934 px tall, and building the group in steps
         # left Qt drawing a stale tab strip over the dock below.
         for dock in (self.history_dock, self.paths_dock, self.navigator_dock,
-                     self.info_dock, self.histogram_dock):
+                     self.info_dock, self.histogram_dock, self.actions_dock,
+                     self.channels_dock, self.comps_dock):
             self.tabifyDockWidget(self.palette_dock, dock)
         self.history_dock.raise_()
 
@@ -135,6 +140,9 @@ class MainWindow(QMainWindow):
                                                       self.info_dock.schedule(),
                                                       self._sync_tabs()))
         bus.subscribe("documents.changed", lambda **k: self._sync_tabs())
+        bus.subscribe("actions.changed", lambda **k: self.actions_dock.sync())
+        bus.subscribe("channels.changed", lambda **k: self.channels_dock.sync())
+        bus.subscribe("comps.changed", lambda **k: self.comps_dock.sync())
         bus.subscribe("tool.request", self._on_tool_request)
         self.canvas.cursor_moved.connect(self.info_dock.pointer)
         self.canvas.cursor_moved.connect(self._on_cursor)
@@ -162,7 +170,7 @@ class MainWindow(QMainWindow):
         for dock in (self.tools_dock, self.layers_dock, self.colors_dock,
                      self.palette_dock, self.history_dock, self.frames_dock,
                      self.paths_dock, self.info_dock, self.histogram_dock,
-                     self.navigator_dock):
+                     self.navigator_dock, self.channels_dock, self.comps_dock):
             dock.sync()
         self._sync_tabs()
         self._update_frames_visible()
@@ -198,7 +206,8 @@ class MainWindow(QMainWindow):
         menu = self.menuBar().addMenu("&Window")
         for dock in (self.tools_dock, self.layers_dock, self.colors_dock, self.palette_dock,
                      self.history_dock, self.paths_dock, self.navigator_dock, self.info_dock,
-                     self.histogram_dock, self.frames_dock):
+                     self.histogram_dock, self.actions_dock, self.channels_dock,
+                     self.comps_dock, self.frames_dock):
             menu.addAction(dock.toggleViewAction())
         return menu
 
@@ -313,6 +322,46 @@ class MainWindow(QMainWindow):
         if ok:
             self._busy(self.ctl.match_color, int(label.split(":")[0]) - 1, amount / 100.0)
 
+    def do_batch(self):
+        """File > Automate > Batch: an action over every image in a folder."""
+        from PySide6.QtWidgets import QInputDialog
+        names = sorted(self.ctl.actions())
+        if not names:
+            self.statusBar().showMessage("Record an action first (Window > Actions).", 6000)
+            return
+        action, ok = QInputDialog.getItem(self, "Batch", "Action:", names, 0, False)
+        if not ok:
+            return
+        src = QFileDialog.getExistingDirectory(self, "Batch: images from")
+        if not src:
+            return
+        dst = QFileDialog.getExistingDirectory(self, "Batch: save results to")
+        if not dst:
+            return
+        fmt, ok = QInputDialog.getItem(self, "Batch", "Save as:",
+                                       ["png", "jpg", "webp", "tif", "ochre"], 0, False)
+        if not ok:
+            return
+        exts = tuple("." + e for e in supported_extensions()) + (".ochre", ".psd", ".ora")
+        paths = sorted(os.path.join(src, f) for f in os.listdir(src) if f.lower().endswith(exts))
+        report = self._busy(self.ctl.batch, action, paths, dst, fmt)
+        errors = [r for r in report if str(r[1]).startswith("error")]
+        self.canvas.bind()
+        self._sync_all()
+        QMessageBox.information(self, "Batch", "Processed %d image(s)%s."
+                                % (len(report) - len(errors),
+                                   (", %d failed" % len(errors)) if errors else ""))
+
+    def do_load_selection(self):
+        from PySide6.QtWidgets import QInputDialog
+        names = [c.name for c in self.ctl.doc.channels]
+        if not names:
+            self.statusBar().showMessage("No saved selections: Select > Save Selection first.", 5000)
+            return
+        name, ok = QInputDialog.getItem(self, "Load Selection", "Channel:", names, 0, False)
+        if ok:
+            self._sel(self.ctl.load_selection, names.index(name))
+
     def do_liquify(self):
         self.ctl.set_tool("warp")
         self.statusBar().showMessage(
@@ -393,6 +442,8 @@ class MainWindow(QMainWindow):
         self._act(file_menu, "Save &As...", self.do_save_as, "Ctrl+Shift+S")
         self._act(file_menu, "&Export As...", self.do_export_as, "Ctrl+Alt+Shift+W")
         self._act(file_menu, "Export S&lices...", self.do_export_slices)
+        automate = file_menu.addMenu("A&utomate")
+        self._act(automate, "&Batch...", self.do_batch)
         file_menu.addSeparator()
         self._act(file_menu, "&Close", lambda: self.close_document(), "Ctrl+W")
         self._act(file_menu, "Next Image", lambda: self._step_document(+1), "Ctrl+Tab")
@@ -447,6 +498,9 @@ class MainWindow(QMainWindow):
         self._act(sel_menu, "Alpha to Se&lection", lambda: self._sel(self.ctl.alpha_to_selection))
         self._act(sel_menu, "From &Path", lambda: self._sel(self.ctl.path_to_selection), "Shift+V")
         self._act(sel_menu, "To Pa&th", lambda: self.ctl.selection_to_path())
+        sel_menu.addSeparator()
+        self._act(sel_menu, "Sa&ve Selection", lambda: self.ctl.save_selection())
+        self._act(sel_menu, "Loa&d Selection...", self.do_load_selection)
         self.quick_mask_action = self._act(sel_menu, "Toggle &Quick Mask",
                                            self.do_quick_mask, "Q")
         self.quick_mask_action.setCheckable(True)

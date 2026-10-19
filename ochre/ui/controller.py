@@ -89,6 +89,7 @@ class Controller:
         self.current_doc = -1
         # Painting goes to the active layer's MASK rather than its pixels.
         self.editing_mask = False
+        self.recording = None           # an Action being recorded
 
     # ---- events ----------------------------------------------------------
 
@@ -653,6 +654,7 @@ class Controller:
         copy.visible = source.visible
         copy.kind, copy.params = source.kind, dict(source.params)
         copy.clip, copy.mask_enabled = source.clip, source.mask_enabled
+        copy.blend_if = source.blend_if
         copy.styles = {k: dict(v) for k, v in source.styles.items()}
         if source.mask is not None:
             from ..engine.layer import LayerMask
@@ -824,12 +826,274 @@ class Controller:
         self._after_structure_change()
         return layer
 
-    def _effect_label(self, effect):
+    @property
+    def effects(self):
         from ..engine.effects import EffectRegistry
         reg = getattr(self, "_effect_reg", None)
         if reg is None:
             reg = self._effect_reg = EffectRegistry(self.db)
-        return reg.label(effect)
+        return reg
+
+    def _effect_label(self, effect):
+        return self.effects.label(effect)
+
+    def apply_effect(self, name, params=None):
+        """Run an adjustment or filter on what the tools paint (the layer, or
+        its mask), inside the selection, as one undo step. What the effect
+        dialogs call on OK -- and so what an Action records."""
+        from ..engine.commands import PixelDelta
+        effect = self.effects.create(name, **dict(params or {}))
+        target = self.paint_target
+        if effect is None or target is None or target.is_group:
+            return None
+        if getattr(target, "kind", "raster") not in ("raster",) and not getattr(target, "is_mask", False):
+            return None
+        cell = self.doc.cell(target)
+        bounds = self.doc.bounds
+        before = PixelDelta.capture(self.doc, target.id, self.doc.frame.id, bounds, effect.label)
+        result = effect.apply(cell.plane("rgba"))
+        cell.lerp_masked(bounds, result, self.selection.mask)
+        cell._touched(bounds)
+        if before is not None:
+            self.history.push(before, effect.label, frame_id=self.doc.frame.id)
+        self.invalidate(bounds)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return bounds
+
+    # ---- channels (saved selections) ---------------------------------------------
+
+    def save_selection(self, name=None):
+        """Select > Save Selection: the selection becomes a named channel."""
+        from ..engine.commands import ChannelsDelta
+        from ..engine.layer import Channel
+        before = ChannelsDelta(self.doc, "Save Selection")
+        ch = Channel(name or "Alpha %d" % (len(self.doc.channels) + 1))
+        self.doc.channels.append(ch)
+        cell = self.doc.cell(ch)
+        px = cell.plane("rgba")
+        mask = self.selection.mask
+        value = 255 if mask is None else mask
+        px[..., 0] = value
+        px[..., 1] = value
+        px[..., 2] = value
+        px[..., 3] = 255
+        cell._touched(self.doc.bounds)
+        self.history.push(before, "Save Selection")
+        self.dirty_since_save = True
+        self.emit("channels.changed")
+        self.emit("history.changed")
+        return ch
+
+    def channel_mask(self, index):
+        from ..engine.compositor import mask_value
+        if not (0 <= index < len(self.doc.channels)):
+            return None
+        cell = self.doc.cells.get((self.doc.channels[index].id, self.doc.frame.id))
+        if cell is None:
+            cell = next((c for (lid, _f), c in self.doc.cells.items()
+                         if lid == self.doc.channels[index].id), None)
+        return None if cell is None else mask_value(cell.plane("rgba"))
+
+    def load_selection(self, index, mode=None):
+        """Select > Load Selection: a channel back into the selection, combined
+        by mode (Replace / Union / Exclude / Intersect)."""
+        from ..engine.selection import REPLACE
+        mask = self.channel_mask(index)
+        if mask is None:
+            return False
+        return self._selection_op("Load Selection", lambda sel: sel.combine(mask, mode or REPLACE))
+
+    def delete_channel(self, index):
+        from ..engine.commands import ChannelsDelta
+        if not (0 <= index < len(self.doc.channels)):
+            return False
+        before = ChannelsDelta(self.doc, "Delete Channel")
+        ch = self.doc.channels.pop(index)
+        for key in [k for k in self.doc.cells if k[0] == ch.id]:
+            del self.doc.cells[key]
+        self.history.push(before, "Delete Channel")
+        self.emit("channels.changed")
+        self.emit("history.changed")
+        return True
+
+    def rename_channel(self, index, name):
+        if not (0 <= index < len(self.doc.channels)) or not str(name).strip():
+            return False
+        self.set_layer_property(self.doc.channels[index], "name", str(name).strip())
+        self.emit("channels.changed")
+        return True
+
+    # ---- layer comps ------------------------------------------------------------------
+
+    _COMP_ATTRS = ("visible", "opacity", "blend", "mask_enabled")
+
+    def _comp_state(self):
+        state = {}
+        for node in self.doc.root.walk(include_self=False):
+            entry = {a: getattr(node, a) for a in self._COMP_ATTRS if hasattr(node, a)}
+            if hasattr(node, "styles"):
+                entry["styles"] = {k: dict(v) for k, v in node.styles.items()}
+            state[node.id] = entry
+        return state
+
+    def new_comp(self, name=None):
+        """Layer Comps: remember which layers are shown, their opacity, modes
+        and styles, to switch between versions of a design."""
+        from ..engine.commands import CompsDelta
+        before = CompsDelta(self.doc, "New Layer Comp")
+        self.doc.comps.append({"name": name or "Layer Comp %d" % (len(self.doc.comps) + 1),
+                               "state": self._comp_state()})
+        self.history.push(before, "New Layer Comp")
+        self.emit("comps.changed")
+        self.emit("history.changed")
+        return len(self.doc.comps) - 1
+
+    def update_comp(self, index):
+        from ..engine.commands import CompsDelta
+        if not (0 <= index < len(self.doc.comps)):
+            return False
+        before = CompsDelta(self.doc, "Update Layer Comp")
+        comp = dict(self.doc.comps[index])
+        comp["state"] = self._comp_state()
+        self.doc.comps[index] = comp
+        self.history.push(before, "Update Layer Comp")
+        self.emit("comps.changed")
+        return True
+
+    def delete_comp(self, index):
+        from ..engine.commands import CompsDelta
+        if not (0 <= index < len(self.doc.comps)):
+            return False
+        before = CompsDelta(self.doc, "Delete Layer Comp")
+        del self.doc.comps[index]
+        self.history.push(before, "Delete Layer Comp")
+        self.emit("comps.changed")
+        return True
+
+    def apply_comp(self, index):
+        """Show a comp: each layer back to its remembered state, one undo step."""
+        from ..engine.commands import PropertyDelta
+        if not (0 <= index < len(self.doc.comps)):
+            return False
+        label = "Apply Layer Comp"
+        self.history.begin_group()
+        for node_id, entry in self.doc.comps[index]["state"].items():
+            node = self.doc.layer(node_id)
+            if node is None:
+                continue
+            for attr, value in entry.items():
+                if attr == "styles":
+                    value = {k: dict(v) for k, v in value.items()}
+                if getattr(node, attr, None) != value:
+                    self.history.push(PropertyDelta(node.id, attr, getattr(node, attr), label), label)
+                    setattr(node, attr, value)
+        self.history.end_group(label)
+        self._after_structure_change()
+        return True
+
+    # ---- actions: record, replay, batch --------------------------------------
+
+    def start_recording(self, name):
+        """Actions panel > Record. Menu commands are logged until stopped."""
+        self.recording = {"name": str(name), "steps": []}
+        self.emit("actions.changed")
+
+    def stop_recording(self):
+        rec, self.recording = getattr(self, "recording", None), None
+        if rec is not None and rec["steps"]:
+            self.actions()[rec["name"]] = rec["steps"]
+            self.save_actions()
+        self.emit("actions.changed")
+        return rec
+
+    def _record(self, op, args, kwargs):
+        rec = getattr(self, "recording", None)
+        if rec is None:
+            return
+        rec["steps"].append({"op": op, "args": _plain(args), "kwargs": _plain(kwargs)})
+        self.emit("actions.changed")
+
+    def actions(self):
+        if getattr(self, "_actions", None) is None:
+            self._actions = {}
+            path = self._actions_path()
+            if path and os.path.exists(path):
+                import json
+                try:
+                    with open(path) as fh:
+                        self._actions = json.load(fh)
+                except (OSError, ValueError):
+                    self._actions = {}
+        return self._actions
+
+    def _actions_path(self):
+        return os.path.join(self.state_dir, "actions.json") if self.state_dir else None
+
+    def save_actions(self):
+        path = self._actions_path()
+        if not path:
+            return False
+        import json
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(self.actions(), fh, indent=1)
+        return True
+
+    def delete_action(self, name):
+        if self.actions().pop(name, None) is not None:
+            self.save_actions()
+            self.emit("actions.changed")
+            return True
+        return False
+
+    def play_action(self, name_or_steps):
+        """Run an action on the current document as ONE undo step."""
+        steps = self.actions().get(name_or_steps) if isinstance(name_or_steps, str) else name_or_steps
+        if not steps:
+            return False
+        label = "Action: %s" % (name_or_steps if isinstance(name_or_steps, str) else "steps")
+        self.history.begin_group()
+        resized = False
+        try:
+            for step in steps:
+                op = step["op"]
+                if op not in RECORDABLE:
+                    continue          # an action file is data; it may only call these
+                before = (self.doc.width, self.doc.height)
+                getattr(self, op)(*_tuples(step.get("args", [])), **_tuples(step.get("kwargs", {})))
+                resized = resized or before != (self.doc.width, self.doc.height)
+        finally:
+            self.history.end_group(label)
+        if resized:
+            self._after_geometry_change()
+        self.compositor.invalidate()
+        self.invalidate()
+        self.emit("history.changed")
+        return True
+
+    def batch(self, action, paths, out_dir, fmt="png"):
+        """File > Automate > Batch: open each file, play the action, export
+        it to out_dir in fmt, close it. Returns [(source, output or error)]."""
+        os.makedirs(out_dir, exist_ok=True)
+        report = []
+        for path in paths:
+            try:
+                self.open_path(path)
+                self.play_action(action)
+                base = os.path.splitext(os.path.basename(path))[0]
+                target = os.path.join(out_dir, "%s.%s" % (base, fmt))
+                if fmt == "ochre":
+                    save(self.doc, target)
+                else:
+                    export_flat(self.doc, target)
+                report.append((path, target))
+            except Exception as exc:                       # noqa: BLE001
+                report.append((path, "error: %s" % exc))
+            finally:
+                if self.doc is not None and len(self.documents) > 1:
+                    self.close_document()
+        return report
 
     def add_fill_layer(self, fill="solid", name=None, **params):
         """A layer that generates its content: a solid colour or a gradient."""
@@ -2236,3 +2500,72 @@ class Controller:
             "tool": self.tool_name,
             "indexed": self.doc.palette is not None if self.doc else False,
         }
+
+
+
+# ---- action recording -----------------------------------------------------------
+# The commands an Action may record and replay: menu-level operations whose
+# arguments are plain data. Tool strokes are not among them (Photoshop
+# records very few), and nothing outside this list can be invoked by an
+# actions file, which is data.
+RECORDABLE = (
+    "apply_effect", "resize_image", "resize_canvas", "crop_to_selection", "flip_image",
+    "rotate_image", "rotate_image_by", "content_aware_scale", "straighten",
+    "fill_selection", "erase_selection", "inpaint_selection",
+    "select_all", "deselect", "invert_selection", "grow_selection", "shrink_selection",
+    "border_selection", "feather_selection", "round_selection", "remove_selection_holes",
+    "add_layer", "duplicate_layer", "merge_down", "flatten", "flip_layer", "rotate_layer",
+    "scale_layer", "offset_layer", "align_layer", "set_primary", "set_secondary",
+    "add_layer_mask", "delete_layer_mask", "add_guide", "clear_guides", "slices_from_guides",
+    "save_selection", "load_selection",
+)
+
+
+def _plain(v):
+    """Arguments as JSON-friendly data (tuples become lists)."""
+    if isinstance(v, dict):
+        return {k: _plain(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    if isinstance(v, (np.floating,)):
+        return float(v)
+    return v
+
+
+def _tuples(v):
+    """The reverse, for replay: lists of numbers become tuples (colours)."""
+    if isinstance(v, dict):
+        return {k: _tuples(x) for k, x in v.items()}
+    if isinstance(v, list):
+        if v and all(isinstance(x, (int, float)) for x in v):
+            return tuple(v)
+        return [_tuples(x) for x in v]
+    return v
+
+
+def _recorded(fn, name):
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        depth = getattr(self, "_rec_depth", 0)
+        if depth == 0 and getattr(self, "recording", None) is not None:
+            # Layer and object arguments are not recordable data; an action
+            # always works on whatever is active when it plays.
+            if any(hasattr(a, "id") for a in args) or any(hasattr(a, "id") for a in kwargs.values()):
+                pass
+            else:
+                self._record(name, args, kwargs)
+        self._rec_depth = depth + 1
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            self._rec_depth = depth
+    return wrapper
+
+
+for _name in RECORDABLE:
+    if hasattr(Controller, _name):
+        setattr(Controller, _name, _recorded(getattr(Controller, _name), _name))

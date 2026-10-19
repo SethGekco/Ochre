@@ -50,6 +50,8 @@ class Document:
         self.paths = []
         self.active_path = None
         # Non-pixel marks (engine/annotations.py): plain lists of tuples.
+        self.channels = []              # saved selections (layer.Channel)
+        self.comps = []                 # layer comps: [{"name", "state"}]
         self.guides = []
         self.samplers = []
         self.counts = []
@@ -102,6 +104,10 @@ class Document:
             # Masks are not in the tree; they hang off their owner.
             owner = self.root.find(layer_id[:-len(MASK_SUFFIX)])
             node = getattr(owner, "mask", None)
+        if node is None:
+            for ch in self.channels:
+                if ch.id == layer_id:
+                    return ch
         return node
 
     def layers(self):

@@ -412,22 +412,20 @@ class EffectDialog(QDialog):
         if self._cancel is not None:
             self._cancel.cancel()
 
-        from ..engine.commands import PixelDelta
-
-        # Restore first, so the undo entry captures the true "before".
+        # Restore first, so the undo entry captures the true "before", then
+        # apply through the controller: one undo step, the selection and the
+        # paint target honoured -- and recordable in an Action.
         self._cell.plane("rgba")[...] = self._original
-        bounds = self.ctl.doc.bounds
-        before = PixelDelta.capture(self.ctl.doc, self._target.id,
-                                    self.ctl.doc.frame.id, bounds, self.effect.label)
-        result = self.effect.apply(self._original)
-        # Through lerp_masked: it honours the selection's soft edge, and on an
-        # index-locked layer it lands the result as INDICES -- writing the
-        # rgba plane there would only touch a cache that is rebuilt on save.
-        self._cell.lerp_masked(bounds, result, self._sel)
-        self._cell._touched(bounds)
-        self._cell.dirty.add(bounds)
-        self.ctl.history.push(before, self.effect.label,
-                              frame_id=self.ctl.doc.frame.id)
+        if hasattr(self.ctl, "apply_effect"):
+            self.ctl.apply_effect(self.effect.name, dict(self.effect.props.token()))
+        else:                                              # a bare controller (tests)
+            from ..engine.commands import PixelDelta
+            bounds = self.ctl.doc.bounds
+            before = PixelDelta.capture(self.ctl.doc, self._target.id,
+                                        self.ctl.doc.frame.id, bounds, self.effect.label)
+            self._cell.lerp_masked(bounds, self.effect.apply(self._original), self._sel)
+            self._cell._touched(bounds)
+            self.ctl.history.push(before, self.effect.label, frame_id=self.ctl.doc.frame.id)
         self.ctl.invalidate()
         self.ctl.dirty_since_save = True
         self.ctl.emit("history.changed")

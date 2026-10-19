@@ -194,7 +194,7 @@ class Compositor:
                     return True
                 continue
             if (n.blend != "Normal" or getattr(n, "kind", "raster") == ADJUSTMENT
-                    or getattr(n, "clip", False)):
+                    or getattr(n, "clip", False) or getattr(n, "blend_if", None)):
                 return True
         return False
 
@@ -314,14 +314,19 @@ class Compositor:
                 accel.blend_rect(sub[0], styled[1][sub[1]], accel.NORMAL, leaf.opacity,
                                  sub[2], out=sub[0])
 
+        blend_if = getattr(layer, "blend_if", None)
         if getattr(layer, "kind", "raster") == ADJUSTMENT:
             effect = self._effect(layer)
             if effect is not None:
                 adjusted = effect.apply(window)
+                if blend_if:
+                    mask = _combine(mask, blend_if_factor(adjusted, window, blend_if))
                 accel.blend_rect(window, adjusted, leaf.mode, leaf.opacity, mask, out=window)
         else:
             src = self._source(leaf, r)
             if src is not None:
+                if blend_if:
+                    mask = _combine(mask, blend_if_factor(src, window, blend_if))
                 accel.blend_rect(window, src, leaf.mode, leaf.opacity, mask, out=window)
 
         if sub is not None and styled[2] is not None:
@@ -402,6 +407,7 @@ class Compositor:
 
         flattenable = all(leaf.mode == accel.NORMAL
                           and getattr(leaf.layer, "kind", "raster") != ADJUSTMENT
+                          and not getattr(leaf.layer, "blend_if", None)
                           and (leaf.base is None or leaf.base is not active)
                           for leaf in upper)
         if flattenable:
@@ -461,6 +467,39 @@ class Compositor:
 
 
 # ---- helpers shared with merge / flatten ----------------------------------------
+
+def _combine(mask, factor):
+    if mask is None:
+        return factor
+    return accel.spec._mul(mask.astype(np.uint32), factor.astype(np.uint32)).astype(np.uint8)
+
+
+def _ramp(lum, lo0, lo1, hi0, hi1):
+    """1 inside [lo1, hi0], ramping to 0 at lo0 and hi1 (split sliders)."""
+    lum = lum.astype(np.float64)
+    if lo1 > lo0:
+        up = np.clip((lum - lo0) / float(lo1 - lo0), 0, 1)
+    else:
+        up = (lum >= lo0).astype(np.float64)
+    if hi1 > hi0:
+        down = np.clip((hi1 - lum) / float(hi1 - hi0), 0, 1)
+    else:
+        down = (lum <= hi1).astype(np.float64)
+    return up * down
+
+
+def blend_if_factor(src, under, ranges):
+    """Photoshop's Blend If: show this layer only where ITS lightness, and
+    the lightness of what is under it, fall inside the given ranges -- each
+    (black lo, black hi, white lo, white hi), split pairs fading smoothly.
+    The classic use: drop out a layer's white background, or let clouds
+    show only over the sky."""
+    def lum(x):
+        p = x.astype(np.uint32)
+        return (77 * p[..., 0] + 151 * p[..., 1] + 28 * p[..., 2] + 128) >> 8
+    this = _ramp(lum(src), *ranges[:4])
+    below = _ramp(lum(under), *ranges[4:8])
+    return np.clip(np.rint(this * below * 255), 0, 255).astype(np.uint8)
 
 def mask_value(px):
     """A mask cell's coverage: its luminance, over white where transparent.
