@@ -562,6 +562,9 @@ class MainWindow(QMainWindow):
         self.recent_menu = file_menu.addMenu("Open &Recent")
         self._rebuild_recent()
         self._act(file_menu, "Place &Embedded...", self.do_place_embedded)
+        automate = file_menu.addMenu("Au&tomate")
+        automate.addAction("&Photomerge...", self.do_photomerge)
+        automate.addAction("Load Files into &Stack...", self.do_load_stack)
         self._act(file_menu, "&Save", self.do_save, "Ctrl+S")
         self._act(file_menu, "Save &As...", self.do_save_as, "Ctrl+Shift+S")
         self._act(file_menu, "&Export As...", self.do_export_as, "Ctrl+Alt+Shift+W")
@@ -606,6 +609,9 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "F&ill...", self.do_fill_dialog, "Shift+F5")
         self._act(edit_menu, "Stro&ke...", self.do_stroke_dialog)
         self._act(edit_menu, "Define &Pattern...", self.do_define_pattern)
+        edit_menu.addSeparator()
+        self._act(edit_menu, "Auto-Align La&yers...", self.do_auto_align)
+        self._act(edit_menu, "Auto-Blend Layers...", self.do_auto_blend)
         edit_menu.addSeparator()
         self._act(edit_menu, "Sk&y Replacement...", self.do_sky_replacement)
         edit_menu.addSeparator()
@@ -1314,6 +1320,68 @@ class MainWindow(QMainWindow):
             self.ctl.calculations(v["source1"], v["channel1"], v["invert1"], v["source2"],
                                   v["channel2"], v["invert2"], v["mode"], v["opacity"], v["result"])
             self._sync_all()
+
+    def _image_files(self, title):
+        exts = " ".join("*.%s" % e for e in supported_extensions())
+        paths, _ = QFileDialog.getOpenFileNames(self, title, "", "Images (%s)" % exts)
+        return paths
+
+    def do_auto_align(self):
+        from .formdialog import ask
+        v = ask(self, "Auto-Align Layers", [("model", "Projection", "choice", "homography",
+                                            [("homography", "Perspective"),
+                                             ("similarity", "Reposition (move, rotate, scale)")])])
+        if v is None:
+            return
+        report = self._busy(self.ctl.auto_align_layers, v["model"])
+        missed = [n for n, k in (report or {}).items() if not k]
+        self.statusBar().showMessage("Aligned %d layer(s)%s" % (len(report or {}) - len(missed),
+                                     "; could not match: " + ", ".join(missed) if missed else ""), 8000)
+        self._after_pixels()
+
+    def do_auto_blend(self):
+        from .formdialog import ask
+        v = ask(self, "Auto-Blend Layers", [("method", "Blend method", "choice", "stack",
+                                            [("stack", "Stack images (focus)"),
+                                             ("panorama", "Panorama")])])
+        if v is not None:
+            self._busy(self.ctl.auto_blend_layers, v["method"])
+            self._after_pixels()
+
+    def do_photomerge(self):
+        paths = self._image_files("Photomerge: choose the photos")
+        if len(paths) < 2:
+            return
+        from .formdialog import ask
+        v = ask(self, "Photomerge", [("model", "Layout", "choice", "homography",
+                                      [("homography", "Perspective"),
+                                       ("similarity", "Reposition")]),
+                                     ("blend", "Blend images together", "bool", True, None)])
+        if v is None:
+            return
+        try:
+            _doc, report = self._busy(self.ctl.photomerge, paths, v["blend"], v["model"])
+        except ValueError as exc:
+            QMessageBox.warning(self, "Photomerge", str(exc))
+            return
+        missed = [n for n, k in report.items() if k == 0]
+        if missed:
+            QMessageBox.information(self, "Photomerge", "Could not place: " + ", ".join(missed))
+        self.canvas.bind()
+        self._sync_all()
+
+    def do_load_stack(self):
+        paths = self._image_files("Load Files into Stack")
+        if not paths:
+            return
+        from .formdialog import ask
+        v = ask(self, "Load Files into Stack", [("align", "Attempt to automatically align", "bool",
+                                                False, None)])
+        if v is None:
+            return
+        self._busy(self.ctl.load_files_into_stack, paths, v["align"])
+        self.canvas.bind()
+        self._sync_all()
 
     def do_filter_gallery(self):
         from .gallery import FilterGalleryDialog

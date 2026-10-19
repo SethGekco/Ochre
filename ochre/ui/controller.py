@@ -3162,6 +3162,166 @@ class Controller:
         finally:
             self.selection.mask = before
 
+    # ---- Auto-Align, Auto-Blend, Photomerge, Load Files into Stack ---------------------
+
+    def _layer_pixels(self, layer):
+        """A layer's own picture (mask and styles applied), canvas-sized."""
+        from ..engine.compositor import _Leaf
+        img = np.zeros((self.doc.height, self.doc.width, 4), np.uint8)
+        cell = self.doc.cells.get((layer.id, self.doc.frame.id))
+        if cell is None and getattr(layer, "kind", "raster") == "raster":
+            return img
+        leaf = _Leaf(cell, self.blends.opcode("Normal"), 255, layer)
+        self.compositor._blend_leaf(img, leaf, self.doc.bounds, self.doc.frame)
+        return img
+
+    def _stack_layers(self):
+        return [l for l in self.doc.layers() if l.visible and getattr(l, "kind", "raster") == "raster"
+                and self.doc.cells.get((l.id, self.doc.frame.id)) is not None
+                and not self.doc.cells[(l.id, self.doc.frame.id)].is_empty()]
+
+    def auto_align_layers(self, model="homography", reference=None):
+        """Edit > Auto-Align Layers: every visible pixel layer moved onto the
+        reference (the bottom one by default) by matched features. One undo
+        step. Returns {layer name: matched points}; 0 means it could not be
+        matched and was left where it was."""
+        from ..engine import align, transform
+        from ..engine.commands import PixelDelta
+        layers = self._stack_layers()
+        if len(layers) < 2:
+            return {}
+        ref = reference or layers[0]
+        ref_px = self._layer_pixels(ref)
+        label = "Auto-Align Layers"
+        report = {}
+        self.history.begin_group()
+        for lay in layers:
+            if lay is ref:
+                continue
+            hm, n = align.register(self._layer_pixels(lay), ref_px, model)
+            report[lay.name] = n
+            if hm is None:
+                report[lay.name] = 0
+                continue
+            d = PixelDelta.capture(self.doc, lay.id, self.doc.frame.id, self.doc.bounds, label)
+            if d is not None:
+                self.history.push(d, label, frame_id=self.doc.frame.id)
+            transform.transform_layer(self.doc, lay, hm)
+        self.history.end_group(label)
+        self._after_structure_change()
+        return report
+
+    def auto_blend_layers(self, method="stack"):
+        """Edit > Auto-Blend Layers: the visible pixel layers blended into a
+        new layer on top -- 'stack' (focus stacking: the sharpest of each)
+        or 'panorama' (seams dissolved by distance from each edge). One undo
+        step."""
+        from ..engine import align
+        from ..engine.commands import PixelDelta
+        layers = self._stack_layers()
+        if len(layers) < 2:
+            return None
+        images = [self._layer_pixels(l) for l in layers]
+        out = align.focus_stack(images) if method == "stack" else align.panorama_blend(images)
+        label = "Auto-Blend Layers"
+        self.history.begin_group()
+        layer = self.add_layer("Auto-Blend (%s)" % method)
+        d = PixelDelta.capture(self.doc, layer.id, self.doc.frame.id, self.doc.bounds, label)
+        cell = self.doc.cell(layer)
+        cell.plane("rgba")[...] = out
+        cell._touched(self.doc.bounds)
+        if d is not None:
+            self.history.push(d, label, frame_id=self.doc.frame.id)
+        self.history.end_group(label)
+        self.set_active_layer(layer)
+        self._after_structure_change()
+        return layer
+
+    @staticmethod
+    def _read_rgba(item):
+        if isinstance(item, str):
+            from PIL import Image
+            return np.asarray(Image.open(item).convert("RGBA")).copy(), \
+                os.path.splitext(os.path.basename(item))[0]
+        return np.ascontiguousarray(item, np.uint8), None
+
+    def load_files_into_stack(self, items, align_layers=False):
+        """File > Scripts > Load Files into Stack: images as the layers of
+        one new document (sized to the largest), optionally auto-aligned."""
+        images = [self._read_rgba(i) for i in items]
+        if not images:
+            return None
+        w = max(im.shape[1] for im, _ in images)
+        h = max(im.shape[0] for im, _ in images)
+        doc = Document(w, h, settings=self.settings)
+        for k, (im, name) in enumerate(images):
+            lay = doc.add_layer(name or "Layer %d" % (k + 1))
+            c = doc.cell(lay)
+            c.plane("rgba")[:im.shape[0], :im.shape[1]] = im
+            c._touched(doc.bounds)
+        self._adopt(doc, path=None)
+        if align_layers:
+            self.auto_align_layers()
+        return doc
+
+    def photomerge(self, items, blend=True, model="homography", max_side=12000):
+        """File > Automate > Photomerge: overlapping photographs joined into a
+        panorama in a new document -- one layer per photo, placed by matched
+        features (chained through neighbours when a photo does not overlap
+        the middle one), plus a seamlessly blended layer on top.
+        Returns (document, {name: matched points}); unmatched photos are
+        left out and reported with 0."""
+        from ..engine import align
+        from ..engine import warp as W
+        images = [self._read_rgba(i) for i in items]
+        names = [n or "Photo %d" % (k + 1) for k, (_im, n) in enumerate(images)]
+        if len(images) < 2:
+            return None, {}
+        ref = len(images) // 2
+        placed = {ref: np.eye(3)}
+        report = {names[ref]: -1}
+        pending = [k for k in range(len(images)) if k != ref]
+        progress = True
+        while pending and progress:
+            progress = False
+            for k in list(pending):
+                best = None
+                for j, hj in placed.items():
+                    hm, n = align.register(images[k][0], images[j][0], model)
+                    if hm is not None and (best is None or n > best[1]):
+                        best = (hj @ hm, n)
+                if best is not None and best[1] >= 8:
+                    placed[k] = best[0]
+                    report[names[k]] = best[1]
+                    pending.remove(k)
+                    progress = True
+        for k in pending:
+            report[names[k]] = 0
+        order = sorted(placed)
+        sizes = [(images[k][0].shape[1], images[k][0].shape[0]) for k in order]
+        x0, y0, x1, y1 = align.canvas_for(sizes, [placed[k] for k in order])
+        w, h = x1 - x0, y1 - y0
+        if max(w, h) > max_side:
+            raise ValueError("the panorama would be %d x %d -- too large; the photos may "
+                             "not overlap the way they seem to" % (w, h))
+        shift = W.translate(-x0, -y0)
+        doc = Document(w, h, settings=self.settings)
+        warped = []
+        for k in order:
+            im = W.warp_homography(images[k][0], shift @ placed[k], (0, 0, w, h))
+            lay = doc.add_layer(names[k])
+            c = doc.cell(lay)
+            c.plane("rgba")[...] = im
+            c._touched(doc.bounds)
+            warped.append(im)
+        if blend:
+            lay = doc.add_layer("Panorama")
+            c = doc.cell(lay)
+            c.plane("rgba")[...] = align.panorama_blend(warped)
+            c._touched(doc.bounds)
+        self._adopt(doc, path=None)
+        return doc, report
+
     def straighten(self, line=None):
         """Image > Straighten: rotate so the measured line comes out level."""
         from ..engine import annotations
