@@ -148,6 +148,18 @@ def save(doc, path, selection=None, thumbnail_max=256):
             add("Annotation.%d = %d-%d,%s,%s" % (n, lo, hi, _esc(label), _esc(role)))
         add("")
 
+    # Vector paths, as text: one value per subpath, anchors and handles in
+    # document coordinates (engine/paths.py encode_subpath).
+    from ..paths import encode_subpath
+    for n, vpath in enumerate(getattr(doc, "paths", ())):
+        add("[Path:%04d]" % n)
+        add("Name = %s" % _esc(vpath.name))
+        if doc.active_path == n:
+            add("Active = 1")
+        for k, sub in enumerate(vpath.subpaths):
+            add("Subpath.%d = %s" % (k, encode_subpath(sub)))
+        add("")
+
     # Cells: one section per (layer, frame) that actually has pixels.
     blobs = {}
     frame_index = {f.id: i for i, f in enumerate(doc.frames)}
@@ -344,6 +356,18 @@ def load(path, settings=None):
             else:
                 surface.content_bbox = surface.bounds
             surface.refresh_derived()
+
+        from ..paths import Path, decode_subpath
+        for pid in sorted(db.sections("Path")):
+            section = "Path:" + pid
+            vpath = Path(db.get(section, "Name", "Path"))
+            keys = sorted((k for k in db.keys(section) if k.startswith("Subpath.")),
+                          key=lambda k: int(k.split(".", 1)[1]) if k.split(".", 1)[1].isdigit() else 0)
+            for key in keys:
+                vpath.subpaths.append(decode_subpath(db.get(section, key)))
+            if db.get(section, "Active", "0") == "1":
+                doc.active_path = len(doc.paths)
+            doc.paths.append(vpath)
 
         selection_mask = None
         if SELECTION in names:

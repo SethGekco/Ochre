@@ -463,10 +463,13 @@ class GeometryDelta(Command):
     """
 
     __slots__ = ("label", "width", "height", "_cells", "_selection",
-                 "_sel_blob", "_sel_shape")
+                 "_sel_blob", "_sel_shape", "_paths")
 
-    def __init__(self, width, height, cells, selection=None, label="Transform"):
+    def __init__(self, width, height, cells, selection=None, label="Transform",
+                 paths=None):
         self.label = label
+        # Paths are transformed with the image, so they come back with it.
+        self._paths = paths
         self.width = width
         self.height = height
         self._cells = cells             # {(layer_id, frame_id): (PixelDelta|None, bbox)}
@@ -489,7 +492,8 @@ class GeometryDelta(Command):
                 delta = PixelDelta(layer_id, frame_id, box, surface.read(box),
                                    label, level)
             cells[(layer_id, frame_id)] = (delta, box)
-        return GeometryDelta(doc.width, doc.height, cells, selection, label)
+        paths = ([p.copy() for p in doc.paths], doc.active_path)
+        return GeometryDelta(doc.width, doc.height, cells, selection, label, paths)
 
     def undo(self, doc):
         opposite = GeometryDelta.capture(doc, self._selection, self.label)
@@ -516,6 +520,9 @@ class GeometryDelta(Command):
                 arr = np.frombuffer(zlib.decompress(self._sel_blob), dtype=np.uint8)
                 self._selection.mask = arr.reshape(self._sel_shape).copy()
             self._selection._bbox = None
+        if self._paths is not None:
+            doc.paths = [p.copy() for p in self._paths[0]]
+            doc.active_path = self._paths[1]
         return opposite, doc.bounds
 
     def nbytes(self):
@@ -556,3 +563,45 @@ class SelectionDelta(Command):
 
     def nbytes(self):
         return len(self._blob) if self._blob else 0
+
+
+class PathDelta(Command):
+    """The document's vector paths as they were.
+
+    Paths are small -- a few dozen floats per anchor -- so this simply keeps
+    a copy of the whole list and the active index. Like every command here
+    it stores one direction and builds the other when undone.
+    """
+
+    __slots__ = ("label", "_paths", "_active")
+
+    def __init__(self, paths, active, label="Path"):
+        self.label = label
+        self._paths = [p.copy() for p in paths]
+        self._active = active
+
+    @staticmethod
+    def capture(doc, label="Path"):
+        return PathDelta(doc.paths, doc.active_path, label)
+
+    def same_as(self, doc):
+        """True if the document's paths still match this snapshot."""
+        from .paths import encode_subpath
+        if self._active != doc.active_path or len(self._paths) != len(doc.paths):
+            return False
+        for a, b in zip(self._paths, doc.paths):
+            if a.name != b.name or len(a.subpaths) != len(b.subpaths):
+                return False
+            if any(encode_subpath(x) != encode_subpath(y)
+                   for x, y in zip(a.subpaths, b.subpaths)):
+                return False
+        return True
+
+    def undo(self, doc):
+        opposite = PathDelta(doc.paths, doc.active_path, self.label)
+        doc.paths = [p.copy() for p in self._paths]
+        doc.active_path = self._active
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return 64 + 56 * sum(len(s) for p in self._paths for s in p.subpaths)

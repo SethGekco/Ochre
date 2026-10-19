@@ -223,7 +223,10 @@ NON_PAINTING = {"eyedropper", "select_rect", "select_ellipse", "lasso",
                 "foreground_select", "quick_select", "select_color", "object_select",
                 # Moves existing pixels rather than laying down new colour;
                 # covered by test_movetools.py against an indexed layer.
-                "move_pixels"}
+                "move_pixels",
+                # Vector paths: outlines beside the pixels. They reach a layer
+                # only through Fill/Stroke Path (test_paths.py).
+                "pen", "curvature_pen", "freeform_pen", "path_select", "direct_select"}
 
 
 def main():

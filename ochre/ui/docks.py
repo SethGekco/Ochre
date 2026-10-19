@@ -19,7 +19,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QColorDialog,
                                QComboBox, QDockWidget, QFormLayout, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QPushButton, QSlider,
+                               QListWidgetItem, QPushButton, QSlider, QSpinBox,
                                QToolButton, QVBoxLayout, QWidget)
 
 from ..engine.palette import LENGTH
@@ -580,6 +580,91 @@ class HistoryDock(QDockWidget):
             return
         if row - 1 != self.ctl.history.position:
             self.ctl.history_goto(row - 1)
+
+
+class PathsDock(QDockWidget):
+    """The document's vector paths: GIMP's Paths dialog, Photoshop's panel.
+
+    Click a path to make it the one the path tools edit; double-click to
+    rename. The buttons fill or stroke it on the active layer with the
+    primary colour, or turn it into a selection and back.
+    """
+
+    def __init__(self, controller, parent=None):
+        super().__init__("Paths", parent)
+        self.setObjectName("Paths")
+        self.ctl = controller
+        self._syncing = False
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(2, 2, 2, 2)
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(self._pick)
+        self.list.itemChanged.connect(self._renamed)
+        lay.addWidget(self.list)
+        rows = (
+            (("New", self._new, "New empty path"),
+             ("Duplicate", lambda: self.ctl.duplicate_path(), "Copy the active path"),
+             ("Delete", lambda: self.ctl.delete_path(), "Delete the active path")),
+            (("Fill", lambda: self.ctl.fill_path(), "Fill the path with the primary colour"),
+             ("Stroke", self._stroke, "Stroke the path with the primary colour"),
+             ("To selection", lambda: self.ctl.path_to_selection(),
+              "Make the path's interior the selection"),
+             ("From selection", lambda: self.ctl.selection_to_path(),
+              "Trace the selection's outline into a new path")),
+        )
+        self.buttons = {}
+        for row in rows:
+            h = QHBoxLayout()
+            for text, fn, tip in row:
+                b = QPushButton(text)
+                b.setToolTip(tip)
+                b.clicked.connect(lambda _=False, f=fn: f())
+                h.addWidget(b)
+                self.buttons[text] = b
+            lay.addLayout(h)
+        h = QHBoxLayout()
+        h.addWidget(QLabel("Stroke width"))
+        self.width = QSpinBox()
+        self.width.setRange(1, 500)
+        self.width.setValue(2)
+        self.width.setSuffix(" px")
+        h.addWidget(self.width)
+        h.addStretch(1)
+        lay.addLayout(h)
+        self.setWidget(body)
+
+    def _new(self):
+        self.ctl.new_path()
+
+    def _stroke(self):
+        self.ctl.stroke_path(self.width.value())
+
+    def sync(self, **_):
+        self._syncing = True
+        self.list.clear()
+        for name in self.ctl.path_names():
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsEditable)
+            self.list.addItem(item)
+        active = self.ctl.doc.active_path
+        self.list.setCurrentRow(-1 if active is None else active)
+        has = active is not None
+        for key in ("Duplicate", "Delete", "Fill", "Stroke", "To selection"):
+            self.buttons[key].setEnabled(has)
+        self._syncing = False
+
+    def _pick(self, row):
+        if not self._syncing:
+            self.ctl.set_active_path(row if row >= 0 else None)
+
+    def _renamed(self, item):
+        if self._syncing:
+            return
+        row = self.list.row(item)
+        names = self.ctl.path_names()
+        if 0 <= row < len(names) and item.text().strip() and item.text() != names[row]:
+            self.ctl.rename_path(row, item.text())
 
 
 class FramesDock(QDockWidget):

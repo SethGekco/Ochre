@@ -1145,6 +1145,51 @@ def main():
     check("Content-Aware Fill is Shift+Backspace",
           edit_actions["Content-Aware Fill"].shortcut().toString() == "Shift+Backspace")
 
+    # ---- vector paths through the window -------------------------------------
+    ctl2.new_document(200, 150)
+    win2.canvas.bind()
+    for _ in range(5):
+        app.processEvents()
+    v = win2.canvas.view
+    vp2 = win2.canvas.viewport()
+
+    def at4(dx, dy):
+        wx, wy = v.doc_to_widget(dx, dy)
+        return QPoint(int(round(wx)), int(round(wy)))
+    ctl2.set_tool("pen")
+    for dx, dy in ((40, 40), (160, 40), (160, 120), (40, 120)):
+        QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at4(dx, dy))
+    QTest.mouseMove(vp2, at4(100, 140))
+    app.processEvents()
+    win2.canvas.repaint()
+    check("A REAL PEN: four clicks make four anchors, drawn without error",
+          ctl2.doc.path is not None and len(ctl2.doc.path.subpaths[0]) == 4)
+    QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, at4(40, 40))
+    app.processEvents()
+    check("...clicking the first anchor closes it", ctl2.doc.path.subpaths[0].closed
+          and not ctl2.tool.active)
+    check("the Paths dock lists the new path",
+          win2.paths_dock.list.count() == 1 and win2.paths_dock.list.item(0).text() == "Work Path")
+    win2.paths_dock.buttons["To selection"].click()
+    app.processEvents()
+    check("the dock's To selection button selects the path's interior",
+          ctl2.selection.mask is not None and ctl2.selection.mask[80, 100] == 255
+          and ctl2.selection.mask[10, 10] == 0)
+    ctl2.deselect()
+    win2.paths_dock.buttons["Fill"].click()
+    app.processEvents()
+    check("...and Fill paints it on the layer",
+          tuple(ctl2.doc.cell(ctl2.active_layer).plane("rgba")[80, 100]) == tuple(ctl2.primary))
+    sel_items2 = [a.text().replace("&", "") for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&Select").menu().actions() if a.text()]
+    check("Select menu offers From Path and To Path",
+          "From Path" in sel_items2 and "To Path" in sel_items2)
+    ctl2.set_tool("brush")
+    win2.show_path_action.setChecked(False)
+    win2.do_show_path()
+    win2.canvas.repaint()
+    check("View > Show Path can hide the outline", win2.canvas.show_path is False)
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc

@@ -26,8 +26,8 @@ import math
 from fractions import Fraction
 
 import numpy as np
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QBrush, QColor, QImage, QPainter, QPen, QPixmap,
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPixmap,
                            QTransform)
 from PySide6.QtWidgets import QAbstractScrollArea
 
@@ -291,6 +291,7 @@ class CanvasView(QAbstractScrollArea):
         self._draw_selection(painter, target)
         self._draw_footprint(painter)
         self._draw_zoom_band(painter)
+        self._draw_paths(painter)
         self._draw_tool_overlay(painter)
         self._draw_caret(painter)
         painter.end()
@@ -402,6 +403,16 @@ class CanvasView(QAbstractScrollArea):
                         painter.drawPolygon(poly)
                     else:
                         painter.drawPolyline(poly)
+            elif kind == "curve":
+                path = QPainterPath()
+                for i, (p0, c0, c1, p1) in enumerate(prim[1]):
+                    if i == 0:
+                        path.moveTo(QPointF(*w2d(*p0)))
+                    path.cubicTo(QPointF(*w2d(*c0)), QPointF(*w2d(*c1)), QPointF(*w2d(*p1)))
+                painter.setBrush(Qt.NoBrush)
+                for pen in (white, black):
+                    painter.setPen(pen)
+                    painter.drawPath(path)
             elif kind == "handles":
                 painter.setPen(QPen(QColor(0, 0, 0), 1.0))
                 painter.setBrush(QColor(255, 255, 255))
@@ -415,6 +426,57 @@ class CanvasView(QAbstractScrollArea):
                 painter.drawText(QPoint(int(wx) + 9, int(wy) + 15), text)
                 painter.setPen(QColor(255, 255, 255))
                 painter.drawText(QPoint(int(wx) + 8, int(wy) + 14), text)
+        painter.restore()
+
+    def _draw_paths(self, painter):
+        """The active vector path, while a path tool is in hand.
+
+        Drawn from the document every frame rather than through a cached
+        image: paths are a few hundred segments at most, and drawing them
+        through the view transform keeps them exact at any zoom or rotation.
+        Anchors are squares, handles are dots on thin lines, as in GIMP and
+        Photoshop. View > Show Path draws the outline with any tool.
+        """
+        doc = getattr(self.ctl, "doc", None)
+        tool = getattr(self.ctl, "tool", None)
+        editing = bool(getattr(tool, "shows_paths", False))
+        if doc is None or getattr(doc, "path", None) is None:
+            return
+        if not editing and not getattr(self, "show_path", True):
+            return
+        from PySide6.QtCore import QPointF
+        vpath = doc.path
+        w2d = self.view.doc_to_widget
+        qp = QPainterPath()
+        for sub in vpath.subpaths:
+            if not sub.anchors:
+                continue
+            a0 = sub.anchors[0]
+            qp.moveTo(QPointF(*w2d(a0.x, a0.y)))
+            for p0, c0, c1, p1 in sub.segments():
+                qp.cubicTo(QPointF(*w2d(*c0)), QPointF(*w2d(*c1)), QPointF(*w2d(*p1)))
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 2.0))
+        painter.drawPath(qp)
+        painter.setPen(QPen(QColor(20, 90, 220), 1.0))
+        painter.drawPath(qp)
+        if editing:
+            handle_pen = QPen(QColor(20, 90, 220, 180), 1.0)
+            for a in vpath.anchors():
+                ax, ay = w2d(a.x, a.y)
+                for hx, hy in ((a.ix, a.iy), (a.ox, a.oy)):
+                    if (hx, hy) == (a.x, a.y):
+                        continue
+                    wx, wy = w2d(hx, hy)
+                    painter.setPen(handle_pen)
+                    painter.drawLine(QPointF(ax, ay), QPointF(wx, wy))
+                    painter.setBrush(QColor(255, 255, 255))
+                    painter.drawEllipse(QPointF(wx, wy), 2.5, 2.5)
+                painter.setPen(QPen(QColor(20, 90, 220), 1.0))
+                painter.setBrush(QColor(255, 255, 255) if a.smooth else QColor(20, 90, 220))
+                painter.drawRect(QRectF(ax - 3, ay - 3, 6, 6))
         painter.restore()
 
     def _draw_zoom_band(self, painter):

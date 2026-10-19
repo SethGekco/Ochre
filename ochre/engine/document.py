@@ -45,6 +45,10 @@ class Document:
         self.meta = {}                  # str -> str
         self.axis_layout = "strip"      # "strip" | "grid" -- a hint, nothing more
         self.axis_columns = 0           # grid width when layout == "grid"
+        # Vector paths (engine/paths.py): outlines beside the pixels, not in
+        # them. active_path indexes the one the path tools edit, or None.
+        self.paths = []
+        self.active_path = None
         self._settings = settings
         self._max_dirty = self._setting("Display", "MaxDirtyRects", 8)
 
@@ -53,6 +57,14 @@ class Document:
             return default
         value = self._settings.get(section, key)
         return default if value is None else value
+
+    @property
+    def path(self):
+        """The active path, or None."""
+        i = self.active_path
+        if i is None or not (0 <= i < len(self.paths)):
+            return None
+        return self.paths[i]
 
     # ---- geometry --------------------------------------------------------
 

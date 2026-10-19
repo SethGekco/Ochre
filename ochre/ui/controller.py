@@ -1082,6 +1082,10 @@ class Controller:
             if grouping:
                 self.history.end_group(self.tools.label(self.tool_name)
                                        if self.tool_name else "Selection")
+        if getattr(self.tool, "shows_paths", False):
+            # Path tools edit the document's paths directly; the Paths dock
+            # and the canvas outline follow from this.
+            self.emit("paths.changed")
         self.emit("history.changed")
         return result
 
@@ -1115,6 +1119,8 @@ class Controller:
         if tool is None or not tool.active or not hasattr(tool, "finish"):
             return None
         result = tool.finish(self._ctx)
+        if getattr(tool, "shows_paths", False):
+            self.emit("paths.changed")
         # The tool decides whether it is done: Enter on an open cage CLOSES
         # it and the tool stays active for dragging, so forcing it inactive
         # here broke that.
@@ -1170,6 +1176,155 @@ class Controller:
         changed = self._record_selection_change(label)
         self.emit("history.changed")
         return changed
+
+    # ---- vector paths -----------------------------------------------------
+
+    def _path_change(self, label, fn):
+        """Run a change to the document's paths as one undo entry."""
+        from ..engine.commands import PathDelta
+        before = PathDelta.capture(self.doc, label)
+        result = fn()
+        if not before.same_as(self.doc):
+            self.history.push(before, label)
+            self.dirty_since_save = True
+        self.emit("paths.changed")
+        self.emit("history.changed")
+        self.invalidate()
+        return result
+
+    def path_names(self):
+        return [p.name for p in self.doc.paths]
+
+    def set_active_path(self, index):
+        """Make a path the one the path tools edit (None: no active path)."""
+        if index is not None and not (0 <= index < len(self.doc.paths)):
+            index = None
+        if index == self.doc.active_path:
+            return False
+        # Choosing a path is not an edit and is not undoable, as in the
+        # Paths panel; it only changes what the tools act on.
+        self.doc.active_path = index
+        self.emit("paths.changed")
+        self.invalidate()
+        return True
+
+    def new_path(self, name=None):
+        from ..engine.paths import Path
+        from ..engine.tools.pathtools import _new_name
+
+        def run():
+            self.doc.paths.append(Path(name or _new_name(self.doc)))
+            self.doc.active_path = len(self.doc.paths) - 1
+            return self.doc.active_path
+        return self._path_change("New Path", run)
+
+    def delete_path(self, index=None):
+        index = self.doc.active_path if index is None else index
+        if index is None or not (0 <= index < len(self.doc.paths)):
+            return False
+
+        def run():
+            del self.doc.paths[index]
+            if not self.doc.paths:
+                self.doc.active_path = None
+            else:
+                self.doc.active_path = min(index, len(self.doc.paths) - 1)
+            return True
+        return self._path_change("Delete Path", run)
+
+    def duplicate_path(self, index=None):
+        index = self.doc.active_path if index is None else index
+        if index is None or not (0 <= index < len(self.doc.paths)):
+            return None
+
+        def run():
+            dup = self.doc.paths[index].copy()
+            dup.name = dup.name + " copy"
+            self.doc.paths.insert(index + 1, dup)
+            self.doc.active_path = index + 1
+            return index + 1
+        return self._path_change("Duplicate Path", run)
+
+    def rename_path(self, index, name):
+        if not (0 <= index < len(self.doc.paths)) or not str(name).strip():
+            return False
+
+        def run():
+            self.doc.paths[index].name = str(name).strip()
+            return True
+        return self._path_change("Rename Path", run)
+
+    def path_to_selection(self, mode=None, index=None):
+        """Select > From Path: the path's interior becomes the selection."""
+        from ..engine import paths as P
+        from ..engine.selection import REPLACE
+        index = self.doc.active_path if index is None else index
+        if index is None or not (0 <= index < len(self.doc.paths)):
+            return False
+        vpath = self.doc.paths[index]
+        if vpath.is_empty:
+            return False
+        mask = P.fill_mask(vpath, self.doc.width, self.doc.height, antialias=True)
+        return self._selection_op("Path to Selection",
+                                  lambda sel: sel.combine(mask, mode or REPLACE))
+
+    def selection_to_path(self, smooth=False):
+        """Select > To Path: the selection's outline becomes a new path."""
+        from ..engine import paths as P
+        mask = self.selection.mask
+        if mask is None or not mask.any():
+            return None
+        traced = P.from_mask(mask, smooth=smooth)
+        if traced.is_empty:
+            return None
+
+        def run():
+            from ..engine.tools.pathtools import _new_name
+            traced.name = _new_name(self.doc) if self.doc.paths else "Selection"
+            self.doc.paths.append(traced)
+            self.doc.active_path = len(self.doc.paths) - 1
+            return self.doc.active_path
+        return self._path_change("Selection to Path", run)
+
+    def _paint_coverage(self, label, cov, colour):
+        from ..engine.commands import PixelDelta
+        from ..engine.geometry import Rect
+        if self.active_layer is None or self.active_layer.is_group:
+            return None
+        ys, xs = np.nonzero(cov)
+        if ys.size == 0:
+            return None
+        rect = Rect.from_bounds(int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        window = self.selection.combine_mask(cov[rect.slice()], rect)
+        cell = self.doc.cell(self.active_layer)
+        delta = PixelDelta.capture(self.doc, self.active_layer.id, self.doc.frame.id, rect, label)
+        block = np.broadcast_to(np.array(colour, dtype=np.uint8), (rect.h, rect.w, 4))
+        cell.apply_masked(rect, block, window)
+        if delta is not None:
+            self.history.push(delta, label, frame_id=self.doc.frame.id)
+        self.invalidate(rect)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return rect
+
+    def fill_path(self, colour=None, index=None, antialias=True):
+        """Edit > Fill Path: paint the path's interior on the active layer."""
+        from ..engine import paths as P
+        index = self.doc.active_path if index is None else index
+        if index is None or not (0 <= index < len(self.doc.paths)):
+            return None
+        cov = P.fill_mask(self.doc.paths[index], self.doc.width, self.doc.height, antialias)
+        return self._paint_coverage("Fill Path", cov, colour or self.primary)
+
+    def stroke_path(self, width=2.0, colour=None, index=None, antialias=True):
+        """Edit > Stroke Path: paint along the path's outline."""
+        from ..engine import paths as P
+        index = self.doc.active_path if index is None else index
+        if index is None or not (0 <= index < len(self.doc.paths)):
+            return None
+        cov = P.stroke_mask(self.doc.paths[index], self.doc.width, self.doc.height,
+                            float(width), antialias)
+        return self._paint_coverage("Stroke Path", cov, colour or self.primary)
 
     def select_all(self):
         return self._selection_op("Select All", lambda s: s.select_all())
@@ -1327,6 +1482,7 @@ class Controller:
                 self.active_layer = leaves[-1] if leaves else None
             self.emit("layers.changed")
             self.emit("frames.changed")
+        self.emit("paths.changed")
         self.emit("history.changed")
 
     def history_labels(self):

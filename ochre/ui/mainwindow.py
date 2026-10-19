@@ -14,7 +14,7 @@ from ..engine import accel
 from ..engine.fileio import supported_extensions
 from .canvas import CanvasView
 from .docks import (ColorsDock, FramesDock, HistoryDock, LayersDock,
-                    PaletteDock, ToolsDock)
+                    PaletteDock, PathsDock, ToolsDock)
 from .effectdialog import EffectDialog
 
 
@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.colors_dock = ColorsDock(controller, self)
         self.palette_dock = PaletteDock(controller, self)
         self.history_dock = HistoryDock(controller, self)
+        self.paths_dock = PathsDock(controller, self)
         self.frames_dock = FramesDock(controller, self)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.tools_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.layers_dock)
@@ -44,7 +45,9 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.palette_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.history_dock)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.frames_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.paths_dock)
         self.tabifyDockWidget(self.palette_dock, self.history_dock)
+        self.tabifyDockWidget(self.history_dock, self.paths_dock)
 
         # None = decide from the document; True/False = the user has said.
         # Only an explicit toggle sets it, never our own show and hide, so
@@ -98,6 +101,8 @@ class MainWindow(QMainWindow):
         bus.subscribe("document.resized", lambda **k: (self.canvas.bind(keep_view=True),
                                                         self.canvas.refresh()))
         bus.subscribe("selection.changed", lambda **k: self.canvas.viewport().update())
+        bus.subscribe("paths.changed", lambda **k: (self.paths_dock.sync(),
+                                                    self.canvas.viewport().update()))
         self.canvas.cursor_moved.connect(self._on_cursor)
         self.canvas.zoom_changed.connect(self.zoom_label.setText)
 
@@ -121,7 +126,8 @@ class MainWindow(QMainWindow):
 
     def _sync_all(self):
         for dock in (self.tools_dock, self.layers_dock, self.colors_dock,
-                     self.palette_dock, self.history_dock, self.frames_dock):
+                     self.palette_dock, self.history_dock, self.frames_dock,
+                     self.paths_dock):
             dock.sync()
         self._update_frames_visible()
         self._update_title()
@@ -205,6 +211,9 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "S&mooth Fill (Inpaint)",
                   lambda: self._busy(self.ctl.inpaint_selection, "smooth"))
         edit_menu.addSeparator()
+        self._act(edit_menu, "Fill &Path", lambda: self.ctl.fill_path())
+        self._act(edit_menu, "Stro&ke Path...", self.do_stroke_path)
+        edit_menu.addSeparator()
 
         sel_menu = bar.addMenu("&Select")
         self._act(sel_menu, "&All", self.do_select_all, "Ctrl+A")
@@ -225,6 +234,8 @@ class MainWindow(QMainWindow):
             "Round Selection Corners", self.ctl.round_selection, 10))
         sel_menu.addSeparator()
         self._act(sel_menu, "Alpha to Se&lection", lambda: self._sel(self.ctl.alpha_to_selection))
+        self._act(sel_menu, "From &Path", lambda: self._sel(self.ctl.path_to_selection), "Shift+V")
+        self._act(sel_menu, "To Pa&th", lambda: self.ctl.selection_to_path())
         self.quick_mask_action = self._act(sel_menu, "Toggle &Quick Mask",
                                            self.do_quick_mask, "Q")
         self.quick_mask_action.setCheckable(True)
@@ -238,6 +249,10 @@ class MainWindow(QMainWindow):
         self._act(view_menu, "Rotate View &Left 15\u00b0", lambda: self.canvas.rotate_view(-15))
         self._act(view_menu, "Rotate View &Right 15\u00b0", lambda: self.canvas.rotate_view(15))
         self._act(view_menu, "Reset View &Rotation", lambda: self.canvas.rotate_view(None))
+        view_menu.addSeparator()
+        self.show_path_action = self._act(view_menu, "Show &Path", self.do_show_path)
+        self.show_path_action.setCheckable(True)
+        self.show_path_action.setChecked(True)
 
         # Effects and adjustments, grouped exactly as the registry says --
         # so an addon's effect appears in the right menu without this file
@@ -765,6 +780,22 @@ class MainWindow(QMainWindow):
         value, ok = QInputDialog.getInt(self, title, "Radius (pixels):", default, 1, 2000)
         if ok:
             self._sel(fn, value)
+
+    def do_stroke_path(self):
+        from PySide6.QtWidgets import QInputDialog
+        if self.ctl.doc.path is None:
+            self.statusBar().showMessage("No active path to stroke.", 4000)
+            return
+        value, ok = QInputDialog.getInt(self, "Stroke Path", "Line width (pixels):",
+                                        self.paths_dock.width.value(), 1, 500)
+        if ok:
+            self.paths_dock.width.setValue(value)
+            self.ctl.stroke_path(value)
+            self.canvas.refresh()
+
+    def do_show_path(self):
+        self.canvas.show_path = self.show_path_action.isChecked()
+        self.canvas.viewport().update()
 
     def do_quick_mask(self):
         on = self.ctl.toggle_quick_mask()

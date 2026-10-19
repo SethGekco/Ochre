@@ -131,6 +131,12 @@ def _rebuild(doc, width, height, convert, bbox_fn):
     return doc.bounds
 
 
+def _map_paths(doc, fn):
+    """Apply a point mapping to every vector path, so paths follow the image."""
+    for path in getattr(doc, "paths", ()):
+        path.map_points(fn)
+
+
 def resize_image(doc, width, height, method=BILINEAR):
     """Resample every layer to a new size."""
     width, height = max(1, int(width)), max(1, int(height))
@@ -145,6 +151,7 @@ def resize_image(doc, width, height, method=BILINEAR):
         return Rect.from_bounds(int(np.floor(r.x * sx)), int(np.floor(r.y * sy)),
                                 int(np.ceil(r.x1 * sx)), int(np.ceil(r.y1 * sy)))
 
+    _map_paths(doc, lambda p: (p[0] * sx, p[1] * sy))
     return _rebuild(doc, width, height, convert, bbox)
 
 
@@ -168,6 +175,7 @@ def reframe(doc, width, height, dx, dy):
             out[dst.slice()] = plane[dst.y - dy:dst.y1 - dy, dst.x - dx:dst.x1 - dx]
         return out
 
+    _map_paths(doc, lambda p: (p[0] + dx, p[1] + dy))
     return _rebuild(doc, width, height, convert, lambda r: r.translated(dx, dy))
 
 
@@ -192,6 +200,7 @@ def flip_document(doc, horizontal=True):
         return (Rect(w - r.x1, r.y, r.w, r.h) if horizontal
                 else Rect(r.x, h - r.y1, r.w, r.h))
 
+    _map_paths(doc, (lambda p: (w - p[0], p[1])) if horizontal else (lambda p: (p[0], h - p[1])))
     return _rebuild(doc, w, h, lambda s, n, p: flip_plane(p, horizontal), bbox)
 
 
@@ -209,6 +218,9 @@ def rotate_document(doc, quarter_turns):
             return Rect(h - r.y1, r.x, r.h, r.w)
         return Rect(r.y, w - r.x1, r.h, r.w)   # k == 3, counter-clockwise
 
+    _map_paths(doc, {1: lambda p: (h - p[1], p[0]),
+                     2: lambda p: (w - p[0], h - p[1]),
+                     3: lambda p: (p[1], w - p[0])}[k])
     return _rebuild(doc, nw, nh, lambda s, n, p: rotate_plane(p, k), bbox)
 
 
@@ -354,6 +366,7 @@ def perspective_crop(doc, quad, method=BILINEAR):
     if w < 1 or h < 1:
         return None
     hm = warp.homography(q, [(0, 0), (w, 0), (w, h), (0, h)])
+    _map_paths(doc, lambda p: tuple(warp.apply(hm, [p])[0]))
     return _rebuild(doc, w, h,
                     lambda s, n, p: _warp_plane(s, n, p, hm, w, h, method), lambda r: r)
 
@@ -370,6 +383,7 @@ def rotate_image_by(doc, degrees, method=BILINEAR, expand=True):
         nw, nh = w, h
     hm = warp.translate(nw / 2.0, nh / 2.0) @ warp.rotate_about(rad, 0, 0) @ \
         warp.translate(-w / 2.0, -h / 2.0)
+    _map_paths(doc, lambda p: tuple(warp.apply(hm, [p])[0]))
     return _rebuild(doc, nw, nh,
                     lambda s_, n, p: _warp_plane(s_, n, p, hm, nw, nh, method), lambda r: r)
 
