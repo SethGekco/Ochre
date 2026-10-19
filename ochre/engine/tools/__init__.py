@@ -34,7 +34,7 @@ from .pathtools import (AddAnchorTool, ConvertPointTool, CurvaturePenTool,
                         PathSelectTool, PenTool)
 from .utility import (ColorSamplerTool, CountTool, MeasureTool, NoteTool,
                       SliceSelectTool, SliceTool)
-from .retouch import (AirbrushTool, BackgroundEraserTool, BlurBrushTool, BurnTool,
+from .retouch import (AirbrushTool, ArtHistoryBrushTool, BackgroundEraserTool, BlurBrushTool, BurnTool,
                       DodgeTool, HealTool, HistoryBrushTool, InkTool, MagicEraserTool,
                       MixerBrushTool, PatternStampTool, RecolorTool, RedEyeTool,
                       SharpenBrushTool, SmudgeTool, SpongeTool)
@@ -60,6 +60,7 @@ BUILTIN = {
         PenTool, CurvaturePenTool, FreeformPenTool, PathSelectTool, DirectSelectTool,
         CurveTool, MeasureTool, ColorSamplerTool, CountTool, NoteTool, SliceTool,
         SliceSelectTool, AddAnchorTool, DeleteAnchorTool, ConvertPointTool, PuppetWarpTool,
+        ArtHistoryBrushTool,
     )
 }
 

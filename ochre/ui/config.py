@@ -15,6 +15,7 @@ UI_DEFAULTS = {
         "Width": 1280,
         "Height": 800,
         "Title": "Ochre",
+        "DockWidth": 300,
     },
     "Canvas": {
         "CheckerSize": 16,

@@ -992,6 +992,90 @@ class Controller:
         self._after_structure_change()
         return True
 
+    # ---- brush presets ------------------------------------------------------------
+
+    BUILTIN_BRUSHES = {
+        "brush": {
+            "Hard round": {"size": 12, "hardness": 1.0, "size_jitter": 0, "opacity_jitter": 0,
+                           "scatter": 0, "count": 1},
+            "Soft round": {"size": 40, "hardness": 0.0, "size_jitter": 0, "opacity_jitter": 0,
+                           "scatter": 0, "count": 1},
+            "Spray": {"size": 4, "hardness": 0.6, "size_jitter": 60, "opacity_jitter": 50,
+                      "scatter": 400, "count": 10},
+            "Chalk": {"size": 18, "hardness": 0.9, "size_jitter": 30, "opacity_jitter": 60,
+                      "scatter": 30, "count": 3},
+            "Leaves": {"size": 22, "hardness": 0.8, "size_jitter": 70, "opacity_jitter": 30,
+                       "scatter": 250, "count": 2},
+        },
+        "pencil": {"Pixel": {"size": 1}, "2 px": {"size": 2}, "Block 4": {"size": 4}},
+        "eraser": {"Hard": {"size": 16, "hardness": 1.0}, "Soft": {"size": 40, "hardness": 0.0}},
+    }
+
+    def _brushes_path(self):
+        return os.path.join(self.state_dir, "brushes.json") if self.state_dir else None
+
+    def brush_presets(self, tool=None):
+        """{preset: options} for a tool (the active one by default): the
+        built-in ones and the user's own, which win on a name clash."""
+        import json
+        tool = tool or self.tool_name
+        out = dict(self.BUILTIN_BRUSHES.get(tool, {}))
+        path = self._brushes_path()
+        if path and os.path.exists(path):
+            try:
+                with open(path) as fh:
+                    out.update(json.load(fh).get(tool, {}))
+            except (OSError, ValueError):
+                pass
+        return out
+
+    def save_brush_preset(self, name, tool=None):
+        """Remember the tool's current options under a name."""
+        import json
+        tool = tool or self.tool_name
+        path = self._brushes_path()
+        if not path or self.tool is None:
+            return False
+        data = {}
+        if os.path.exists(path):
+            try:
+                with open(path) as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                data = {}
+        spec = [o.name for o in self.tools.spec(tool)]
+        opts = {k: v for k, v in self.tool_option_values(tool).items() if k in spec}
+        data.setdefault(tool, {})[str(name)] = _plain(opts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(data, fh, indent=1)
+        self.emit("brushes.changed")
+        return True
+
+    def apply_brush_preset(self, name, tool=None):
+        tool = tool or self.tool_name
+        preset = self.brush_presets(tool).get(name)
+        if preset is None:
+            return False
+        for key, value in preset.items():
+            self.set_tool_option(key, value, tool)
+        return True
+
+    def delete_brush_preset(self, name, tool=None):
+        import json
+        tool = tool or self.tool_name
+        path = self._brushes_path()
+        if not path or not os.path.exists(path):
+            return False
+        with open(path) as fh:
+            data = json.load(fh)
+        if data.get(tool, {}).pop(name, None) is None:
+            return False
+        with open(path, "w") as fh:
+            json.dump(data, fh, indent=1)
+        self.emit("brushes.changed")
+        return True
+
     # ---- actions: record, replay, batch --------------------------------------
 
     def start_recording(self, name):

@@ -165,12 +165,43 @@ class BrushTool(_StrokeTool):
     label = "Paintbrush"
     options_spec = (O.size(16), O.hardness(0.85), O.opacity(1.0),
                     O.Opt("pressure_size", O.BOOL, True, "Pressure size",
-                          tip="Tablet pressure scales the brush."))
+                          tip="Tablet pressure scales the brush."),
+                    # Photoshop's Shape Dynamics and Scattering, the parts
+                    # that make a brush feel like more than a stamp.
+                    O.Opt("size_jitter", O.INT, 0, "Size jitter", 0, 100, 5, suffix=" %"),
+                    O.Opt("opacity_jitter", O.INT, 0, "Opacity jitter", 0, 100, 5, suffix=" %"),
+                    O.Opt("scatter", O.INT, 0, "Scatter", 0, 500, 10, suffix=" %",
+                          tip="How far dabs stray from the stroke, as a share of the size."),
+                    O.Opt("count", O.INT, 1, "Count", 1, 16, 1,
+                          tip="Dabs laid at each step (with scatter: a spray)."))
     default_size = 16
 
     def _dab(self, ctx, event, x, y):
+        """One step of the stroke: one dab, or a jittered, scattered handful."""
+        sj = int(self.option("size_jitter", 0) or 0)
+        oj = int(self.option("opacity_jitter", 0) or 0)
+        sc = int(self.option("scatter", 0) or 0)
+        n = max(1, int(self.option("count", 1) or 1))
+        if not (sj or oj or sc) and n == 1:
+            return self._one_dab(ctx, event, x, y, 1.0, 1.0)
+        rng = getattr(self, "_rng", None)
+        if rng is None:
+            rng = self._rng = np.random.default_rng(1)
+        size = max(1.0, float(self.option("size", self.default_size)))
+        covered = None
+        for _ in range(n):
+            ks = 1.0 - rng.random() * sj / 100.0
+            ko = 1.0 - rng.random() * oj / 100.0
+            ang = rng.random() * 2 * math.pi
+            dist = rng.random() * sc / 100.0 * size
+            r = self._one_dab(ctx, event, x + math.cos(ang) * dist, y + math.sin(ang) * dist, ks, ko)
+            if r is not None:
+                covered = r if covered is None else covered.union(r)
+        return covered
+
+    def _one_dab(self, ctx, event, x, y, size_k, flow_k):
         cell = ctx.cell
-        size = max(1, float(self.option("size", self.default_size)))
+        size = max(1, float(self.option("size", self.default_size)) * size_k)
         if self.option("pressure_size", True) and event.pressure < 1.0:
             size = max(1.0, size * event.pressure)
         cov = _circle_coverage(size, float(self.option("hardness", 0.85)),
@@ -184,7 +215,7 @@ class BrushTool(_StrokeTool):
         cov = cov[clipped.y - oy:clipped.y - oy + clipped.h,
                   clipped.x - ox:clipped.x - ox + clipped.w]
 
-        flow = float(self.option("flow", 1.0))
+        flow = float(self.option("flow", 1.0)) * flow_k
         if flow < 1.0:
             cov = accel.spec._mul(cov.astype(np.uint32),
                                   np.uint32(int(flow * 255))).astype(np.uint8)
@@ -216,6 +247,10 @@ class BrushTool(_StrokeTool):
 
     def on_begin(self, ctx, event):
         self._acc = None
+        # Seeded per stroke, so a jittered stroke is reproducible (and its
+        # preview is what lands) rather than shuffling on every repaint.
+        self._strokes = getattr(self, "_strokes", 0) + 1
+        self._rng = np.random.default_rng(self._strokes)
         return super().on_begin(ctx, event)
 
 

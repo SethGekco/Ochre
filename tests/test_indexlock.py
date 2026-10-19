@@ -183,6 +183,9 @@ DRIVERS = {
                               _stroke(t, c, [(8, 8)], mods=2),
                               _stroke(t, c, [(28, 22), (30, 24)])),
     "red_eye":  lambda t, c: (_ink(c, 0, 0, 40, 32, 200), _stroke(t, c, [(6, 6), (30, 24)])),
+    "art_history": lambda t, c: (_set(c, history_source=lambda lid, fid: np.full(
+                                     (c.doc.height, c.doc.width, 4), (200, 120, 40, 255), np.uint8)),
+                                 _stroke(t, c, [(20, 16), (22, 16)])),
     # ---- transforms: lift, change, commit ---------------------------------
     "transform":  lambda t, c: (_stroke(t, c, [(20, 16), (28, 22)]), t.finish(c)),
     "rotate_tool": lambda t, c: (_ink(c, 4, 4, 12, 24, 200),

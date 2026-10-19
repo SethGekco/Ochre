@@ -660,15 +660,19 @@ class PathsDock(QDockWidget):
               "Trace the selection's outline into a new path")),
         )
         self.buttons = {}
+        # Two buttons a row: a row of four set the whole panel column's
+        # minimum width and took it from the canvas.
+        grid = QGridLayout()
+        k = 0
         for row in rows:
-            h = QHBoxLayout()
             for text, fn, tip in row:
                 b = QPushButton(text)
                 b.setToolTip(tip)
                 b.clicked.connect(lambda _=False, f=fn: f())
-                h.addWidget(b)
+                grid.addWidget(b, k // 2, k % 2)
                 self.buttons[text] = b
-            lay.addLayout(h)
+                k += 1
+        lay.addLayout(grid)
         h = QHBoxLayout()
         h.addWidget(QLabel("Stroke width"))
         self.width = QSpinBox()

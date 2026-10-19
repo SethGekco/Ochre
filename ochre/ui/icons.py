@@ -373,6 +373,11 @@ def i_flip(g):
     g.poly([(14, 5), (21, 19), (14, 19)], w=1.3)
 
 
+def i_art_history(g):
+    i_history_brush(g)
+    g.curve((2, 22), (6, 18), (8, 22), (12, 18), w=1.4, color=ACCENT)
+
+
 def i_puppet_warp(g):
     # A bent limb with pins: the puppet.
     g.curve((4, 20), (6, 10), (14, 14), (20, 4), w=3.0, color=ACCENT_SOFT)

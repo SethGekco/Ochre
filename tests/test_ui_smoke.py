@@ -1069,7 +1069,12 @@ def main():
     for _ in range(5):
         app.processEvents()
     win2.canvas.rotate_view(90)
-    app.processEvents()
+    # Let the layout settle and take the view out of fit mode, or a late
+    # resize re-fits the canvas between computing the click point and
+    # delivering the click (timing that changed when a dock was added).
+    for _ in range(5):
+        app.processEvents()
+    win2.canvas.user_took_view()
     vp2 = win2.canvas.viewport()
     cell2 = ctl2.doc.cell(ctl2.active_layer)
     ctl2.set_tool("pencil", size=3)

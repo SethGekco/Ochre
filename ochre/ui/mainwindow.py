@@ -54,14 +54,15 @@ class MainWindow(QMainWindow):
         self.palette_dock = PaletteDock(controller, self)
         self.history_dock = HistoryDock(controller, self)
         self.paths_dock = PathsDock(controller, self)
-        from .panels import (ActionsDock, ChannelsDock, CompsDock, HistogramDock, InfoDock,
-                             NavigatorDock)
+        from .panels import (ActionsDock, BrushPresetsDock, ChannelsDock, CompsDock,
+                             HistogramDock, InfoDock, NavigatorDock)
         self.navigator_dock = NavigatorDock(controller, self.canvas, self)
         self.info_dock = InfoDock(controller, self)
         self.histogram_dock = HistogramDock(controller, self)
         self.actions_dock = ActionsDock(controller, self)
         self.channels_dock = ChannelsDock(controller, self.canvas, self)
         self.comps_dock = CompsDock(controller, self)
+        self.brushes_dock = BrushPresetsDock(controller, self)
         self.frames_dock = FramesDock(controller, self)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.tools_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.layers_dock)
@@ -74,9 +75,14 @@ class MainWindow(QMainWindow):
         # left Qt drawing a stale tab strip over the dock below.
         for dock in (self.history_dock, self.paths_dock, self.navigator_dock,
                      self.info_dock, self.histogram_dock, self.actions_dock,
-                     self.channels_dock, self.comps_dock):
+                     self.channels_dock, self.comps_dock, self.brushes_dock):
             self.tabifyDockWidget(self.palette_dock, dock)
         self.history_dock.raise_()
+        # Give the canvas the room. Left to itself Qt sizes the right-hand
+        # column from the docks' preferred widths, which with a dozen panels
+        # took 740 px of an 1100 px window. ui.ini [Window] DockWidth sets it.
+        dock_w = int(settings.get("Window", "DockWidth") or 300)
+        self.resizeDocks([self.layers_dock], [dock_w], Qt.Horizontal)
 
         # None = decide from the document; True/False = the user has said.
         # Only an explicit toggle sets it, never our own show and hide, so
@@ -143,6 +149,7 @@ class MainWindow(QMainWindow):
         bus.subscribe("actions.changed", lambda **k: self.actions_dock.sync())
         bus.subscribe("channels.changed", lambda **k: self.channels_dock.sync())
         bus.subscribe("comps.changed", lambda **k: self.comps_dock.sync())
+        bus.subscribe("brushes.changed", lambda **k: self.brushes_dock.sync())
         bus.subscribe("tool.request", self._on_tool_request)
         self.canvas.cursor_moved.connect(self.info_dock.pointer)
         self.canvas.cursor_moved.connect(self._on_cursor)
@@ -150,6 +157,7 @@ class MainWindow(QMainWindow):
 
     def _on_tool(self, **_):
         self.tools_dock.sync()
+        self.brushes_dock.sync()
         self.options_bar.rebuild()
         # The pointer belongs to the tool, so it changes with it -- including
         # the size of the footprint, since changing brush size is a tool
@@ -207,7 +215,7 @@ class MainWindow(QMainWindow):
         for dock in (self.tools_dock, self.layers_dock, self.colors_dock, self.palette_dock,
                      self.history_dock, self.paths_dock, self.navigator_dock, self.info_dock,
                      self.histogram_dock, self.actions_dock, self.channels_dock,
-                     self.comps_dock, self.frames_dock):
+                     self.comps_dock, self.brushes_dock, self.frames_dock):
             menu.addAction(dock.toggleViewAction())
         return menu
 

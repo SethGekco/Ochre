@@ -721,3 +721,98 @@ class MagicEraserTool(Tool):
         if cmd is not None and ctx.history is not None:
             ctx.history.push(cmd, self.label, frame_id=ctx.frame.id)
         return rect
+
+
+class ArtHistoryBrushTool(_StrokeTool):
+    """Photoshop's Art History Brush: repaint from the history source in
+    short stylised strokes.
+
+    Each step scatters several little strokes over an area around the
+    pointer. Each takes its colour from the source at its own spot and lies
+    ACROSS the source's local gradient -- along edges, not over them -- so
+    the image comes back as if painted. Style picks the stroke length and
+    how loose they are; Fidelity how far colours may wander.
+    """
+
+    name = "art_history"
+    label = "Art History Brush"
+    default_size = 4
+    STYLES = {"tight_short": (4, 0.2), "tight_medium": (8, 0.25), "loose_medium": (10, 0.6),
+              "loose_long": (18, 0.7), "dab": (2, 0.4)}
+    options_spec = (O.size(4, label="Stroke width"),
+                    O.Opt("style", O.CHOICE, "tight_medium", "Style",
+                          choices=tuple(STYLES),
+                          labels={"tight_short": "Tight short", "tight_medium": "Tight medium",
+                                  "loose_medium": "Loose medium", "loose_long": "Loose long",
+                                  "dab": "Dab"}),
+                    O.Opt("area", O.INT, 30, "Area", 2, 300, 2, suffix=" px"),
+                    O.Opt("fidelity", O.INT, 90, "Fidelity", 0, 100, 5, suffix=" %"))
+
+    def on_begin(self, ctx, event):
+        self._source = None
+        if ctx.history_source is not None and ctx.layer is not None:
+            self._source = ctx.history_source(ctx.layer.id, ctx.frame.id)
+        if self._source is None:
+            self.active = False
+            return {"error": "no history source for this layer"}
+        g = luminance(self._source[..., :3])
+        self._gy, self._gx = np.gradient(g)
+        self._rng = np.random.default_rng(int(event.x * 31 + event.y * 17) & 0xFFFF)
+        return super().on_begin(ctx, event)
+
+    def _dab(self, ctx, event, x, y):
+        cell = ctx.cell
+        src = self._source
+        h, w = src.shape[:2]
+        length, loose = self.STYLES.get(self.option("style", "tight_medium"), (8, 0.25))
+        width = max(1.0, float(self.option("size", 4)))
+        area = float(self.option("area", 30))
+        fidelity = int(self.option("fidelity", 90)) / 100.0
+        n = max(1, int(area * area / (length * width * 6)))
+        covered = None
+        rng = self._rng
+        for _ in range(n):
+            a = rng.random() * 2 * math.pi
+            r = math.sqrt(rng.random()) * area / 2.0
+            px, py = x + math.cos(a) * r, y + math.sin(a) * r
+            ix, iy = int(px), int(py)
+            if not (0 <= ix < w and 0 <= iy < h):
+                continue
+            colour = src[iy, ix].astype(np.float64)
+            if fidelity < 1.0:
+                colour[:3] += (rng.random(3) - 0.5) * 255 * (1 - fidelity)
+            gx, gy = self._gx[iy, ix], self._gy[iy, ix]
+            # Along the edge: perpendicular to the gradient, jittered.
+            ang = math.atan2(gy, gx) + math.pi / 2 + (rng.random() - 0.5) * math.pi * loose
+            ln = length * (0.6 + rng.random() * 0.8)
+            rect = self._stroke(ctx, cell, px, py, ang, ln, width,
+                                np.clip(colour, 0, 255).astype(np.uint8))
+            if rect is not None:
+                covered = rect if covered is None else covered.union(rect)
+        return covered
+
+    def _stroke(self, ctx, cell, x, y, ang, length, width, colour):
+        dx, dy = math.cos(ang) * length / 2.0, math.sin(ang) * length / 2.0
+        x0, y0, x1, y1 = x - dx, y - dy, x + dx, y + dy
+        half = width / 2.0
+        box = Rect.from_bounds(int(math.floor(min(x0, x1) - half - 1)), int(math.floor(min(y0, y1) - half - 1)),
+                               int(math.ceil(max(x0, x1) + half + 1)), int(math.ceil(max(y0, y1) + half + 1)))
+        rect = box.clipped_to(cell.width, cell.height)
+        if rect is None:
+            return None
+        yy, xx = np.mgrid[rect.y:rect.y1, rect.x:rect.x1].astype(np.float64)
+        xx += 0.5
+        yy += 0.5
+        vx, vy = x1 - x0, y1 - y0
+        L2 = max(vx * vx + vy * vy, 1e-9)
+        t = np.clip(((xx - x0) * vx + (yy - y0) * vy) / L2, 0, 1)
+        d = np.hypot(xx - (x0 + t * vx), yy - (y0 + t * vy))
+        cov = np.clip(half + 0.5 - d, 0, 1)
+        cov = np.rint(cov * 255).astype(np.uint8)
+        if not cov.any():
+            return None
+        self._session.touch(rect)
+        block = np.empty((rect.h, rect.w, 4), np.uint8)
+        block[:] = colour
+        cell.apply_masked(rect, block, ctx.coverage(cov, rect))
+        return rect

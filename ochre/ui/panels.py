@@ -288,7 +288,7 @@ class NavigatorView(QWidget):
         super().__init__(dock)
         self.dock = dock
         self.thumb = None
-        self.setMinimumSize(160, 120)
+        self.setMinimumSize(120, 90)
         self.setCursor(Qt.PointingHandCursor)
 
     def sizeHint(self):
@@ -356,6 +356,8 @@ class NavigatorDock(QDockWidget):
         for text, fn in (("−", lambda: canvas.zoom_step(-1)), ("Fit", canvas.zoom_fit),
                          ("100%", canvas.zoom_actual), ("+", lambda: canvas.zoom_step(+1))):
             b = QPushButton(text)
+            b.setMinimumWidth(10)
+            b.setMaximumWidth(56)
             b.clicked.connect(lambda _=False, f=fn: (f(), self.view.update()))
             row.addWidget(b)
         lay.addLayout(row)
@@ -569,13 +571,14 @@ class CompsDock(QDockWidget):
         self.list = QListWidget()
         self.list.itemDoubleClicked.connect(lambda _i: self._apply())
         lay.addWidget(self.list, 1)
-        row = QHBoxLayout()
-        for text, fn in (("New", self._new), ("Apply", self._apply), ("Update", self._update),
-                         ("Delete", self._delete)):
+        from PySide6.QtWidgets import QGridLayout
+        grid = QGridLayout()
+        for k, (text, fn) in enumerate((("New", self._new), ("Apply", self._apply),
+                                        ("Update", self._update), ("Delete", self._delete))):
             b = QPushButton(text)
             b.clicked.connect(fn)
-            row.addWidget(b)
-        lay.addLayout(row)
+            grid.addWidget(b, k // 2, k % 2)
+        lay.addLayout(grid)
         self.setWidget(body)
 
     def sync(self, **_):
@@ -607,4 +610,55 @@ class CompsDock(QDockWidget):
     def _delete(self):
         if self.list.currentRow() >= 0:
             self.ctl.delete_comp(self.list.currentRow())
+            self.sync()
+
+
+
+class BrushPresetsDock(QDockWidget):
+    """Brush presets for the tool in hand: Photoshop's Brushes panel, small.
+    Double-click (or Apply) to use one; Save keeps the current settings."""
+
+    def __init__(self, controller, parent=None):
+        super().__init__("Brush Presets", parent)
+        self.setObjectName("BrushPresets")
+        self.ctl = controller
+        from PySide6.QtWidgets import QListWidget
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(2, 2, 2, 2)
+        self.title = QLabel()
+        lay.addWidget(self.title)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _i: self._apply())
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        for text, fn in (("Apply", self._apply), ("Save...", self._save),
+                         ("Delete", self._delete)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        lay.addLayout(row)
+        self.setWidget(body)
+
+    def sync(self, **_):
+        tool = self.ctl.tool_name or ""
+        self.title.setText("Presets for: %s" % (self.ctl.tools.label(tool) if tool else "-"))
+        self.list.clear()
+        self.list.addItems(sorted(self.ctl.brush_presets(tool)))
+
+    def _apply(self):
+        item = self.list.currentItem()
+        if item is not None:
+            self.ctl.apply_brush_preset(item.text())
+
+    def _save(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Save Brush Preset", "Name:")
+        if ok and name.strip():
+            self.ctl.save_brush_preset(name.strip())
+            self.sync()
+
+    def _delete(self):
+        item = self.list.currentItem()
+        if item is not None and self.ctl.delete_brush_preset(item.text()):
             self.sync()
