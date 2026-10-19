@@ -1485,6 +1485,25 @@ def main():
     check("the Layer Comps dock lists a comp", win2.comps_dock.list.count() == 1)
     ctl2.deselect()
 
+    # ---- printing, and the canvas keeps its room ---------------------------------
+    from PySide6.QtPrintSupport import QPrinter
+    printer = QPrinter(QPrinter.HighResolution)
+    printer.setOutputFormat(QPrinter.PdfFormat)
+    pdf = os.path.join(tempfile.mkdtemp(), "print.pdf")
+    printer.setOutputFileName(pdf)
+    win2.print_to(printer)
+    check("File > Print renders the image to the printer (here, a PDF)",
+          os.path.exists(pdf) and open(pdf, "rb").read(5) == b"%PDF-")
+    win2.resize(1100, 750)
+    for _ in range(5):
+        app.processEvents()
+    check("THE CANVAS GETS MOST OF THE WINDOW, however many panels there are",
+          win2.canvas.viewport().width() > 0.5 * win2.width(),
+          "-- canvas %d of %d px" % (win2.canvas.viewport().width(), win2.width()))
+    sel_items3 = [a.text().replace("&", "") for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&Select").menu().actions() if a.text()]
+    check("Select offers Refine Edge and Sky", "Refine Edge..." in sel_items3 and "Sky" in sel_items3)
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc

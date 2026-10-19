@@ -4,10 +4,11 @@
 """The main window: canvas, docks, menus, status bar."""
 
 import os
+import numpy as np
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QFileDialog, QLabel, QMainWindow, QMessageBox,
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QStatusBar)
 
 from ..engine import accel
@@ -370,6 +371,120 @@ class MainWindow(QMainWindow):
         if ok:
             self._sel(self.ctl.load_selection, names.index(name))
 
+    def _slider_dialog(self, title, fields, on_change=None):
+        """A small dialog of labelled integer sliders. Returns values or None."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QSlider
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        form = QFormLayout(dlg)
+        sliders = {}
+        for key, label, lo, hi, val in fields:
+            sl = QSlider(Qt.Horizontal)
+            sl.setRange(lo, hi)
+            sl.setValue(val)
+            lab = QLabel(str(val))
+            sl.valueChanged.connect(lambda v, l=lab: l.setText(str(v)))
+            if on_change is not None:
+                sl.valueChanged.connect(lambda _v: on_change({k: x.value() for k, x in sliders.items()}))
+            row = QHBoxLayout()
+            row.addWidget(sl, 1)
+            row.addWidget(lab)
+            form.addRow(label, row)
+            sliders[key] = sl
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if not dlg.exec():
+            return None
+        return {k: x.value() for k, x in sliders.items()}
+
+    def do_refine_edge(self):
+        """Select > Refine Edge, previewed on the marching ants as you drag."""
+        if self.ctl.selection.mask is None:
+            self.statusBar().showMessage("Make a rough selection first, then refine it.", 5000)
+            return
+        from ..engine import refine
+        original = self.ctl.selection.mask.copy()
+        image = self.ctl.merged().copy()
+
+        def preview(v):
+            self.ctl.selection.mask = refine.refine_mask(image, original, v["radius"], v["smooth"],
+                                                         v["feather"], v["contrast"], v["shift"])
+            self.ctl.selection._bbox = None
+            self.canvas.viewport().update()
+        values = self._slider_dialog("Refine Edge", (
+            ("radius", "Edge detection radius", 0, 50, 4), ("smooth", "Smooth", 0, 100, 0),
+            ("feather", "Feather", 0, 50, 0), ("contrast", "Contrast", 0, 100, 0),
+            ("shift", "Shift edge", -100, 100, 0)), preview)
+        self.ctl.selection.mask = original
+        self.ctl.selection._bbox = None
+        if values is not None:
+            self._sel(self.ctl.refine_selection, values["radius"], values["smooth"],
+                      values["feather"], values["contrast"], values["shift"])
+        self.canvas.viewport().update()
+
+    def do_sky_replacement(self):
+        from PySide6.QtWidgets import QInputDialog
+        titles = self.ctl.document_titles()
+        choices = ["Clouds", "Blue sky", "Sunset", "Overcast"] + [
+            "Image: %d: %s" % (i + 1, t) for i, t in enumerate(titles) if i != self.ctl.current_doc]
+        pick, ok = QInputDialog.getItem(self, "Sky Replacement", "Sky:", choices, 0, False)
+        if not ok:
+            return
+        shift, ok = QInputDialog.getInt(self, "Sky Replacement",
+                                        "Shift edge (more sky +, less -):", 0, -100, 100)
+        if not ok:
+            return
+        presets = {"Clouds": "clouds", "Blue sky": "blue", "Sunset": "sunset", "Overcast": "overcast"}
+        source = presets.get(pick)
+        if source is None:
+            source = int(pick.split(":")[1]) - 1
+        layer = self._busy(self.ctl.sky_replace, source, 3.0, shift)
+        if layer is None:
+            self.statusBar().showMessage("No sky found -- try a positive edge shift.", 6000)
+        self.layers_dock.sync()
+
+    def do_merge_hdr(self):
+        n = len(self.ctl.documents)
+        if n < 2:
+            self.statusBar().showMessage("Open the bracketed exposures as images first.", 6000)
+            return
+        try:
+            self._busy(self.ctl.merge_hdr, list(range(n)))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Merge to HDR", str(exc))
+            return
+        self.canvas.bind()
+        self._sync_all()
+
+    def do_export_pdf(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export PDF", "untitled.pdf", "PDF (*.pdf)")
+        if path:
+            self.ctl.export_pdf(path)
+
+    def do_print(self):
+        """Print the merged image, fitted to the page."""
+        from PySide6.QtGui import QImage, QPainter
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+        printer = QPrinter(QPrinter.HighResolution)
+        if QPrintDialog(printer, self).exec():
+            self.print_to(printer)
+
+    def print_to(self, printer):
+        from PySide6.QtGui import QImage, QPainter
+        img = np.ascontiguousarray(self.ctl.merged())
+        qimg = QImage(img.data, img.shape[1], img.shape[0], img.shape[1] * 4,
+                      QImage.Format_RGBA8888)
+        painter = QPainter(printer)
+        page = painter.viewport()
+        size = qimg.size()
+        size.scale(page.size(), Qt.KeepAspectRatio)
+        painter.setViewport(page.x(), page.y(), size.width(), size.height())
+        painter.setWindow(qimg.rect())
+        painter.drawImage(0, 0, qimg)
+        painter.end()
+
     def do_liquify(self):
         self.ctl.set_tool("warp")
         self.statusBar().showMessage(
@@ -452,6 +567,9 @@ class MainWindow(QMainWindow):
         self._act(file_menu, "Export S&lices...", self.do_export_slices)
         automate = file_menu.addMenu("A&utomate")
         self._act(automate, "&Batch...", self.do_batch)
+        self._act(automate, "Merge to &HDR...", self.do_merge_hdr)
+        self._act(file_menu, "Export P&DF...", self.do_export_pdf)
+        self._act(file_menu, "&Print...", self.do_print, "Ctrl+P")
         file_menu.addSeparator()
         self._act(file_menu, "&Close", lambda: self.close_document(), "Ctrl+W")
         self._act(file_menu, "Next Image", lambda: self._step_document(+1), "Ctrl+Tab")
@@ -481,6 +599,8 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "S&mooth Fill (Inpaint)",
                   lambda: self._busy(self.ctl.inpaint_selection, "smooth"))
         edit_menu.addSeparator()
+        self._act(edit_menu, "Sk&y Replacement...", self.do_sky_replacement)
+        edit_menu.addSeparator()
         self._act(edit_menu, "Fill &Path", lambda: self.ctl.fill_path())
         self._act(edit_menu, "Stro&ke Path...", self.do_stroke_path)
         edit_menu.addSeparator()
@@ -506,6 +626,9 @@ class MainWindow(QMainWindow):
         self._act(sel_menu, "Alpha to Se&lection", lambda: self._sel(self.ctl.alpha_to_selection))
         self._act(sel_menu, "From &Path", lambda: self._sel(self.ctl.path_to_selection), "Shift+V")
         self._act(sel_menu, "To Pa&th", lambda: self.ctl.selection_to_path())
+        sel_menu.addSeparator()
+        self._act(sel_menu, "Refine &Edge...", self.do_refine_edge)
+        self._act(sel_menu, "S&ky", lambda: self._sel(self.ctl.select_sky))
         sel_menu.addSeparator()
         self._act(sel_menu, "Sa&ve Selection", lambda: self.ctl.save_selection())
         self._act(sel_menu, "Loa&d Selection...", self.do_load_selection)

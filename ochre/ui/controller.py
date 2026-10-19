@@ -992,6 +992,93 @@ class Controller:
         self._after_structure_change()
         return True
 
+    # ---- refine edge, sky replacement, merge to HDR, PDF -----------------------------
+
+    def refine_selection(self, radius=4, smooth=0, feather=0.0, contrast=0, shift=0):
+        """Select > Refine Edge: snap the selection to the image's edges."""
+        from ..engine import refine
+        if self.selection.mask is None:
+            return False
+        image = self.merged()
+        return self._selection_op("Refine Edge", lambda sel: setattr(
+            sel, "mask", refine.refine_mask(image, sel.mask, radius, smooth, feather,
+                                            contrast, shift)))
+
+    def select_sky(self, tolerance=3.0, shift=0):
+        """Select > Sky: where the sky is, as a selection."""
+        from ..engine import refine
+        mask = refine.sky_mask(self.merged(), tolerance=tolerance, shift=shift)
+        return self._selection_op("Select Sky", lambda sel: setattr(sel, "mask", mask))
+
+    def sky_replace(self, source="clouds", tolerance=3.0, shift=0, seed=0):
+        """Edit > Sky Replacement: a new layer holding the replacement sky,
+        masked to where the sky was -- so the edge can still be painted --
+        all as one undo step. source: a preset name, or the index of
+        another open document (scaled to cover the canvas)."""
+        from ..engine import refine
+        from ..engine.transform import resample_rgba
+        doc = self.doc
+        mask = refine.sky_mask(self.merged(), tolerance=tolerance, shift=shift)
+        if not (mask >= 128).any():
+            return None
+        if isinstance(source, int):
+            if not (0 <= source < len(self.documents)) or source == self.current_doc:
+                return None
+            state = self.documents[source]
+            img = state["compositor"].composite(state["doc"].bounds)
+            sh, sw = img.shape[:2]
+            k = max(doc.width / float(sw), doc.height / float(sh))
+            big = resample_rgba(img, max(1, int(round(sw * k))), max(1, int(round(sh * k))), "bicubic")
+            sky = big[:doc.height, (big.shape[1] - doc.width) // 2:(big.shape[1] - doc.width) // 2 + doc.width]
+        else:
+            sky = refine.sky_preset(source, doc.width, doc.height, seed)
+        label = "Sky Replacement"
+        self.history.begin_group()
+        layer = self.add_layer("Sky")
+        cell = doc.cell(layer)
+        cell.plane("rgba")[...] = sky
+        cell._touched(doc.bounds)
+        self.add_layer_mask("reveal", layer)
+        mcell = doc.cell(layer.mask)
+        px = mcell.plane("rgba")
+        px[..., 0] = px[..., 1] = px[..., 2] = mask
+        mcell._touched(doc.bounds)
+        self.history.end_group(label)
+        self.editing_mask = False
+        self._after_structure_change()
+        return layer
+
+    def merge_hdr(self, indices, contrast=1.0, saturation=1.0, exposure=1.0):
+        """File > Automate > Merge to HDR: fuse bracketed exposures (other
+        open documents of the same size) into a new document."""
+        from ..engine import refine
+        images = []
+        for i in indices:
+            if not (0 <= i < len(self.documents)):
+                continue
+            st = self.documents[i] if i != self.current_doc else self._capture()
+            images.append(st["compositor"].composite(st["doc"].bounds))
+        if len(images) < 2 or len({im.shape for im in images}) != 1:
+            raise ValueError("Merge to HDR needs two or more open images of the same size")
+        fused = refine.exposure_fusion(images, contrast, saturation, exposure)
+        h, w = fused.shape[:2]
+        self.new_document(w, h, background=None)
+        cell = self.doc.cell(self.active_layer)
+        cell.plane("rgba")[...] = fused
+        cell._touched(self.doc.bounds)
+        self.active_layer.name = "Merged HDR"
+        self.invalidate()
+        return self.doc
+
+    def export_pdf(self, path, dpi=300):
+        """The merged image as a one-page PDF at a given resolution."""
+        from PIL import Image
+        img = Image.fromarray(self.merged(), "RGBA")
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        bg.save(path, "PDF", resolution=float(dpi))
+        return path
+
     # ---- brush presets ------------------------------------------------------------
 
     BUILTIN_BRUSHES = {
@@ -2601,7 +2688,7 @@ RECORDABLE = (
     "add_layer", "duplicate_layer", "merge_down", "flatten", "flip_layer", "rotate_layer",
     "scale_layer", "offset_layer", "align_layer", "set_primary", "set_secondary",
     "add_layer_mask", "delete_layer_mask", "add_guide", "clear_guides", "slices_from_guides",
-    "save_selection", "load_selection",
+    "save_selection", "load_selection", "refine_selection", "select_sky",
 )
 
 
