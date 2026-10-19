@@ -1867,12 +1867,104 @@ class Controller:
         return self._geometry("Resize image",
                               lambda: transform.resize_image(self.doc, width, height, method))
 
-    def resize_canvas(self, width, height, anchor="center"):
+    def resize_canvas(self, width, height, anchor="center", fill=None):
+        """Image > Canvas Size. fill="content_aware" fills the new area of the
+        bottom layer from the picture (Photoshop's content-aware canvas
+        extension, the classical cousin of Generative Expand)."""
         from ..engine import transform
         if (int(width), int(height)) == (self.doc.width, self.doc.height):
             return False
-        return self._geometry("Canvas size",
-                              lambda: transform.resize_canvas(self.doc, width, height, anchor))
+        ax, ay = transform.ANCHORS.get(anchor, transform.ANCHORS["center"]) \
+            if isinstance(anchor, str) else anchor
+        dx = int(round((int(width) - self.doc.width) * ax))
+        dy = int(round((int(height) - self.doc.height) * ay))
+        return self.reframe_canvas(int(width), int(height), dx, dy, fill)
+
+    def reframe_canvas(self, width, height, dx, dy, fill=None):
+        """A new canvas size with the old picture moved by (dx, dy) -- what
+        Canvas Size and a crop dragged past the edge both are -- optionally
+        content-aware filling the bottom layer's new area. One undo step."""
+        from ..engine import transform
+        old = Rect(dx, dy, self.doc.width, self.doc.height)
+        label = "Canvas size" if fill is None else "Canvas size (content-aware)"
+        self.history.begin_group()
+        done = self._geometry(label, lambda: transform.reframe(self.doc, width, height, dx, dy))
+        if done and fill == "content_aware":
+            self._fill_new_area(old, label)
+        self.history.end_group(label)
+        return done
+
+    def _fill_new_area(self, old_rect, label):
+        from ..engine import inpaint
+        from ..engine.commands import PixelDelta
+        leaves = [l for l in self.doc.layers() if getattr(l, "kind", "raster") == "raster"
+                  and not l.index_locked]
+        if not leaves:
+            return False
+        lay = leaves[0]
+        cell = self.doc.cell(lay)
+        px = cell.plane("rgba")
+        hole = np.ones((self.doc.height, self.doc.width), bool)
+        inside = old_rect.clipped_to(self.doc.width, self.doc.height)
+        if inside is not None:
+            hole[inside.slice()] = False
+        hole &= px[..., 3] < 255
+        if not hole.any() or hole.all():
+            return False
+        d = PixelDelta.capture(self.doc, lay.id, self.doc.frame.id, self.doc.bounds, label)
+        filled = inpaint.fill_hole(px, hole, "content_aware")
+        px[...] = filled
+        cell._touched(self.doc.bounds)
+        if d is not None:
+            self.history.push(d, label, frame_id=self.doc.frame.id)
+        self.invalidate()
+        return True
+
+    def select_subject(self):
+        """Select > Subject: the main subject, by colour models (no trained model)."""
+        from ..engine import segment
+        m = segment.subject_mask(self.merged())
+        return self._selection_op("Select Subject", lambda sel: setattr(sel, "mask", m))
+
+    def remove_background(self, layer=None):
+        """Layer > Remove Background: the subject kept by a layer mask (so the
+        background is hidden, not deleted, and can be painted back)."""
+        from ..engine import segment
+        target = layer or self.active_layer
+        if target is None or target.is_group:
+            return False
+        m = segment.subject_mask(self._layer_pixels(target))
+        if not m.any():
+            return False
+        label = "Remove Background"
+        if target.mask is not None:
+            # Already masked: the subject is multiplied into the mask it has.
+            from ..engine.commands import PixelDelta
+            from ..engine.compositor import mask_value
+            mcell = self.doc.cell(target.mask)
+            d = PixelDelta.capture(self.doc, target.mask.id, self.doc.frame.id, self.doc.bounds, label)
+            px = mcell.plane("rgba")
+            v = (mask_value(px).astype(np.uint32) * m.astype(np.uint32) + 127) // 255
+            px[..., 0] = px[..., 1] = px[..., 2] = v.astype(np.uint8)
+            px[..., 3] = 255
+            mcell._touched(self.doc.bounds)
+            if d is not None:
+                self.history.push(d, label, frame_id=self.doc.frame.id)
+            self.compositor.invalidate()
+            self.invalidate()
+            self.emit("history.changed")
+            return True
+        before = self.selection.mask
+        self.history.begin_group()
+        self.selection.mask = m
+        self.selection._bbox = None
+        try:
+            self.add_layer_mask("selection", target)
+        finally:
+            self.selection.mask = before
+            self.selection._bbox = None
+        self.history.end_group(label)
+        return True
 
     def content_aware_scale(self, width, height, protect=True):
         """Image > Content-Aware Scale: resize by seam carving. The seams are
@@ -2557,7 +2649,14 @@ class Controller:
             if "crop" in result:
                 rect = result["crop"]
                 from ..engine import transform
-                self._geometry("Crop", lambda: transform.crop(self.doc, rect))
+                if rect.x < 0 or rect.y < 0 or rect.x1 > self.doc.width or rect.y1 > self.doc.height:
+                    # Dragged past the edge: the canvas grows (Photoshop), the new
+                    # area transparent or filled from the picture.
+                    self.reframe_canvas(rect.w, rect.h, -rect.x, -rect.y,
+                                        "content_aware" if result.get("fill") == "content_aware"
+                                        else None)
+                else:
+                    self._geometry("Crop", lambda: transform.crop(self.doc, rect))
             elif "perspective_crop" in result:
                 quad = result["perspective_crop"]
                 from ..engine import transform

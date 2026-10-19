@@ -655,6 +655,7 @@ class MainWindow(QMainWindow):
         sel_menu.addSeparator()
         self._act(sel_menu, "Refine &Edge...", self.do_refine_edge)
         self._act(sel_menu, "S&ky", lambda: self._sel(self.ctl.select_sky))
+        self._act(sel_menu, "Su&bject", lambda: self._sel(lambda: self._busy(self.ctl.select_subject)))
         self._act(sel_menu, "Color &Range...", self.do_color_range)
         self._act(sel_menu, "&Focus Area...", self.do_focus_area)
         sel_menu.addSeparator()
@@ -916,6 +917,8 @@ class MainWindow(QMainWindow):
             fx.ctl.set_layer_styles, fx.ctl.active_layer, {}))
         menu.addAction("Edit Adjustment / Fill...", self.do_edit_layer_content)
         menu.addAction("&Rasterize Layer", lambda: fx._layer_fx(fx.ctl.rasterize_layer))
+        menu.addAction("Remove Bac&kground", lambda: fx._layer_fx(
+            lambda: fx._busy(fx.ctl.remove_background)))
         shape = menu.addMenu("S&hape Layer")
         shape.addAction("Shape &Properties...", self.do_shape_properties)
         shape.addAction("&Edit Path (to Paths panel)", lambda: fx._layer_fx(fx.ctl.shape_to_path))
@@ -1829,7 +1832,11 @@ class MainWindow(QMainWindow):
         dlg = CanvasSizeDialog(self.ctl, self)
         if dlg.exec():
             w, h, anchor = dlg.result()
-            self._geometry(self.ctl.resize_canvas, w, h, anchor)
+            fill = dlg.fill_mode() if hasattr(dlg, "fill_mode") else None
+            if fill:
+                self._busy(self._geometry, self.ctl.resize_canvas, w, h, anchor, fill)
+            else:
+                self._geometry(self.ctl.resize_canvas, w, h, anchor)
 
     def do_layer_properties(self):
         from .dialogs import LayerPropertiesDialog

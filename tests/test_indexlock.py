@@ -257,7 +257,10 @@ NON_PAINTING = {"eyedropper", "select_rect", "select_ellipse", "lasso",
                 "add_anchor", "delete_anchor", "convert_point",
                 # Marks and measurements (test_utility.py).
                 "measure", "color_sampler", "count", "note", "slice", "slice_select",
-                "artboard", "frame"}
+                "artboard", "frame",
+                # Blurs make colours no palette has: refused on indexed
+                # layers, as the effect policy refuses blur filters.
+                "blur_gallery"}
 
 
 def main():

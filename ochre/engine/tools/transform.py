@@ -909,7 +909,11 @@ class CropTool(Tool):
     wants_stroke = False
     multi_click = True
     options_spec = (O.Opt("aspect", O.CHOICE, "free", "Aspect",
-                          choices=("free", "1:1", "4:3", "3:2", "16:9", "original")),)
+                          choices=("free", "1:1", "4:3", "3:2", "16:9", "original")),
+                    O.Opt("fill", O.CHOICE, "transparent", "Beyond the edge",
+                          choices=("transparent", "content_aware"),
+                          labels={"transparent": "Transparent", "content_aware": "Content-Aware"},
+                          tip="Cropping past the canvas grows it; Content-Aware fills the new area."))
 
     def __init__(self, **options):
         super().__init__(**options)
@@ -991,7 +995,7 @@ class CropTool(Tool):
         rect = Rect.from_bounds(int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
         if rect.w < 1 or rect.h < 1:
             return None
-        return {"crop": rect}
+        return {"crop": rect, "fill": self.option("fill", "transparent")}
 
     def on_cancel(self, ctx):
         self._box = None

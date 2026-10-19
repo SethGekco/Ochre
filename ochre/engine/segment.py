@@ -132,3 +132,65 @@ def _box_smooth(mask, r):
         m = (np.take(c, np.arange(2 * r + 1, 2 * r + 1 + n), axis=axis)
              - np.take(c, np.arange(0, n), axis=axis)) / (2 * r + 1)
     return np.clip(np.rint(m), 0, 255).astype(np.uint8)
+
+
+def _otsu(values):
+    """Otsu's threshold for a 1-D array of non-negative floats."""
+    v = np.asarray(values, np.float64)
+    if v.size == 0 or v.max() <= v.min():
+        return float(v.max()) if v.size else 0.0
+    hist, edges = np.histogram(v, bins=128)
+    p = hist / hist.sum()
+    w0 = np.cumsum(p)
+    mids = (edges[:-1] + edges[1:]) / 2
+    mu = np.cumsum(p * mids)
+    var = (mu[-1] * w0 - mu) ** 2 / np.maximum(w0 * (1 - w0), 1e-12)
+    return float(mids[np.argmax(var)])
+
+
+def subject_mask(rgba, margin=0.04, refine_radius=None, iterations=4):
+    """Select > Subject / Remove Background without a trained model.
+
+    The frame's border is the background's evidence. A first guess is pure
+    saliency -- how far each pixel's colour is from every colour on the
+    border, split by Otsu's threshold -- then colour models for subject and
+    background are re-learned from that guess a few times, the largest
+    coherent object is kept with its holes filled, and the edge is snapped
+    to the image with the guided filter. Works when the subject differs
+    from its surroundings and does not fill the frame; uint8 0..255."""
+    from .refine import refine_mask
+    h, w = rgba.shape[:2]
+    rgb = rgba[..., :3].astype(np.float64)
+    m = max(2, int(round(min(h, w) * margin)))
+    border = np.zeros((h, w), bool)
+    border[:m] = border[-m:] = True
+    border[:, :m] = border[:, -m:] = True
+    interior = ~border
+    bg_c = _kmeans(_sample(rgb[border], seed=1), 8, seed=1)
+    d = np.zeros((h, w))
+    d[interior] = _nearest_dist(rgb[interior], bg_c)
+    # A photographer puts the subject in focus: colour distinctness counts
+    # for more where the image is sharp (local Laplacian energy).
+    from .selectrange import sharpness
+    sh = sharpness(rgba, max(3, int(min(h, w) / 40)))
+    top = np.percentile(sh[interior], 99) if interior.any() else 0
+    if top > 1e-9:
+        d = d * (0.35 + 0.65 * np.clip(sh / top, 0, 1))
+    fg = interior & (d > _otsu(d[interior]))
+    for it in range(iterations):
+        if not fg.any():
+            return np.zeros((h, w), np.uint8)
+        cf = _kmeans(_sample(rgb[fg], seed=it), 6, seed=it)
+        cb = _kmeans(_sample(np.concatenate([rgb[border], rgb[interior & ~fg]]), seed=it + 5), 8,
+                     seed=it + 5)
+        score = np.full((h, w), -1.0)
+        score[interior] = _nearest_dist(rgb[interior], cb) - _nearest_dist(rgb[interior], cf)
+        prob = _box_smooth((score > 0).astype(np.uint8) * 255, 2)
+        fg = (prob >= 128) & interior
+        if fg.any():
+            fg = np.asarray(morph.largest_component(fg.astype(np.uint8) * 255), bool)
+    hard = morph.remove_holes(fg.astype(np.uint8) * 255)
+    if not hard.any():
+        return hard
+    r = refine_radius or max(2, int(min(h, w) / 120))
+    return refine_mask(rgba, hard, radius=r, contrast=20)

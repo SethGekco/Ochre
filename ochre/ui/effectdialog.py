@@ -345,7 +345,16 @@ class EffectDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.rows = []
+        # An effect may bring its own panel for settings a plain row cannot
+        # show (Selective Color's nine ranges); those props are then hidden.
+        panel = PANELS.get(getattr(effect, "ui_panel", None))
+        hidden = set(getattr(effect, "ui_hidden", ())) if panel else set()
+        if panel is not None:
+            self.panel = panel(effect, self._on_changed)
+            layout.addWidget(self.panel)
         for prop in effect.props:
+            if prop.name in hidden:
+                continue
             row = _Row(prop)
             row.changed.connect(self._on_changed)
             form.addRow(prop.ui.get("label", prop.name), row)
@@ -481,3 +490,57 @@ class EffectDialog(QDialog):
                 canvas.refresh()
                 canvas.viewport().update()
         super().reject()
+
+
+# ---- custom panels ------------------------------------------------------------------
+
+class SelectiveColorPanel(QWidget):
+    """Photoshop's Selective Color face: pick a colour range, set its four
+    inks; every range is kept, and all apply together."""
+
+    def __init__(self, effect, on_change, parent=None):
+        import json
+        from ..engine.morefilters import RANGES
+        super().__init__(parent)
+        self.effect, self.on_change = effect, on_change
+        self.values = {r: [0, 0, 0, 0] for r in RANGES}
+        try:
+            for r, v in json.loads(effect.props.get("ranges") or "{}").items():
+                if r in self.values:
+                    self.values[r] = [int(x) for x in v][:4]
+        except (ValueError, AttributeError):
+            pass
+        form = QFormLayout(self)
+        self.range = QComboBox()
+        for r in RANGES:
+            self.range.addItem(r.capitalize(), r)
+        self.range.currentIndexChanged.connect(self._show)
+        form.addRow("Colors", self.range)
+        self.spins = []
+        for label in ("Cyan", "Magenta", "Yellow", "Black"):
+            spin = QSpinBox()
+            spin.setRange(-100, 100)
+            spin.setSuffix(" %")
+            spin.valueChanged.connect(self._edit)
+            form.addRow(label, spin)
+            self.spins.append(spin)
+        self._loading = False
+        self._show()
+
+    def _show(self, *_):
+        self._loading = True
+        for spin, v in zip(self.spins, self.values[self.range.currentData()]):
+            spin.setValue(v)
+        self._loading = False
+
+    def _edit(self, *_):
+        if self._loading:
+            return
+        import json
+        self.values[self.range.currentData()] = [s.value() for s in self.spins]
+        used = {r: v for r, v in self.values.items() if any(v)}
+        self.effect.props.set("ranges", json.dumps(used))
+        self.on_change()
+
+
+PANELS = {"selective_color": SelectiveColorPanel}

@@ -137,6 +137,10 @@ class CanvasSizeDialog(QDialog):
         anchor_box = QWidget()
         anchor_box.setLayout(grid)
         form.addRow("Anchor", anchor_box)
+        self.fill = QComboBox()
+        self.fill.addItem("Transparent", "")
+        self.fill.addItem("Content-Aware (from the picture)", "content_aware")
+        form.addRow("New area", self.fill)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -151,6 +155,9 @@ class CanvasSizeDialog(QDialog):
 
     def result(self):
         return (self.width.value(), self.height.value(), self.anchor)
+
+    def fill_mode(self):
+        return self.fill.currentData() or None
 
 
 class LayerPropertiesDialog(QDialog):

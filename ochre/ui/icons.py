@@ -343,6 +343,12 @@ def i_perspective_warp(g):
         g.rect(x - 1.4, y - 1.4, 2.8, 2.8, fill=ACCENT, w=0.7)
 
 
+def i_blur_gallery(g):
+    g.rect(3, 3, 18, 18, w=1.0, dash=True)
+    for x, y, r in ((8, 9, 3.2), (16, 15, 2.2)):
+        g.rect(x - r, y - r, 2 * r, 2 * r, fill=ACCENT, w=0.8, r=r)
+
+
 def i_frame(g):
     g.rect(4, 4, 16, 16, w=1.4)
     g.line((4, 4), (20, 20), w=1.0)

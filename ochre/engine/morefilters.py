@@ -94,30 +94,52 @@ def selective_weights(rgb, which):
 
 class SelectiveColor(_Point):
     """Photoshop's Selective Color: add or remove cyan, magenta, yellow and
-    black ink in one colour range. One range per application (Photoshop's
-    dialog edits all nine at once; apply again for another range)."""
+    black ink in each of nine colour ranges, all in one pass. `ranges` holds
+    them all ({"reds": [c, m, y, k], ...}); the dialog edits one range at a
+    time, as Photoshop's does. (`colors` with cyan..black is the single-range
+    form, still honoured, so recorded actions keep working.) Every range's
+    weight is measured on the ORIGINAL colour, so the order does not matter."""
 
     name, label = "selective_color", "Selective Color"
+    ui_panel = "selective_color"
+    ui_hidden = ("colors", "cyan", "magenta", "yellow", "black", "ranges")
 
     def declare(self):
         return _props(
             ChoiceProperty("colors", "reds", list(RANGES)),
             IntProperty("cyan", 0, -100, 100), IntProperty("magenta", 0, -100, 100),
             IntProperty("yellow", 0, -100, 100), IntProperty("black", 0, -100, 100),
-            ChoiceProperty("method", "relative", ["relative", "absolute"]))
+            ChoiceProperty("method", "relative", ["relative", "absolute"]),
+            TextProperty("ranges", "{}"))
+
+    @staticmethod
+    def adjustments(t):
+        import json
+        try:
+            ranges = json.loads(t.get("ranges") or "{}")
+        except ValueError:
+            ranges = {}
+        out = {r: [int(v) for v in vals][:4] for r, vals in ranges.items()
+               if r in RANGES and any(int(v) for v in vals)}
+        single = [t.get("cyan", 0), t.get("magenta", 0), t.get("yellow", 0), t.get("black", 0)]
+        if any(single) and t.get("colors") not in out:
+            out[t.get("colors", "reds")] = single
+        return out
 
     def transform(self, t, rgb):
-        w = selective_weights(rgb, t["colors"])[..., None]
-        inks = np.array([t["cyan"], t["magenta"], t["yellow"]], np.float64) / 100.0
-        ink = 1.0 - rgb                                  # C, M, Y as RGB complements
-        scale = ink if t["method"] == "relative" else 1.0
-        ink = ink + w * inks * scale
+        relative = t["method"] == "relative"
+        ink0 = 1.0 - rgb                                 # C, M, Y as RGB complements
+        ink = ink0.copy()
+        black = np.zeros(rgb.shape[:2])
+        for rng, (c, m, y, k) in self.adjustments(t).items():
+            w = selective_weights(rgb, rng)
+            ink += w[..., None] * (np.array([c, m, y], np.float64) / 100.0) * (ink0 if relative else 1.0)
+            black += w * (k / 100.0)
         out = 1.0 - np.clip(ink, 0, 1)
-        k = t["black"] / 100.0
-        if k > 0:
-            out = out * (1 - w * k * (out if t["method"] == "relative" else 1.0))
-        elif k < 0:
-            out = out + (1 - out) * w * (-k)
+        dark = np.clip(black, 0, None)[..., None]
+        light = np.clip(-black, 0, None)[..., None]
+        out = out * (1 - dark * (out if relative else 1.0))
+        out = out + (1 - out) * light
         return np.clip(out, 0, 1)
 
 
@@ -410,10 +432,42 @@ class IrisBlur(_Filter):
         return _blend_by(src, _blur_rgba(src, t["blur"]), m)
 
 
+def field_blur(src, pins):
+    """Field Blur with any number of pins [(x, y, blur px), ...]: each pixel's
+    blur is the pins' values weighted by inverse squared distance, rendered
+    by blending a small stack of blur levels."""
+    h, w = src.shape[:2]
+    pins = [(float(x), float(y), max(0.0, float(b))) for x, y, b in pins]
+    if not pins:
+        return src.copy()
+    top = max(b for _x, _y, b in pins)
+    if top <= 0:
+        return src.copy()
+    xs, ys = _grid(h, w)
+    num = np.zeros((h, w))
+    den = np.zeros((h, w))
+    for x, y, b in pins:
+        wgt = 1.0 / ((xs - x) ** 2 + (ys - y) ** 2 + 1.0)
+        num += wgt * b
+        den += wgt
+    amount = num / den
+    levels = np.linspace(0, top, 6)
+    stack = [_pm(src) if lv < 0.5 else _pm(_blur_rgba(src, lv)) for lv in levels]
+    n = len(levels) - 1
+    pos = np.clip(amount / top * n, 0, n)
+    i0 = np.minimum(np.floor(pos).astype(np.int64), n - 1)
+    f = (pos - i0)[..., None]
+    out = np.zeros(src.shape, np.float32)
+    for i in range(n):
+        sel = (i0 == i)[..., None]
+        out += np.where(sel, stack[i] * (1 - f) + stack[i + 1] * f, 0)
+    return _unpm(out)
+
+
 class FieldBlur(_Filter):
-    """Photoshop's Field Blur with two pins: the blur amount changes smoothly
-    from one pin's value to the other's across the image (Photoshop allows
-    any number of pins, placed on the canvas)."""
+    """Photoshop's Field Blur: blur that varies across the image by pins.
+    `pins` (JSON [[x, y, blur], ...], placed with the Blur Gallery tool)
+    holds any number; without it the two numeric pins are used."""
 
     name, label, category = "field_blur", "Field Blur", "Blurs"
 
@@ -423,10 +477,17 @@ class FieldBlur(_Filter):
                       IntProperty("blur1", 0, 0, 200, label="Pin 1 blur (px)"),
                       IntProperty("pin2_x", 50, 0, 100, label="Pin 2 X (%)"),
                       IntProperty("pin2_y", 80, 0, 100, label="Pin 2 Y (%)"),
-                      IntProperty("blur2", 20, 0, 200, label="Pin 2 blur (px)"))
+                      IntProperty("blur2", 20, 0, 200, label="Pin 2 blur (px)"),
+                      TextProperty("pins", "", label="Pins (from the Blur Gallery tool)"))
 
     def compute(self, t, src):
         h, w = src.shape[:2]
+        if (t.get("pins") or "").strip():
+            import json
+            try:
+                return field_blur(src, json.loads(t["pins"]))
+            except (ValueError, TypeError):
+                pass
         xs, ys = _grid(h, w)
         p1 = np.array([w * t["pin1_x"] / 100.0, h * t["pin1_y"] / 100.0])
         p2 = np.array([w * t["pin2_x"] / 100.0, h * t["pin2_y"] / 100.0])
