@@ -337,6 +337,8 @@ class TmpFormat:
     extensions = ("tem", "sno", "urb", "ubn", "des", "lun", "tmp")
     can_read = True
     can_write = True
+    label = "Westwood TMP terrain (TS/RA2)"
+    indexed = True
 
     def __init__(self, palettes=None, db=None):
         self._palettes = palettes

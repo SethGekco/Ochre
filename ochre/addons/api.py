@@ -55,6 +55,9 @@ class FormatProvider(Protocol):
     extensions: tuple           # ("shp",) -- no dots
     can_read: bool
     can_write: bool
+    # Optional: `label` names the format in Open / Save As ("My sprite format");
+    # `indexed = True` says the file stores palette indices, so the editor
+    # offers to convert an RGB image to a palette before writing it.
 
     def sniff(self, head: bytes, path: str) -> bool: ...
 

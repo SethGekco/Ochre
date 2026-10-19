@@ -882,8 +882,9 @@ class MainWindow(QMainWindow):
         self._act(tools_menu, "Default &Colors", self.default_colours, "D")
 
         addon_menu = bar.addMenu("A&ddons")
-        self._act(addon_menu, "&Load Addons", self.do_load_addons)
-        self._act(addon_menu, "&Manage Addons...", self.do_addon_status)
+        self._act(addon_menu, "Load &All Addons", lambda: self.do_load_addons(all_addons=True))
+        self._act(addon_menu, "&Choose Addons to Load...", self.do_choose_addons)
+        self._act(addon_menu, "Addon &Status...", self.do_addon_status)
         self.addon_commands_menu = addon_menu.addMenu("&Commands")
         self.addon_commands_menu.setEnabled(False)
 
@@ -1241,13 +1242,59 @@ class MainWindow(QMainWindow):
 
     def do_open(self):
         exts = " ".join("*.%s" % e for e in supported_extensions())
+        addon = self.ctl.addon_formats(writing=False)
+        extra = " ".join("*.%s" % e for _l, _n, es, _i in addon for e in es)
+        per = "".join(";;%s (%s)" % (label, " ".join("*.%s" % e for e in es))
+                      for label, _n, es, _i in addon)
         path, _ = QFileDialog.getOpenFileName(
             self, "Open", "",
-            "Images (*.ochre *.psd *.psb *.ora %s);;Photoshop (*.psd *.psb);;"
-            "OpenRaster (*.ora);;All files (*)" % exts)
+            "Images (*.ochre *.psd *.psb *.ora %s %s);;Photoshop (*.psd *.psb);;"
+            "OpenRaster (*.ora)%s;;All files (*)" % (exts, extra, per))
         if not path:
             return
         self.open_file(path)
+
+    def _save_to(self, path, fmt=None):
+        """Save, asking for a palette when the format stores palette indices
+        and the image has none. False when nothing was saved."""
+        from .controller import NeedsIndexed
+        convert = None
+        for _attempt in range(2):
+            try:
+                self.ctl.save_path(path, format=fmt, convert=convert)
+                return True
+            except NeedsIndexed as need:
+                convert = self._ask_indexed(need.label)
+                if convert is None:
+                    return False
+            except Exception as exc:                        # noqa: BLE001
+                QMessageBox.warning(self, "Save failed", str(exc))
+                return False
+        return False
+
+    def _ask_indexed(self, label):
+        """Which palette (and dither) to write an indexed format with. The
+        open document stays as it is; a converted copy is written."""
+        from .formdialog import ask
+        sources = [(k, n) for _g, n, k in self.ctl.palette_sources()]
+        if not sources:
+            QMessageBox.warning(self, "Save", "No palettes are available.")
+            return None
+        keys = [k for k, _n in sources]
+        default = self.ctl.swatch_key if self.ctl.swatch_key in keys else keys[0]
+        ids = {repr(k): k for k in keys}
+        v = ask(self, "Save as %s" % label, [
+            ("palette", "Palette", "choice", repr(default), [(repr(k), n) for k, n in sources]),
+            ("dither", "Dither", "choice", "none",
+             [("none", "None"), ("ordered", "Ordered"), ("floyd", "Floyd-Steinberg")])])
+        if v is None:
+            return None
+        try:
+            pal = self.ctl.palette_for(ids[v["palette"]])
+        except Exception as exc:                            # noqa: BLE001
+            QMessageBox.warning(self, "Save", str(exc))
+            return None
+        return {"palette": pal, "dither": v["dither"]}
 
     def do_save(self):
         if self.ctl.path is None and getattr(self.ctl, "smart_link", None) is not None:
@@ -1255,10 +1302,7 @@ class MainWindow(QMainWindow):
             return self.do_update_smart_object()
         if self.ctl.path is None:
             return self.do_save_as()
-        try:
-            self.ctl.save_path()
-        except Exception as exc:                            # noqa: BLE001
-            QMessageBox.warning(self, "Save failed", str(exc))
+        self._save_to(self.ctl.path)
         self._report_save_warnings()
         self._update_title()
 
@@ -1278,16 +1322,28 @@ class MainWindow(QMainWindow):
         ExportDialog(self.ctl, self).exec()
 
     def do_save_as(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save As", "untitled.ochre",
-            "Ochre document (*.ochre);;Photoshop (*.psd);;OpenRaster (*.ora);;"
-            "PNG (*.png);;JPEG (*.jpg);;WebP (*.webp);;AVIF (*.avif);;TIFF (*.tif)")
+        # The built-in formats, then every format an addon can write (with a
+        # format addon loaded), each remembering its provider so
+        # an extension two formats share still writes the one picked.
+        filters = [("Ochre document", None, ("ochre",)), ("Photoshop", None, ("psd",)),
+                   ("OpenRaster", None, ("ora",)), ("PNG", None, ("png",)), ("JPEG", None, ("jpg",)),
+                   ("WebP", None, ("webp",)), ("AVIF", None, ("avif",)), ("TIFF", None, ("tif",))]
+        filters += [(label, name, exts) for label, name, exts, _ix in self.ctl.addon_formats(writing=True)]
+        texts = ["%s (%s)" % (label, " ".join("*.%s" % e for e in exts)) for label, _n, exts in filters]
+        start = "untitled.ochre"
+        if self.ctl.path:
+            start = os.path.splitext(self.ctl.path)[0] + ".ochre"
+        path, chosen = QFileDialog.getSaveFileName(self, "Save As", start, ";;".join(texts))
         if not path:
             return
-        try:
-            self.ctl.save_path(path)
-        except Exception as exc:                            # noqa: BLE001
-            QMessageBox.warning(self, "Save failed", str(exc))
+        fmt = None
+        if chosen in texts:
+            _label, fmt, exts = filters[texts.index(chosen)]
+            if not os.path.splitext(path)[1]:
+                path += "." + exts[0]
+            elif fmt is not None and os.path.splitext(path)[1].lower().lstrip(".") not in exts:
+                fmt = None                      # typed another extension: go by that
+        if not self._save_to(path, fmt):
             return
         self._report_save_warnings()
         if self.recent:
@@ -1669,9 +1725,49 @@ class MainWindow(QMainWindow):
         self._update_title()
         return effect
 
-    def do_load_addons(self):
-        """Load discovered addons and surface whatever they contributed."""
-        loaded = self.ctl.load_addons()
+    def do_choose_addons(self):
+        """A checklist of every addon: tick what to load. Unticked ones are
+        unloaded now and stay off at the next start."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QListWidget, \
+            QListWidgetItem, QVBoxLayout
+        addons = sorted(self.ctl.addons.addons.values(), key=lambda a: (a.manifest.order, a.id))
+        if not addons:
+            QMessageBox.information(self, "Addons", "No addons found.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Choose Addons to Load")
+        box = QVBoxLayout(dlg)
+        box.addWidget(QLabel("Tick the addons to load. Your choice is remembered for next time."))
+        lst = QListWidget()
+        skip = self.ctl.addons.skipped()
+        for a in addons:
+            text = "%s  v%s   [%s]\n    %s" % (a.name, a.manifest.version or "?", a.state,
+                                              a.manifest.description or a.id)
+            item = QListWidgetItem(text)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            on = a.state == "loaded" or (a.id not in skip and a.state not in ("disabled",))
+            item.setCheckState(Qt.Checked if on else Qt.Unchecked)
+            item.setData(Qt.UserRole, a.id)
+            if a.error:
+                item.setToolTip(a.error)
+            lst.addItem(item)
+        box.addWidget(lst)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Load Selected")
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        box.addWidget(buttons)
+        dlg.resize(520, 320)
+        if not dlg.exec():
+            return
+        chosen = [lst.item(i).data(Qt.UserRole) for i in range(lst.count())
+                  if lst.item(i).checkState() == Qt.Checked]
+        self.do_load_addons(only=chosen)
+
+    def do_load_addons(self, all_addons=False, only=None):
+        """Load addons -- all of them, or the chosen ones -- and say what
+        each one did."""
+        loaded = self.ctl.load_addons(only=only, all_addons=all_addons)
         self._rebuild_addon_commands()
         crashed = self.ctl.addons.crashed_addon()
         note = ""

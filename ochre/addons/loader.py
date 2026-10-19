@@ -200,11 +200,54 @@ class AddonManager:
 
     # ---- loading ---------------------------------------------------------
 
-    def load_all(self):
-        """Load every discovered addon that is eligible, in dependency order."""
+    def load_all(self, respect_choices=True):
+        """Load every discovered addon that is eligible, in dependency order --
+        except those the user chose not to load (Addons > Choose Addons),
+        unless respect_choices is False."""
+        skip = self.skipped() if respect_choices else set()
         for addon in self._ordered():
+            if addon.id in skip and addon.state != "loaded":
+                addon.state = "not chosen"
+                continue
             self.load(addon)
         return self.registry
+
+    # ---- the user's choice of addons ----------------------------------------
+
+    def _choices_path(self):
+        return os.path.join(self.state_dir, "addon_choices.json") if self.state_dir else None
+
+    def skipped(self):
+        """Ids the user chose NOT to load."""
+        p = self._choices_path()
+        if not p or not os.path.isfile(p):
+            return set()
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                return set(json.load(fh).get("skip", []))
+        except (OSError, ValueError):
+            return set()
+
+    def set_choices(self, load_ids):
+        """Remember which addons to load from now on (the rest are skipped)."""
+        skip = sorted(a for a in self.addons if a not in set(load_ids))
+        p = self._choices_path()
+        if p:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump({"skip": skip}, fh, indent=1)
+        return skip
+
+    def unload(self, addon_id):
+        """Withdraw a loaded addon's contributions (formats, palettes, tools...)
+        so it is as if it was never loaded; it can be loaded again."""
+        addon = self.addons.get(addon_id)
+        if addon is None or addon.state != "loaded":
+            return False
+        self.registry.remove_addon(addon_id)
+        addon.state = "not chosen"
+        addon.module = None
+        return True
 
     def _ordered(self):
         """Topological by `Requires`, so a dependency registers first.
@@ -233,7 +276,7 @@ class AddonManager:
         """Run one addon's register(). Isolated; never raises to the caller."""
         if isinstance(addon, str):
             addon = self.addons.get(addon)
-        if addon is None or addon.state in ("loaded", "failed", "blocked", "disabled"):
+        if addon is None or addon.state in ("loaded", "failed", "disabled"):
             return addon
 
         manifest = addon.manifest

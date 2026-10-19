@@ -466,6 +466,8 @@ class ShpFormat:
     extensions = ("shp", "tem", "sno", "urb", "ubn", "des", "lun")
     can_read = True
     can_write = True
+    label = "Westwood SHP sprite (TS/RA2)"
+    indexed = True
 
     def __init__(self, palettes=None, db=None):
         self._palettes = palettes

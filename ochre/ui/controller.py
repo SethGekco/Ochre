@@ -237,15 +237,80 @@ class Controller:
                    "them" if len(idle) > 1 else "it"))
         return ValueError("cannot open %s: %s" % (os.path.basename(path), exc))
 
-    def save_path(self, path=None):
+    def addon_formats(self, writing=False):
+        """[(label, provider name, extensions, indexed)] of addon formats that
+        can be read (or written), for Open and Save As."""
+        out = []
+        for name, p in sorted(self.addons.registry.all("formats").items()):
+            if not (p.can_write if writing else p.can_read):
+                continue
+            exts = tuple(getattr(p, "extensions", ()) or ())
+            label = getattr(p, "label", None) or name
+            out.append((label, name, exts, bool(getattr(p, "indexed", False))))
+        return out
+
+    def indexed_copy(self, palette, dither="none"):
+        """A copy of the image for an indexed format: every frame's visible
+        result as ONE index-locked layer on `palette` (alpha 0 -> the
+        palette's transparent index; protected indices are never produced).
+        The open document is not changed."""
+        from ..engine.compositor import Compositor
+        from ..engine.quantize import FLOYD, NONE, ORDERED, quantize
+        mode = {"none": NONE, "ordered": ORDERED, "floyd": FLOYD}.get(dither, NONE)
+        pal = palette.copy()
+        src = self.doc
+        doc = Document(src.width, src.height, palette=pal, settings=self.settings)
+        doc.meta.update({k: v for k, v in src.meta.items() if k not in ("icc", "icc_data")})
+        doc.frames = []
+        from ..engine.frame import Frame
+        comp = Compositor(src)
+        layer = doc.add_layer("Indexed", planes=("index", "rgba"), authoritative=("index",))
+        for f in src.frames:
+            src.ensure_warm(f)
+            nf = Frame(name=f.name, duration_ms=getattr(f, "duration_ms", 100))
+            nf.meta = dict(f.meta)
+            doc.frames.append(nf)
+            flat = comp.composite(src.bounds, f)
+            cell = doc.cell(layer, nf)
+            cell.plane("index")[...] = quantize(flat, pal, mode, force=True)
+            cell.refresh_derived()
+            cell.content_bbox = doc.bounds
+        doc.current = min(src.current, len(doc.frames) - 1)
+        return doc
+
+    def save_path(self, path=None, format=None, convert=None):
+        """Save. `format` forces an addon format by provider name (Save As
+        knows which one the user picked, even for an extension two formats
+        share). An indexed format and a document with no index-locked layer:
+        `convert` ({"palette", "dither"}) writes an indexed COPY; without it,
+        NeedsIndexed is raised so the window can ask."""
         target = path or self.path
         if target is None:
             raise ValueError("no path to save to")
-        provider = self._addon_format_for(target, writing=True)
+        provider = None
+        if format:
+            provider = self.addons.registry.get("formats", format)
+        if provider is None:
+            provider = self._addon_format_for(target, writing=True)
         if provider is not None:
             owner = self.addons.registry.owner("formats", provider.name)
+            document = self.doc
+            if getattr(provider, "indexed", False) and not any(l.index_locked for l in self.doc.layers()):
+                chosen_now = convert is not None
+                convert = convert or getattr(self, "save_convert", None)
+                if convert is None or convert.get("palette") is None:
+                    raise NeedsIndexed(getattr(provider, "label", provider.name))
+                document = self.indexed_copy(convert["palette"], convert.get("dither", "none"))
+                self.save_convert = dict(convert)
+                self.last_save_warnings = [] if not chosen_now else [
+                    "written as an indexed copy on the palette %r; this document stays as it is "
+                    "(Save again re-converts with the same palette)" % (convert["palette"].name or "chosen")]
+            else:
+                self.last_save_warnings = []
+            if format:
+                self.doc.meta["format"] = provider.name
             with self.addons.guard(owner, "save") as guard:
-                provider.save(self.doc, target, self.addons_host(owner), {})
+                provider.save(document, target, self.addons_host(owner), {})
                 self.path = target
                 self.dirty_since_save = False
                 self._saved_marker = self.history.marker()
@@ -276,7 +341,7 @@ class Controller:
     _PER_DOC = ("doc", "history", "selection", "compositor", "blends", "display",
                 "path", "dirty_since_save", "_saved_marker", "active_layer",
                 "_pending", "quick_mask", "last_measure", "_history_src",
-                "editing_mask", "smart_link", "snapshots", "guides_locked")
+                "editing_mask", "smart_link", "snapshots", "guides_locked", "save_convert")
 
     def _capture(self):
         return {k: getattr(self, k, None) for k in self._PER_DOC}
@@ -398,6 +463,7 @@ class Controller:
         self._saved_marker = self.history.marker()
         # A smart object's contents tab: (parent document, layer id).
         self.smart_link = link
+        self.save_convert = None       # how Save writes an indexed format
         self.snapshots = []            # History snapshots: [(name, document copy)]
         self.guides_locked = False
         if self.session is not None and link is None:
@@ -451,9 +517,32 @@ class Controller:
         addon = self.addons.addons.get(addon_id)
         return Host(self.addons.registry, addon, self.settings, self.db, self)
 
-    def load_addons(self):
-        """Load discovered addons and fold what they registered into the app."""
-        self.addons.load_all()
+    def load_addons(self, only=None, all_addons=False):
+        """Load addons and fold what they registered into the app.
+
+        Default: every addon except those the user chose not to load.
+        all_addons: every one, and forget earlier choices (Load All Addons).
+        only: exactly these ids -- the others are unloaded -- and remember
+        that choice for the next start (Choose Addons)."""
+        if all_addons:
+            self.addons.set_choices(list(self.addons.addons))
+            self.addons.load_all(respect_choices=False)
+        elif only is not None:
+            only = set(only)
+            for aid, addon in self.addons.addons.items():
+                if aid not in only and addon.state == "loaded":
+                    for name in [n for n, _c in self.addons.registry.all("tools").items()
+                                 if self.addons.registry.owner("tools", n) == aid]:
+                        self.tools._classes.pop(name, None)
+                    self.addons.unload(aid)
+            self.addons.set_choices(only)
+            for addon in self.addons._ordered():
+                if addon.id in only:
+                    if addon.state in ("not chosen", "blocked"):
+                        addon.state = "discovered"
+                    self.addons.load(addon)
+        else:
+            self.addons.load_all()
         for name, cls in self.addons.registry.all("tools").items():
             self.tools._classes[name] = cls
         self.emit("addons.changed")
@@ -4486,3 +4575,13 @@ def _recorded(fn, name):
 for _name in RECORDABLE:
     if hasattr(Controller, _name):
         setattr(Controller, _name, _recorded(getattr(Controller, _name), _name))
+
+
+class NeedsIndexed(ValueError):
+    """Saving to a format that stores palette indices, from a document that
+    has none: the window asks which palette to convert a copy with."""
+
+    def __init__(self, label):
+        super().__init__("%s stores palette indices; convert the image to a palette to save it"
+                         % label)
+        self.label = label
