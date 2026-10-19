@@ -1096,6 +1096,55 @@ def main():
     for entry in ("Rotate by Angle...", "Scale Layer...", "Offset...", "Align"):
         check("Layers menu offers %s" % entry, entry in layer_items, "-- %s" % layer_items)
 
+    # ---- inpainting through the window ------------------------------------
+    ctl2.new_document(200, 150)
+    win2.canvas.bind()
+    for _ in range(5):
+        app.processEvents()
+    win2.canvas.rotate_view(None)
+    v = win2.canvas.view
+    vp2 = win2.canvas.viewport()
+    cell3 = ctl2.doc.cell(ctl2.active_layer)
+    yy3 = np.mgrid[:150, :200][0]
+    tex = np.zeros((150, 200, 4), np.uint8)
+    tex[..., 3] = 255
+    tex[(yy3 // 4) % 2 == 0, :3] = (180, 60, 20)
+    tex[(yy3 // 4) % 2 == 1, :3] = (20, 60, 180)
+    cell3.plane("rgba")[...] = tex
+    cell3.plane("rgba")[70:76, 95:101] = (255, 255, 0, 255)
+    cell3._touched(ctl2.doc.bounds)
+    win2.canvas.refresh()
+    ctl2.set_tool("spot_heal", size=14)
+
+    def at3(dx, dy):
+        wx, wy = v.doc_to_widget(dx, dy)
+        return QPoint(int(wx), int(wy))
+    QTest.mousePress(vp2, Qt.LeftButton, Qt.NoModifier, at3(97, 72))
+    QTest.mouseMove(vp2, at3(98, 73))
+    QTest.mouseMove(vp2, at3(99, 74))
+    QTest.mouseRelease(vp2, Qt.LeftButton, Qt.NoModifier, at3(99, 74))
+    app.processEvents()
+    spot3 = cell3.plane("rgba")[70:76, 95:101, :3]
+    check("A REAL SPOT-HEAL STROKE REMOVES THE BLEMISH",
+          not (spot3 == np.array((255, 255, 0), np.uint8)).all(-1).any())
+    check("...and the wait cursor is released afterwards",
+          QApplication.overrideCursor() is None)
+    cell3.plane("rgba")[40:60, 40:60] = (255, 255, 0, 255)
+    cell3._touched(ctl2.doc.bounds)
+    ctl2.selection.select_rect((38, 38, 62, 62))
+    edit_actions = {a.text().replace("&", ""): a for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&Edit").menu().actions() if a.text()}
+    check("Edit menu offers Content-Aware Fill", "Content-Aware Fill" in edit_actions,
+          "-- %s" % sorted(edit_actions))
+    edit_actions["Content-Aware Fill"].trigger()
+    app.processEvents()
+    check("...which rebuilds the selection from the texture around it",
+          not (cell3.plane("rgba")[40:60, 40:60, :3]
+               == np.array((255, 255, 0), np.uint8)).all(-1).any())
+    check("...and leaves no wait cursor behind", QApplication.overrideCursor() is None)
+    check("Content-Aware Fill is Shift+Backspace",
+          edit_actions["Content-Aware Fill"].shortcut().toString() == "Shift+Backspace")
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc

@@ -798,7 +798,16 @@ class CanvasView(QAbstractScrollArea):
                 self._tick_timer.stop()
             dx, dy = self._doc_pos(event.position())
             self._drawing = False
-            self.ctl.end_stroke(dx, dy, 1.0, self._mods(event))
+            # Inpainting tools do seconds of work on release; say so.
+            slow = bool(getattr(self.ctl.tool, "slow_commit", False))
+            if slow:
+                from PySide6.QtWidgets import QApplication
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                self.ctl.end_stroke(dx, dy, 1.0, self._mods(event))
+            finally:
+                if slow:
+                    QApplication.restoreOverrideCursor()
             self.refresh()
             # A text tool stays active after mouse-up so typing can begin.
             if self._text_tool() is not None:

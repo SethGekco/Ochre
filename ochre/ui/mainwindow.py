@@ -152,6 +152,16 @@ class MainWindow(QMainWindow):
 
     # ---- menus -----------------------------------------------------------
 
+    def _busy(self, fn, *args, **kw):
+        """Run something slow under a wait cursor, then repaint."""
+        from PySide6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return fn(*args, **kw)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.canvas.refresh()
+
     def _act(self, menu, text, slot, shortcut=None):
         action = QAction(text, self)
         if shortcut:
@@ -189,6 +199,11 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         self._act(edit_menu, "&Erase Selection", lambda: self.ctl.erase_selection(), "Del")
         self._act(edit_menu, "&Fill Selection", lambda: self.ctl.fill_selection(), "Backspace")
+        self._act(edit_menu, "Content-&Aware Fill",
+                  lambda: self._busy(self.ctl.inpaint_selection, "content_aware"),
+                  "Shift+Backspace")
+        self._act(edit_menu, "S&mooth Fill (Inpaint)",
+                  lambda: self._busy(self.ctl.inpaint_selection, "smooth"))
         edit_menu.addSeparator()
 
         sel_menu = bar.addMenu("&Select")

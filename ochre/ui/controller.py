@@ -747,6 +747,38 @@ class Controller:
         self.emit("history.changed")
         return rect
 
+    def inpaint_selection(self, method="content_aware"):
+        """Edit > Content-Aware Fill: rebuild the selected area from its surroundings.
+
+        The selection is the hole; its antialiased edge becomes a soft blend
+        between the fill and what was there. 'smooth' fills with the smoothest
+        colour surface instead of texture, for flat areas.
+        """
+        from ..engine import inpaint
+        from ..engine.commands import PixelDelta
+        if self.active_layer is None or self.active_layer.is_group:
+            return None
+        if self.selection.mask is None:
+            return None                       # nothing selected: no hole
+        rect, mask = self._selection_window()
+        if rect is None:
+            return None
+        cell = self.doc.cell(self.active_layer)
+        hole = self.selection.mask >= 1
+        # A one-shot command can afford more iterations than a brush release.
+        kw = {"quality": 2.0} if method == "content_aware" else {}
+        filled = inpaint.fill_hole(cell.plane("rgba"), hole, method=method, **kw)
+        label = "Content-Aware Fill" if method == "content_aware" else "Smooth Fill"
+        delta = PixelDelta.capture(self.doc, self.active_layer.id, self.doc.frame.id,
+                                   rect, label)
+        cell.lerp_masked(rect, filled[rect.slice()], mask)
+        if delta is not None:
+            self.history.push(delta, label, frame_id=self.doc.frame.id)
+        self.invalidate(rect)
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return rect
+
     def paste(self, clip=None, at=None, new_layer=False):
         """Put a clip on the active layer (or a new one) and select it.
 
@@ -1034,10 +1066,22 @@ class Controller:
     def end_stroke(self, x, y, pressure=1.0, modifiers=0, button=1):
         if self.tool is None:
             return None
-        result = self.tool.end(self._ctx, ToolEvent(x, y, pressure, modifiers, button))
-        self._sync_from_context()
-        if not self.tool.active:
-            self._record_selection_change()
+        # A tool that changes pixels AND the selection in one gesture (the
+        # Patch tool's Destination mode, Content-Aware Move) must undo as one
+        # step: otherwise the first Ctrl+Z only moves the marching ants back,
+        # which reads as "undo did not undo what I just did".
+        grouping = hasattr(self, "_sel_before")
+        if grouping:
+            self.history.begin_group()
+        try:
+            result = self.tool.end(self._ctx, ToolEvent(x, y, pressure, modifiers, button))
+            self._sync_from_context()
+            if not self.tool.active:
+                self._record_selection_change()
+        finally:
+            if grouping:
+                self.history.end_group(self.tools.label(self.tool_name)
+                                       if self.tool_name else "Selection")
         self.emit("history.changed")
         return result
 

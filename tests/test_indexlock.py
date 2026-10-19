@@ -199,6 +199,17 @@ DRIVERS = {
     "warp":       lambda t, c: (_checker(c, 0, 0, 40, 32, 200, 5),
                                 _stroke(t, c, [(10, 16), (16, 16), (22, 16), (28, 16)])),
     "move_layer": lambda t, c: _stroke(t, c, [(20, 16), (30, 22)]),
+    # ---- inpainting: a blemish on texture, removed --------------------------
+    "spot_heal":  lambda t, c: (_checker(c, 0, 0, 40, 32, 200, 5), _ink(c, 18, 14, 4, 4, 120),
+                                _stroke(t, c, [(20, 16), (21, 16)])),
+    "remove":     lambda t, c: (_checker(c, 0, 0, 40, 32, 200, 5), _ink(c, 16, 12, 8, 8, 120),
+                                _stroke(t, c, [(20, 16), (21, 16)])),
+    "patch":      lambda t, c: (_checker(c, 0, 0, 40, 32, 200, 5), _ink(c, 4, 4, 6, 6, 120),
+                                c.selection.select_rect((3, 3, 11, 11)),
+                                _stroke(t, c, [(7, 7), (17, 12), (27, 20)])),
+    "content_move": lambda t, c: (_ink(c, 4, 4, 8, 8, 200),
+                                  c.selection.select_rect((4, 4, 12, 12)),
+                                  _stroke(t, c, [(8, 8), (18, 14), (28, 20)])),
 }
 
 # Tools that legitimately write no pixels. Listed explicitly so that a tool

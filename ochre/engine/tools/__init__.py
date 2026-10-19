@@ -27,6 +27,8 @@ from .transform import (CageTool, CropTool, FlipTool, HandleTransformTool,
 from .select import (ForegroundSelectTool, ObjectSelectTool, PolygonLassoTool,
                      QuickSelectTool, ScissorsTool, SelectByColorTool,
                      SingleColumnTool, SingleRowTool)
+from .inpaint import (ContentAwareMoveTool, PatchTool, RemoveTool,
+                      SpotHealTool)
 from .retouch import (AirbrushTool, BackgroundEraserTool, BlurBrushTool, BurnTool,
                       DodgeTool, HealTool, HistoryBrushTool, InkTool, MagicEraserTool,
                       MixerBrushTool, PatternStampTool, RecolorTool, RedEyeTool,
@@ -49,6 +51,7 @@ BUILTIN = {
         TransformTool, RotateTool, ScaleTool, ShearTool, PerspectiveTool, FlipTool,
         Transform3DTool, HandleTransformTool, CageTool, WarpTool, CropTool,
         PerspectiveCropTool, MoveLayerTool,
+        SpotHealTool, RemoveTool, PatchTool, ContentAwareMoveTool,
     )
 }
 
