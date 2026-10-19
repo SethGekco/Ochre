@@ -901,6 +901,10 @@ class MainWindow(QMainWindow):
             fx.ctl.set_layer_styles, fx.ctl.active_layer, {}))
         menu.addAction("Edit Adjustment / Fill...", self.do_edit_layer_content)
         menu.addAction("&Rasterize Layer", lambda: fx._layer_fx(fx.ctl.rasterize_layer))
+        shape = menu.addMenu("S&hape Layer")
+        shape.addAction("Shape &Properties...", self.do_shape_properties)
+        shape.addAction("&Edit Path (to Paths panel)", lambda: fx._layer_fx(fx.ctl.shape_to_path))
+        shape.addAction("&Update from Active Path", lambda: fx._layer_fx(fx.ctl.update_shape_from_path))
         vmask = menu.addMenu("&Vector Mask")
         vmask.addAction("From Active &Path", lambda: fx._layer_fx(fx.ctl.add_vector_mask, "path"))
         vmask.addAction("&Reveal All", lambda: fx._layer_fx(fx.ctl.add_vector_mask, "reveal"))
@@ -1499,6 +1503,27 @@ class MainWindow(QMainWindow):
     def do_shortcuts(self):
         from .prefsdialog import ShortcutsDialog
         ShortcutsDialog(self.ctl, self.menuBar(), self).exec()
+
+    def do_shape_properties(self):
+        from .formdialog import ask
+        layer = self.ctl.active_layer
+        if getattr(layer, "kind", "raster") != "shape":
+            QMessageBox.information(self, "Shape Properties", "The active layer is not a shape layer.")
+            return
+        p = layer.params
+        v = ask(self, "Shape Properties", [
+            ("has_fill", "Fill", "bool", p.get("fill") is not None, None),
+            ("fill", "Fill colour", "color", tuple(p.get("fill") or self.ctl.secondary), None),
+            ("has_stroke", "Stroke", "bool", p.get("stroke") is not None, None),
+            ("stroke", "Stroke colour", "color", tuple(p.get("stroke") or self.ctl.primary), None),
+            ("width", "Stroke width (px)", "int", int(round(p.get("stroke_width", 2))), (0, 500)),
+            ("align", "Stroke alignment", "choice", p.get("stroke_align", "center"),
+             [("inside", "Inside"), ("center", "Center"), ("outside", "Outside")])])
+        if v is not None:
+            self._layer_fx(self.ctl.set_shape_style, layer,
+                           fill=v["fill"] if v["has_fill"] else None,
+                           stroke=v["stroke"] if v["has_stroke"] else None,
+                           stroke_width=v["width"], stroke_align=v["align"])
 
     def do_filter_gallery(self):
         from .gallery import FilterGalleryDialog

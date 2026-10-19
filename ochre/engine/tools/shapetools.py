@@ -171,6 +171,91 @@ class _ShapeTool(_DragTool):
         self._paint_region(ctx, cov, rect, colour)
         return rect
 
+    # ---- Shape layer and Path modes (Photoshop's shape tool modes) ----------------
+
+    def _vector_mode(self):
+        return self.option("mode", "pixels") in ("shape", "path")
+
+    def on_begin(self, ctx, event):
+        if self._vector_mode():
+            if ctx.cell is None and ctx.layer is None:
+                return None
+            self._start = event
+            self._preview = None
+            self._session = None
+            return None
+        return super().on_begin(ctx, event)
+
+    def on_motion(self, ctx, event):
+        if self._vector_mode() and getattr(self, "_start", None) is not None:
+            self._preview = self.vector_path(event)
+            return ctx.doc.bounds
+        return super().on_motion(ctx, event)
+
+    def on_end(self, ctx, event):
+        if self._vector_mode() and getattr(self, "_start", None) is not None:
+            from .. import shapelayer
+            path = self.vector_path(event)
+            self._preview = None
+            self._start = None
+            if path is not None and not path.is_empty:
+                self.request = ("add_shape", {
+                    "path": shapelayer.encode_path(path), "mode": self.option("mode", "shape"),
+                    "style": self.option("style", shapes.BOTH if self.shape != "line"
+                                         else shapes.OUTLINE),
+                    "stroke_width": float(self.option("stroke", self.default_stroke)),
+                    "line": self.shape == "line"})
+            return ctx.doc.bounds
+        return super().on_end(ctx, event)
+
+    def on_cancel(self, ctx):
+        self._preview = None
+        if self._vector_mode():
+            self._start = None
+            return ctx.doc.bounds
+        return super().on_cancel(ctx)
+
+    def vector_path(self, event):
+        """The shape as a vector Path (true curves for the ellipse)."""
+        from .. import paths as P
+        from .. import shapelayer, shapelib
+        kind = self.shape
+        geometry = self._geometry(event)
+        if kind == "line":
+            x0, y0, x1, y1 = geometry
+            if abs(x1 - x0) + abs(y1 - y0) < 1:
+                return None
+            return shapelayer.path_from_rings([[(x0, y0), (x1, y1)]], closed=False)
+        x0, y0, x1, y1 = geometry
+        xa, xb = sorted((x0, x1))
+        ya, yb = sorted((y0, y1))
+        if xb - xa < 1 or yb - ya < 1:
+            return None
+        if kind == "ellipse":
+            k = 0.5522847498
+            cx, cy, rx, ry = (xa + xb) / 2.0, (ya + yb) / 2.0, (xb - xa) / 2.0, (yb - ya) / 2.0
+            pts = [(cx, ya), (xb, cy), (cx, yb), (xa, cy)]
+            hand = [((cx - rx * k, ya), (cx + rx * k, ya)), ((xb, cy - ry * k), (xb, cy + ry * k)),
+                    ((cx + rx * k, yb), (cx - rx * k, yb)), ((xa, cy + ry * k), (xa, cy - ry * k))]
+            anchors = [P.Anchor(x, y, h[0][0], h[0][1], h[1][0], h[1][1], smooth=True)
+                       for (x, y), h in zip(pts, hand)]
+            return P.Path("Shape", [P.Subpath(anchors, True)])
+        if kind in shapelib.CATALOG:
+            rings = shapelib.rings(kind, (xa, ya, xb, yb), **self._shape_params(kind))
+        elif kind in shapes.POLYGONS:
+            sides, skip = shapes.POLYGONS[kind]
+            rings = [shapes.polygon_points((xa, ya, xb, yb), sides, skip)]
+        else:
+            return None
+        return shapelayer.path_from_rings(rings, closed=True)
+
+    def overlay(self):
+        path = getattr(self, "_preview", None)
+        if path is None:
+            return super().overlay() if hasattr(super(), "overlay") else []
+        from .. import paths as P
+        return [("poly", [tuple(p) for p in pts], closed) for pts, closed in P.flatten(path)]
+
     def _shape_params(self, kind):
         radius = self.option("radius", 0)
         if kind in ("rounded_rectangle", "callout_rounded") and radius:
@@ -186,10 +271,15 @@ class _ShapeTool(_DragTool):
         cell.apply_masked(rect, src, ctx.coverage(window, rect))
 
 
+_MODE = O.Opt("mode", O.CHOICE, "pixels", "Mode", choices=("pixels", "shape", "path"),
+              labels={"pixels": "Pixels", "shape": "Shape layer", "path": "Path"},
+              tip="Pixels paints; Shape layer makes an editable vector layer; Path adds a path.")
+
+
 class LineTool(_ShapeTool):
     name = "line"
     label = "Line"
-    options_spec = (O.stroke(2), O.antialias(True))
+    options_spec = (_MODE, O.stroke(2), O.antialias(True))
     kind = "line"
     default_stroke = 2
 
@@ -210,7 +300,7 @@ class ShapeTool(_ShapeTool):
     @classmethod
     def _spec(cls):
         from .. import shapelib
-        return (O.Opt("shape", O.CHOICE, "rectangle", "Shape",
+        return (_MODE, O.Opt("shape", O.CHOICE, "rectangle", "Shape",
                       choices=tuple(shapelib.CATALOG),
                       labels={k: shapelib.label(k) for k in shapelib.CATALOG},
                       groups=shapelib.grouped()),

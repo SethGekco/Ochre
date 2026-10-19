@@ -145,7 +145,10 @@ def _map_paths(doc, fn):
     from . import regions
     for group in regions.groups(doc):
         group.region = regions.mapped(group.region, fn)
+    from . import shapelayer
     for layer in doc.layers():
+        if getattr(layer, "kind", "raster") == "shape" and layer.params:
+            layer.params = shapelayer.mapped(layer.params, fn)
         vm = getattr(layer, "vector_mask", None)
         if vm is not None:
             moved = vm.copy()            # replaced, never edited in place

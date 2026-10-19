@@ -515,6 +515,9 @@ def save(doc, path, compositor=None):
             if kind == "text":
                 warnings.append("text layer %r is saved as pixels (it stays editable in .ochre)"
                                 % node.name)
+            if kind == "shape":
+                warnings.append("shape layer %r is saved as pixels (it stays a shape in .ochre)"
+                                % node.name)
             if kind == "adjustment":
                 warnings.append("adjustment layer %r is not kept in PSD" % node.name)
                 continue

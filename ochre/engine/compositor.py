@@ -58,9 +58,9 @@ import numpy as np
 from . import accel
 from .blend import DEFAULT as DEFAULT_BLENDS
 from .geometry import Rect
-from .layer import ADJUSTMENT, FILL, PASS_THROUGH, SMART, TEXT
+from .layer import ADJUSTMENT, FILL, PASS_THROUGH, SHAPE, SMART, TEXT
 
-_GENERATED = (FILL, TEXT, SMART)
+_GENERATED = (FILL, TEXT, SMART, SHAPE)
 
 GROUP = "group"      # kind of a _Leaf standing for a whole isolated group
 
@@ -287,9 +287,25 @@ class Compositor:
             return textlayer.pixels(layer.params, r)
         if kind == SMART:
             return self._smart_image(layer)[r.slice()]
+        if kind == SHAPE:
+            return self._shape_image(layer)[r.slice()]
         if layer.params and _active_filters(layer.params):
             return self._filtered(leaf)[r.slice()]
         return leaf.surface.view(r, "rgba")
+
+    def _shape_image(self, layer):
+        """A shape layer drawn from its path, cached until it changes."""
+        from . import shapelayer
+        key = (repr(sorted(layer.params.items())), self.doc.width, self.doc.height)
+        cache = getattr(self, "_shapes", None)
+        if cache is None:
+            cache = self._shapes = {}
+        hit = cache.get(layer.id)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        img = shapelayer.render(layer.params, self.doc.width, self.doc.height)
+        cache[layer.id] = (key, img)
+        return img
 
     def _filtered(self, leaf):
         """A pixel layer with non-destructive filters (GIMP 3's NDE filters):

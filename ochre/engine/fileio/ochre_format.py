@@ -516,6 +516,10 @@ def load(path, settings=None):
 
 def _encode_value(value):
     import json
+    if value is None:
+        return "json:null"           # e.g. a shape layer with no fill
+    if isinstance(value, (tuple, list)) and any(isinstance(v, str) or v is None for v in value):
+        return "json:" + json.dumps(list(value), separators=(",", ":"))
     if isinstance(value, dict) or (isinstance(value, (tuple, list)) and value
                                    and isinstance(value[0], dict)):
         return "json:" + json.dumps(value, separators=(",", ":"))

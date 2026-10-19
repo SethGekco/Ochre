@@ -2477,6 +2477,23 @@ class Controller:
             if group is not None:
                 self.move_region(group, arg[1], arg[2])
             return True
+        if kind == "add_shape":
+            from ..engine import shapelayer
+            path = shapelayer.path_of({"path": arg["path"]})
+            if arg.get("mode") == "path":
+                self.add_work_path(path)
+            else:
+                style = arg.get("style", "both")
+                if arg.get("line"):
+                    fill, stroke = None, tuple(self.primary)
+                elif style == "fill":
+                    fill, stroke = tuple(self.primary), None
+                elif style == "outline":
+                    fill, stroke = None, tuple(self.primary)
+                else:
+                    fill, stroke = tuple(self.secondary), tuple(self.primary)
+                self.add_shape_layer(path, fill, stroke, arg.get("stroke_width", 2.0))
+            return True
         if kind == "select_layer":
             node = self.doc.layer(arg)
             if node is not None:
@@ -3544,6 +3561,73 @@ class Controller:
             c._touched(doc.bounds)
         self._adopt(doc, path=None)
         return doc, report
+
+    # ---- shape layers -----------------------------------------------------------------
+
+    def add_shape_layer(self, path, fill=None, stroke=(0, 0, 0, 255), stroke_width=2.0,
+                        stroke_align="center", name=None):
+        """A new shape layer (Photoshop's shape layer, GIMP 3.2's vector
+        layer) above the active one. One undo step."""
+        from ..engine import shapelayer
+        from ..engine.commands import StructureDelta
+        from ..engine.layer import SHAPE
+        anchor = self.active_layer
+        parent = anchor.parent if anchor is not None and anchor.parent is not None else None
+        index = parent.children.index(anchor) + 1 if parent is not None else None
+        n = sum(1 for l in self.doc.layers() if getattr(l, "kind", "raster") == SHAPE) + 1
+        layer = self.doc.add_layer(name or "Shape %d" % n, parent=parent, index=index)
+        layer.kind = SHAPE
+        layer.params = shapelayer.make(path, fill, stroke, stroke_width, stroke_align)
+        self.history.push(StructureDelta.insertion(self.doc, layer, "New Shape Layer"),
+                          "New Shape Layer")
+        self.set_active_layer(layer)
+        self._after_structure_change()
+        return layer
+
+    def add_work_path(self, path, name=None):
+        """A shape drawn in Path mode: a new path in the Paths panel."""
+        def run():
+            p = path.copy()
+            p.name = name or "Path %d" % (len(self.doc.paths) + 1)
+            self.doc.paths = list(self.doc.paths) + [p]
+            self.doc.active_path = len(self.doc.paths) - 1
+            return p
+        return self._path_change("New Path", run)
+
+    def set_shape_style(self, layer=None, **style):
+        """Change a shape layer's fill / stroke / stroke_width / stroke_align."""
+        target = layer or self.active_layer
+        if target is None or getattr(target, "kind", "raster") != "shape":
+            return False
+        clean = {}
+        for k in ("fill", "stroke"):
+            if k in style:
+                clean[k] = None if style[k] is None else list(style[k])
+        if "stroke_width" in style:
+            clean["stroke_width"] = float(style["stroke_width"])
+        if "stroke_align" in style:
+            clean["stroke_align"] = style["stroke_align"]
+        self.set_layer_params(target, clean)
+        return True
+
+    def shape_to_path(self, layer=None):
+        """Layer > Shape > Edit Path: the shape's outline into the Paths panel,
+        to edit with the path tools."""
+        from ..engine import shapelayer
+        target = layer or self.active_layer
+        if target is None or getattr(target, "kind", "raster") != "shape":
+            return None
+        return self.add_work_path(shapelayer.path_of(target.params), "%s Path" % target.name)
+
+    def update_shape_from_path(self, layer=None):
+        """Layer > Shape > Update from Active Path."""
+        from ..engine import shapelayer
+        target = layer or self.active_layer
+        if target is None or getattr(target, "kind", "raster") != "shape" \
+                or self.doc.active_path is None or not (0 <= self.doc.active_path < len(self.doc.paths)):
+            return False
+        self.set_layer_params(target, {"path": shapelayer.encode_path(self.doc.paths[self.doc.active_path])})
+        return True
 
     def straighten(self, line=None):
         """Image > Straighten: rotate so the measured line comes out level."""

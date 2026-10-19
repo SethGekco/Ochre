@@ -78,7 +78,8 @@ PASS_THROUGH = "PassThrough"
 # size. Adjustment and fill layers are Photoshop's; they keep edits
 # re-editable instead of baked in.
 RASTER, ADJUSTMENT, FILL, TEXT, SMART = "raster", "adjustment", "fill", "text", "smart"
-GENERATED = (FILL, TEXT, SMART)   # kinds whose pixels are made from params, not stored
+SHAPE = "shape"                    # a vector path with fill and stroke (engine/shapelayer.py)
+GENERATED = (FILL, TEXT, SMART, SHAPE)   # kinds whose pixels are made from params, not stored
 SRC_SUFFIX = "~src"
 
 

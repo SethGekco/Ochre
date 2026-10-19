@@ -986,7 +986,8 @@ def main():
     app.processEvents()
     palette = bar.widgets["shape"][1]
     check("the shape option is a categorised palette", isinstance(palette, ShapePalette)
-          and len(palette.buttons) == len(ctl2.tools.spec("shape")[0].choices))
+          and len(palette.buttons) == len(next(o for o in ctl2.tools.spec("shape")
+                                               if o.name == "shape").choices))
     palette._pick("gear")
     check("picking a shape in the palette sets it", ctl2.tool.shape == "gear")
     combo = bar.widgets["style"][1]

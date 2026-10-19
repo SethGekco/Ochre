@@ -511,7 +511,7 @@ class GeometryDelta(Command):
         out = GeometryDelta(doc.width, doc.height, cells, selection, label, paths)
         out._marks = {a: list(getattr(doc, a, [])) for a in MARKS}
         out._params = {l.id: dict(l.params) for l in doc.layers()
-                       if getattr(l, "kind", "raster") in ("text", "smart")}
+                       if getattr(l, "kind", "raster") in ("text", "smart", "shape")}
         out._regions = {g.id: dict(g.region) for g in doc.root.walk()
                         if g.is_group and getattr(g, "region", None)}
         out._vmasks = {l.id: l.vector_mask for l in doc.layers()
