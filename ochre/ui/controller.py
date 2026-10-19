@@ -3880,6 +3880,8 @@ class Controller:
         import os as _os
         from ..engine import palettefiles as PF
         out = []
+        if self.swatch_key == ("generated",) and self.swatch_palette is not None:
+            out.append(("Generated", self.swatch_palette.name or "Generated", ("generated",)))
         if self.doc is not None and self.doc.palette is not None:
             out.append(("Document", "Document palette", ("document",)))
         out += [("Built-in", n, ("builtin", n)) for n in PF.BUILTIN]
@@ -4061,6 +4063,75 @@ class Controller:
         cell._touched(self.doc.bounds)
         if d is not None:
             self.history.push(d, label, frame_id=self.doc.frame.id)
+        self.invalidate()
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return True
+
+    def _colour_layers(self):
+        """Visible pixel layers whose colours are the image's own (not
+        indexed, not generated), in every frame's current state."""
+        return [l for l in self.doc.layers() if l.visible and getattr(l, "kind", "raster") == "raster"
+                and not l.index_locked and (l.id, self.doc.frame.id) in self.doc.cells]
+
+    def used_colours(self):
+        """(colours, counts) the visible pixel layers use, most used first."""
+        from ..engine import palettefiles as PF
+        return PF.used_colours([self.doc.cell(l).plane("rgba") for l in self._colour_layers()])
+
+    def plan_palette_from_image(self, target=256):
+        """What Build Palette from Image would make, before making it: the
+        palette and the merges of closest colours it recommends."""
+        from ..engine import palettefiles as PF
+        cols, counts = self.used_colours()
+        return PF.plan_palette(cols, counts, target)
+
+    def build_palette_from_image(self, target=256, apply=False, plan=None):
+        """A palette from the colours the image uses (closest merged when
+        there are more than `target`); it becomes the Palette bar's. With
+        apply, every pixel layer is remapped to it -- merged colours take
+        their group's colour -- as one undo step."""
+        from ..engine import palettefiles as PF
+        from ..engine.commands import PixelDelta
+        plan = plan or self.plan_palette_from_image(target)
+        pal = plan.palette("From image (%d)" % len(plan.colours))
+        if apply and not plan.exact:
+            label = "Build Palette from Image"
+            mapping = plan.mapping()
+            self.history.begin_group()
+            for lay in self._colour_layers():
+                cell = self.doc.cell(lay)
+                d = PixelDelta.capture(self.doc, lay.id, self.doc.frame.id, self.doc.bounds, label)
+                cell.plane("rgba")[...] = PF.remap(cell.plane("rgba"), mapping)
+                cell._touched(self.doc.bounds)
+                if d is not None:
+                    self.history.push(d, label, frame_id=self.doc.frame.id)
+            self.history.end_group(label)
+            self.invalidate()
+            self.dirty_since_save = True
+            self.emit("history.changed")
+        self.set_swatch_palette(pal)
+        return pal
+
+    def apply_palette_all(self, dither="none", palette=None):
+        """Convert every visible pixel layer's colours to the palette (nearest,
+        optional dither), as one undo step."""
+        from ..engine import palettefiles as PF
+        from ..engine.commands import PixelDelta
+        pal = palette or self.swatch_palette
+        layers = self._colour_layers()
+        if pal is None or not layers:
+            return False
+        label = "Convert to Palette"
+        self.history.begin_group()
+        for lay in layers:
+            cell = self.doc.cell(lay)
+            d = PixelDelta.capture(self.doc, lay.id, self.doc.frame.id, self.doc.bounds, label)
+            cell.plane("rgba")[...] = PF.map_rgba(cell.plane("rgba"), pal, dither)
+            cell._touched(self.doc.bounds)
+            if d is not None:
+                self.history.push(d, label, frame_id=self.doc.frame.id)
+        self.history.end_group(label)
         self.invalidate()
         self.dirty_since_save = True
         self.emit("history.changed")

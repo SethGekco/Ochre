@@ -93,6 +93,8 @@ class PaletteBar(QToolBar):
         self.addWidget(self.combo)
         self._button("Load...", self.load, "Load a palette file (.pal, .gpl, .act, .txt, .hex)")
         self._button("Save...", self.save, "Save the palette (.gpl, .act, .txt, or JASC .pal)")
+        self._button("From Image...", self.from_image,
+                     "Build a palette from the colours the image uses (closest merged if too many)")
         self.strip = SwatchStrip()
         self.strip.picked.connect(self._pick)
         self.addWidget(self.strip)
@@ -204,6 +206,12 @@ class PaletteBar(QToolBar):
                                               "GIMP (*.gpl);;Adobe (*.act);;Paint.NET (*.txt);;JASC (*.pal)")
         if path:
             PF.write(self.ctl.swatch_palette, path)
+
+    def from_image(self):
+        from .colourpicker import BuildPaletteDialog
+        if BuildPaletteDialog(self.ctl, self.win).exec():
+            self.refresh_sources()
+            self.show_palette()
 
     def reduce(self):
         self.win._busy(self.ctl.reduce_colours, self.count.value(), self.dither.currentData())

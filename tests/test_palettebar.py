@@ -188,18 +188,22 @@ def main():
     app.processEvents()
     check("the window can be made short (minimum %d px) -- panels and toolbox scroll"
           % win.minimumSizeHint().height(), win.minimumSizeHint().height() < 450)
-    from ochre.ui.docks import ScrollStrip
-    strip = win.tools_dock.widget()
-    check("the toolbox is one column in a scrolling strip", isinstance(strip, ScrollStrip)
-          and win.tools_dock.columns == 1)
-    bar_ = strip.area.verticalScrollBar()
-    check("...with more below than fits at this height", bar_.maximum() > 0 and strip.down.isEnabled())
-    strip._hover(+1)
-    for _ in range(5):
-        strip._timer.timeout.emit()
-    check("...resting the mouse at the bottom scrolls it down", bar_.value() > 0)
-    strip._hover(0)
-    strip.up.click()
+    td = win.tools_dock
+    check("the toolbox is a grid of 2 or 3 columns with every tool group in view",
+          td.columns in (2, 3) and all(b.isVisible() for b in td._order))
+    win.resize(900, 900)
+    app.processEvents()
+    check("...two columns when they fit the height", td.columns == 2, str(td.columns))
+    win.resize(900, 420)
+    app.processEvents()
+    check("...three when two would not fit", td.columns == 3, str(td.columns))
+    from PySide6.QtWidgets import QMenu
+    tools_menu = [a.menu() for a in win.menuBar().actions() if a.text().replace("&", "") == "Tools"][0]
+    check("the Tools menu is short: one submenu per tool group (%d entries)" % len(tools_menu.actions()),
+          len(tools_menu.actions()) < 40 and any(a.menu() for a in tools_menu.actions()))
+    check("...and every menu is capped in height, scrolling with arrows",
+          all(m.maximumHeight() <= win._menu_cap for m in win.menuBar().findChildren(QMenu))
+          and app.style().styleHint(app.style().StyleHint.SH_Menu_Scrollable) == 1)
     del app
     print("\nall palette-bar checks passed")
     sys.stdout.flush()

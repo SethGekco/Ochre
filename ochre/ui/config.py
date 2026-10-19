@@ -37,9 +37,13 @@ UI_DEFAULTS = {
     "Tools": {
         "DefaultTool": "brush",
     },
+    "Menus": {
+        # No menu is taller than this share of the screen; longer ones scroll.
+        "MaxHeight": 0.6,
+    },
     "Toolbox": {
         # Icon columns. 1 is a slim Photoshop-style strip, 2 GIMP-style.
-        "Columns": 2,
+        "Columns": "auto",       # auto = 2 or 3, whatever shows every tool
     },
 }
 

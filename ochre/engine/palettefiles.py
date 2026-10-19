@@ -246,3 +246,177 @@ def nearest(palette, rgb):
     cols = colours(palette).astype(np.int64)
     d = ((cols - np.asarray(rgb[:3], np.int64)) ** 2).sum(1)
     return tuple(int(v) for v in cols[int(np.argmin(d))])
+
+
+# ---- a palette from the colours an image uses ---------------------------------------
+
+def used_colours(images, alpha_min=128):
+    """(colours (n, 3) uint8, counts (n,)) of the colours the images use,
+    counting pixels at least `alpha_min` opaque, most used first."""
+    stacks = [np.asarray(im)[..., :3][np.asarray(im)[..., 3] >= alpha_min] for im in images]
+    pix = np.concatenate([s.reshape(-1, 3) for s in stacks]) if stacks else np.zeros((0, 3), np.uint8)
+    if not len(pix):
+        return np.zeros((0, 3), np.uint8), np.zeros(0, np.int64)
+    key = (pix[:, 0].astype(np.int64) << 16) | (pix[:, 1].astype(np.int64) << 8) | pix[:, 2]
+    uniq, counts = np.unique(key, return_counts=True)
+    order = np.argsort(-counts, kind="stable")
+    uniq, counts = uniq[order], counts[order]
+    cols = np.stack([(uniq >> 16) & 255, (uniq >> 8) & 255, uniq & 255], 1).astype(np.uint8)
+    return cols, counts
+
+
+def _lab(cols):
+    """sRGB (n, 3) uint8 -> CIE Lab (n, 3) float, D65 (plain formula)."""
+    c = np.asarray(cols, np.float64) / 255.0
+    lin = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+    m = np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]])
+    xyz = lin @ m.T / np.array([0.95047, 1.0, 1.08883])
+    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16 / 116.0)
+    return np.stack([116 * f[:, 1] - 16, 500 * (f[:, 0] - f[:, 1]), 200 * (f[:, 1] - f[:, 2])], 1)
+
+
+class PalettePlan:
+    """How a palette is built from used colours.
+
+    colours   the final palette (k, 3) uint8
+    groups    for each final colour, the indices (into `used`) merged into it
+    used      the image's colours (n, 3) uint8; counts how many pixels each
+    exact     True when nothing had to be merged
+    merges    the recommended merges, closest first: (members, result, delta E)
+    """
+
+    def __init__(self, used, counts, colours, groups, merges, exact, approximate=False):
+        self.used, self.counts = used, counts
+        self.colours, self.groups = colours, groups
+        self.merges, self.exact, self.approximate = merges, exact, approximate
+
+    def palette(self, name="From image"):
+        return make(self.colours.tolist(), name)
+
+    def mapping(self):
+        """{used colour (r, g, b): palette colour (r, g, b)}."""
+        out = {}
+        for k, members in enumerate(self.groups):
+            for i in members:
+                out[tuple(int(v) for v in self.used[i])] = tuple(int(v) for v in self.colours[k])
+        return out
+
+
+def plan_palette(used, counts, target, limit=1536):
+    """A palette of at most `target` colours for colours used `counts` times.
+
+    Fits already: the used colours themselves, most used first. Too many:
+    the two CLOSEST colours (delta E in Lab) are merged into their
+    pixel-weighted average, over and over, until it fits -- each merge
+    recorded so the user can see what would be joined. Above `limit`
+    distinct colours (a photograph), the rarest are first folded into their
+    nearest frequent colour, and the plan says it is approximate."""
+    used = np.asarray(used, np.uint8)
+    counts = np.asarray(counts, np.int64)
+    n = len(used)
+    target = max(1, int(target))
+    if n <= target:
+        return PalettePlan(used, counts, used.copy(), [[i] for i in range(n)], [], True)
+    lab = _lab(used)
+    weight = counts.astype(np.float64)
+    groups = [[i] for i in range(n)]
+    approximate = False
+    alive_idx = np.arange(n)
+    if n > limit:
+        approximate = True
+        keep = np.arange(limit)                       # used is sorted most-used first
+        rest = np.arange(limit, n)
+        near = np.argmin(((lab[rest][:, None, :] - lab[keep][None, :, :]) ** 2).sum(-1), axis=1) \
+            if len(rest) * limit < 6e7 else None
+        if near is None:
+            near = np.array([np.argmin(((lab[keep] - lab[r]) ** 2).sum(-1)) for r in rest])
+        for r, k in zip(rest, near):
+            groups[k].append(int(r))
+            w = weight[k] + weight[r]
+            lab[k] = (lab[k] * weight[k] + lab[r] * weight[r]) / w
+            weight[k] = w
+        alive_idx = keep
+    m = len(alive_idx)
+    L = lab[alive_idx].copy()
+    W = weight[alive_idx].copy()
+    G = [groups[i] for i in alive_idx]
+    alive = np.ones(m, bool)
+    D = np.sqrt(((L[:, None, :] - L[None, :, :]) ** 2).sum(-1))
+    np.fill_diagonal(D, np.inf)
+    nn = np.argmin(D, axis=1)
+    nd = D[np.arange(m), nn]
+    merges = []
+    count = m
+    while count > target:
+        i = int(np.argmin(np.where(alive, nd, np.inf)))
+        j = int(nn[i])
+        dist = float(D[i, j])
+        w = W[i] + W[j]
+        L[i] = (L[i] * W[i] + L[j] * W[j]) / w
+        W[i] = w
+        G[i] = G[i] + G[j]
+        alive[j] = False
+        D[j, :] = np.inf
+        D[:, j] = np.inf
+        row = np.sqrt(((L - L[i]) ** 2).sum(-1))
+        row[~alive] = np.inf
+        row[i] = np.inf
+        D[i, :] = row
+        D[:, i] = row
+        stale = alive & ((nn == i) | (nn == j))
+        stale[i] = True
+        for r in np.nonzero(stale)[0]:
+            nn[r] = int(np.argmin(D[r]))
+            nd[r] = D[r, nn[r]]
+        better = alive & (row < nd)
+        nn[better] = i
+        nd[better] = row[better]
+        nd[~alive] = np.inf
+        merges.append((i, dist))
+        count -= 1
+    finals = np.nonzero(alive)[0]
+    # The colour of a merged group: its pixel-weighted average in RGB (what
+    # the eye sees as the group's colour), rounded.
+    colours, out_groups = [], []
+    for k in finals:
+        members = G[k]
+        cw = counts[members].astype(np.float64)
+        avg = (used[members].astype(np.float64) * cw[:, None]).sum(0) / cw.sum()
+        colours.append(np.clip(np.rint(avg), 0, 255))
+        out_groups.append(sorted(members, key=lambda t: -counts[t]))
+    order = np.argsort([-counts[g].sum() for g in out_groups], kind="stable")
+    colours = np.asarray(colours, np.uint8)[order]
+    out_groups = [out_groups[o] for o in order]
+    # Recommendations: every final colour that joins several used ones,
+    # tightest groups first.
+    recs = []
+    for c, members in zip(colours, out_groups):
+        if len(members) > 1:
+            spread = float(np.sqrt(((_lab(used[members]) - _lab(c[None, :])) ** 2).sum(-1)).max())
+            recs.append((members, tuple(int(v) for v in c), spread))
+    recs.sort(key=lambda r: r[2])
+    return PalettePlan(used, counts, colours, out_groups, recs, False, approximate)
+
+
+def remap(rgba, mapping):
+    """Replace colours exactly per a {(r,g,b): (r,g,b)} mapping (alpha kept);
+    colours not in it go to the nearest mapped result."""
+    a = np.array(rgba, copy=True)
+    if not mapping:
+        return a
+    src = np.array(list(mapping.keys()), np.int64)
+    dst = np.array(list(mapping.values()), np.uint8)
+    key = (a[..., 0].astype(np.int64) << 16) | (a[..., 1].astype(np.int64) << 8) | a[..., 2]
+    skey = (src[:, 0] << 16) | (src[:, 1] << 8) | src[:, 2]
+    order = np.argsort(skey)
+    skey, dst_sorted = skey[order], dst[order]
+    pos = np.clip(np.searchsorted(skey, key), 0, len(skey) - 1)
+    hit = skey[pos] == key
+    out = a.copy()
+    out[..., :3][hit] = dst_sorted[pos[hit]]
+    if (~hit).any():
+        pal = make(sorted(set(map(tuple, dst.tolist()))), "mapped")
+        miss = map_rgba(a, pal)
+        out[..., :3][~hit] = miss[..., :3][~hit]
+    out[a[..., 3] == 0, :3] = a[a[..., 3] == 0, :3]
+    return out

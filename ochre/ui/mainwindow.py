@@ -49,7 +49,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self.tools_dock = ToolsDock(controller, self,
-                                    columns=settings.get("Toolbox", "Columns") or 2)
+                                    columns=settings.get("Toolbox", "Columns") or "auto")
         self.layers_dock = LayersDock(controller, self)
         self.colors_dock = ColorsDock(controller, self)
         self.palette_dock = PaletteDock(controller, self)
@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         from .prefsdialog import apply_menu_keys
         apply_menu_keys(self.menuBar(), keymap.load(getattr(self.ctl, "state_dir", None)))
         self._build_window_menu()
+        self._scrollable_menus()
         self._build_status()
         self._subscribe()
 
@@ -571,6 +572,31 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
             self.canvas.refresh()
 
+    def _scrollable_menus(self):
+        """Every menu scrolls, with arrows, instead of running down the
+        screen: none is taller than [Menus] MaxHeight (a share of the
+        screen's height)."""
+        from PySide6.QtWidgets import QApplication, QMenu
+        app = QApplication.instance()
+        if app is not None and not isinstance(app.style(), ScrollableMenuStyle):
+            app.setStyle(ScrollableMenuStyle(app.style().name()))
+        screen = (self.screen() or QApplication.primaryScreen()).availableGeometry().height()
+        share = float(self.cfg.get("Menus", "MaxHeight") or 0.6)
+        cap = max(240, int(screen * share))
+        self._menu_cap = cap
+
+        def capped(menu):
+            if isinstance(menu, QMenu):
+                menu.setMaximumHeight(cap)
+            for sub in menu.findChildren(QMenu):
+                sub.setMaximumHeight(cap)
+        capped(self.menuBar())     # includes Qt's own overflow menu
+        for act in self.menuBar().actions():
+            if act.menu() is not None:
+                capped(act.menu())
+                # Menus rebuilt later (Window, Open Recent) are capped as they open.
+                act.menu().aboutToShow.connect(lambda m=act.menu(): capped(m))
+
     def _act(self, menu, text, slot, shortcut=None):
         action = QAction(text, self)
         if shortcut:
@@ -830,9 +856,17 @@ class MainWindow(QMainWindow):
 
         tools_menu = bar.addMenu("&Tools")
         from . import icons as _icons
+        # One short submenu per toolbox group (the toolbox's own arrangement)
+        # rather than a hundred tools in one column down the screen.
         for group, members in self.ctl.tools.groups():
+            first = members[0]
+            if len(members) == 1:
+                target = tools_menu
+            else:
+                target = tools_menu.addMenu(_icons.tool_icon(self.ctl.tools.icon(first)),
+                                            GROUP_LABELS.get(group, group.replace("_", " ").title()))
             for name in members:
-                act = self._act(tools_menu, self.ctl.tools.label(name),
+                act = self._act(target, self.ctl.tools.label(name),
                                 lambda _c=False, n=name: self.ctl.set_tool(n))
                 act.setIcon(_icons.tool_icon(self.ctl.tools.icon(name)))
                 key = self.ctl.tools.shortcut(name)
@@ -840,7 +874,7 @@ class MainWindow(QMainWindow):
                     # Shown, not bound: the toolbox owns the key so that a
                     # repeated press can cycle tools sharing it.
                     act.setText(act.text() + "\t" + key)
-            tools_menu.addSeparator()
+        tools_menu.addSeparator()
         self._act(tools_menu, "&Decrease Size", lambda: self.step_size(-1), "[")
         self._act(tools_menu, "&Increase Size", lambda: self.step_size(+1), "]")
         tools_menu.addSeparator()
@@ -2040,3 +2074,31 @@ class MainWindow(QMainWindow):
     def do_invert(self):
         self.ctl.invert_selection()
         self.canvas.viewport().update()
+
+
+GROUP_LABELS = {"move": "Move", "marquee": "Marquee Selection", "lasso": "Lasso",
+                "wand": "Quick and Magic Selection", "crop": "Crop and Slice",
+                "picker": "Eyedropper and Measuring", "heal": "Healing", "paint": "Brushes",
+                "clone": "Stamps", "history": "History Brushes", "eraser": "Erasers",
+                "fill": "Fill and Gradient", "blur": "Blur, Sharpen and Smudge",
+                "dodge": "Dodge, Burn and Sponge", "pen": "Pens", "text": "Type",
+                "path_select": "Path Selection", "shape": "Shapes", "pan": "Hand and Rotate View",
+                "zoom": "Zoom", "transform": "Transform", "warp": "Warps"}
+
+
+def _scrollable_style_class():
+    from PySide6.QtWidgets import QProxyStyle, QStyle
+
+    class ScrollableMenuStyle(QProxyStyle):
+        """The platform style, except that a menu taller than its maximum
+        height scrolls (with arrows) instead of being cut off or covering
+        the screen."""
+
+        def styleHint(self, hint, option=None, widget=None, returnData=None):
+            if hint == QStyle.SH_Menu_Scrollable:
+                return 1
+            return super().styleHint(hint, option, widget, returnData)
+    return ScrollableMenuStyle
+
+
+ScrollableMenuStyle = _scrollable_style_class()
