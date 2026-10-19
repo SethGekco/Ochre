@@ -75,7 +75,7 @@ def main():
     check("INI coerces booleans", brush.option("pressure_size") is True)
     check("INI supplies labels", reg.label("brush") == "Paintbrush")
     # Photoshop's order: move first, then selections, then painting.
-    check("INI orders tools", reg.names()[0] == "move_pixels",
+    check("INI orders tools", reg.names()[0] == "move_layer",
           "-- got %r" % reg.names()[:3])
     check("overrides beat INI", reg.create("brush", size=99).option("size") == 99)
 

@@ -375,3 +375,31 @@ class Selection:
         out.mask = None if self.mask is None else self.mask.copy()
         out.geometry = list(self.geometry)
         return out
+
+
+
+def outline_segments(mask, threshold=128):
+    """The selection's boundary as axis-aligned segments, (N, 4) float array.
+
+    Every edge between a selected and an unselected pixel, with collinear
+    unit edges merged into runs, in DOCUMENT coordinates on pixel corners.
+    This is what marching ants trace: the real outline of an ellipse or a
+    lasso, not its bounding box. Built once per selection change, then drawn
+    through the view transform, so zoom and rotation cost nothing extra.
+    """
+    if mask is None:
+        return np.zeros((0, 4), dtype=np.float64)
+    inside = np.asarray(mask) >= threshold
+    padded = np.pad(inside, 1, constant_values=False)
+    out = []
+    horiz = padded[1:, 1:-1] != padded[:-1, 1:-1]        # (h+1, w): edge above row y
+    for y in np.nonzero(horiz.any(axis=1))[0]:
+        d = np.diff(np.concatenate(([0], horiz[y].astype(np.int8), [0])))
+        starts, ends = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+        out.extend((float(a), float(y), float(b), float(y)) for a, b in zip(starts, ends))
+    vert = padded[1:-1, 1:] != padded[1:-1, :-1]         # (h, w+1): edge left of col x
+    for x in np.nonzero(vert.any(axis=0))[0]:
+        d = np.diff(np.concatenate(([0], vert[:, x].astype(np.int8), [0])))
+        starts, ends = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+        out.extend((float(x), float(a), float(x), float(b)) for a, b in zip(starts, ends))
+    return np.asarray(out, dtype=np.float64).reshape(-1, 4)

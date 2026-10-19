@@ -75,6 +75,7 @@ def setup(palette=None, fill=5):
     cell = doc.cell(layer)
     cell.plane("index")[...] = fill
     cell.refresh_derived()
+    cell._touched(doc.bounds)          # writes through plane() must record bounds
     ctx = ToolContext(doc, layer, doc.frame, Selection(40, 32),
                       primary=(255, 255, 255, 255), secondary=(0, 0, 0, 255),
                       history=HistoryStack())
@@ -179,6 +180,25 @@ DRIVERS = {
                               _stroke(t, c, [(8, 8)], mods=2),
                               _stroke(t, c, [(28, 22), (30, 24)])),
     "red_eye":  lambda t, c: (_ink(c, 0, 0, 40, 32, 200), _stroke(t, c, [(6, 6), (30, 24)])),
+    # ---- transforms: lift, change, commit ---------------------------------
+    "transform":  lambda t, c: (_stroke(t, c, [(20, 16), (28, 22)]), t.finish(c)),
+    "rotate_tool": lambda t, c: (_ink(c, 4, 4, 12, 24, 200),
+                                 _stroke(t, c, [(36, 16), (20, 30)]), t.finish(c)),
+    "scale_tool": lambda t, c: (_stroke(t, c, [(39.9, 31.9), (20, 16)]), t.finish(c)),
+    "shear_tool": lambda t, c: (_stroke(t, c, [(20, 16), (30, 16)]), t.finish(c)),
+    "perspective_tool": lambda t, c: (_stroke(t, c, [(39.9, 31.9), (25, 20)]), t.finish(c)),
+    "transform3d": lambda t, c: (_stroke(t, c, [(20, 16), (32, 16)]), t.finish(c)),
+    "handle_transform": lambda t, c: (_stroke(t, c, [(10, 10)]),
+                                      _stroke(t, c, [(10, 10), (20, 18)]), t.finish(c)),
+    "flip_tool":  lambda t, c: (_ink(c, 0, 0, 12, 32, 200),
+                                t.begin(c, ToolEvent(20, 16)), t.end(c, ToolEvent(20, 16))),
+    "cage":       lambda t, c: (_ink(c, 8, 8, 16, 16, 200),
+                                [_stroke(t, c, [p]) for p in ((6, 6), (26, 6), (26, 26), (6, 26))],
+                                t.finish(c),
+                                _stroke(t, c, [(26, 26), (36, 30)]), t.finish(c)),
+    "warp":       lambda t, c: (_checker(c, 0, 0, 40, 32, 200, 5),
+                                _stroke(t, c, [(10, 16), (16, 16), (22, 16), (28, 16)])),
+    "move_layer": lambda t, c: _stroke(t, c, [(20, 16), (30, 22)]),
 }
 
 # Tools that legitimately write no pixels. Listed explicitly so that a tool
@@ -186,6 +206,9 @@ DRIVERS = {
 NON_PAINTING = {"eyedropper", "select_rect", "select_ellipse", "lasso",
                 "magic_wand", "move_selection", "zoom", "pan",
                 "select_row", "select_col", "polygon_lasso", "scissors",
+                # Crops resize the document through the controller; the tool
+                # itself only reports the rectangle.
+                "crop", "perspective_crop", "rotate_view",
                 "foreground_select", "quick_select", "select_color", "object_select",
                 # Moves existing pixels rather than laying down new colour;
                 # covered by test_movetools.py against an indexed layer.

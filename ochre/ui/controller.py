@@ -363,6 +363,73 @@ class Controller:
         self._after_structure_change()
         return True
 
+    def layer_at(self, x, y):
+        """The topmost visible layer with paint at (x, y), or None."""
+        ix, iy = int(x), int(y)
+        if not (0 <= ix < self.doc.width and 0 <= iy < self.doc.height):
+            return None
+        for layer in reversed(self.doc.layers()):
+            if not layer.effectively_visible():
+                continue
+            cell = self.doc.cells.get((layer.id, self.doc.frame.id))
+            if cell is None or cell.content_bbox is None:
+                continue
+            if cell.plane("rgba")[iy, ix, 3] > 0:
+                return layer
+        return None
+
+    def align_layer(self, how, layer=None):
+        """Align the layer's content to the selection, or to the canvas."""
+        from ..engine import transform
+        target = layer or self.active_layer
+        if target is None or target.is_group:
+            return False
+        cell = self.doc.cells.get((target.id, self.doc.frame.id))
+        if cell is None or cell.content_bbox is None:
+            return False
+        ref = self.doc.bounds if self.selection.selects_all() else self.selection.bbox
+        dx, dy = transform.align_offset(cell.content_bbox, ref, how)
+        if dx == 0 and dy == 0:
+            return False
+        return self._layer_pixels_op("Align layer",
+                                     lambda l: transform.offset_layer(self.doc, l, dx, dy), target)
+
+    def offset_layer(self, dx, dy, wrap=True, layer=None):
+        from ..engine import transform
+        return self._layer_pixels_op("Offset layer",
+                                     lambda l: transform.offset_layer(self.doc, l, dx, dy, wrap),
+                                     layer)
+
+    def rotate_layer(self, degrees, layer=None):
+        """Rotate a layer by any angle about the centre of its content."""
+        import math as _m
+        from ..engine import transform, warp
+        target = layer or self.active_layer
+        cell = None if target is None else self.doc.cells.get((target.id, self.doc.frame.id))
+        if cell is None or cell.content_bbox is None:
+            return False
+        c = cell.content_bbox
+        hm = warp.rotate_about(_m.radians(float(degrees)), c.x + c.w / 2.0, c.y + c.h / 2.0)
+        return self._layer_pixels_op("Rotate layer",
+                                     lambda l: transform.transform_layer(self.doc, l, hm), target)
+
+    def scale_layer(self, factor_x, factor_y=None, layer=None):
+        from ..engine import transform, warp
+        target = layer or self.active_layer
+        cell = None if target is None else self.doc.cells.get((target.id, self.doc.frame.id))
+        if cell is None or cell.content_bbox is None:
+            return False
+        c = cell.content_bbox
+        fy = factor_x if factor_y is None else factor_y
+        hm = warp.scale_about(float(factor_x), float(fy), c.x + c.w / 2.0, c.y + c.h / 2.0)
+        return self._layer_pixels_op("Scale layer",
+                                     lambda l: transform.transform_layer(self.doc, l, hm), target)
+
+    def rotate_image_by(self, degrees):
+        from ..engine import transform
+        return self._geometry("Rotate image",
+                              lambda: transform.rotate_image_by(self.doc, degrees))
+
     def move_layer_by(self, delta, layer=None):
         """Nudge a layer up (+1, towards the top) or down within its group."""
         target = layer or self.active_layer
@@ -860,7 +927,13 @@ class Controller:
         if tool is None:
             return None
         if self.tool is not None and self.tool.active:
-            self.tool.cancel(self._context())
+            # A pending transform, crop or text box is WORK: switching tools
+            # applies it, the way Photoshop and Paint.NET do, instead of
+            # silently discarding it.
+            if getattr(self.tool, "commit_on_switch", False) and hasattr(self.tool, "finish"):
+                self.finish_tool()
+            else:
+                self.tool.cancel(self._context())
         self.tool = tool
         self.tool_name = name
         self.emit("tool.changed", name=name, tool=tool)
@@ -929,6 +1002,13 @@ class Controller:
         # A tool that is collecting clicks (polygonal lasso, scissors) keeps
         # its context and its "before" snapshot across presses.
         continuing = self.tool.active and getattr(self.tool, "multi_click", False)
+        # Photoshop's Move tool with auto-select: the press first makes the
+        # topmost layer with paint under the pointer the active one.
+        if not continuing and getattr(self.tool, "picks_layer", False) \
+                and self.tool.option("auto_select", True):
+            picked = self.layer_at(x, y)
+            if picked is not None and picked is not self.active_layer:
+                self.set_active_layer(picked)
         if getattr(self.tool, "changes_selection", False) and not continuing:
             self._sel_before = (None if self.selection.mask is None
                                 else self.selection.mask.copy())
@@ -991,9 +1071,26 @@ class Controller:
         if tool is None or not tool.active or not hasattr(tool, "finish"):
             return None
         result = tool.finish(self._ctx)
-        tool.active = False
+        # The tool decides whether it is done: Enter on an open cage CLOSES
+        # it and the tool stays active for dragging, so forcing it inactive
+        # here broke that.
         self._sync_from_context()
         self._record_selection_change()
+        # Some tools finish by asking for a whole-document change they cannot
+        # make themselves: a crop resizes the canvas, which only the
+        # controller (display buffer, selection, history) can do.
+        if isinstance(result, dict):
+            if "crop" in result:
+                rect = result["crop"]
+                from ..engine import transform
+                self._geometry("Crop", lambda: transform.crop(self.doc, rect))
+            elif "perspective_crop" in result:
+                quad = result["perspective_crop"]
+                from ..engine import transform
+                self._geometry("Perspective Crop",
+                               lambda: transform.perspective_crop(self.doc, quad))
+        else:
+            self.invalidate()
         self.emit("history.changed")
         return result
 

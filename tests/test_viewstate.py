@@ -250,6 +250,37 @@ def main():
           (round(cx), round(cy)) == (640, 400),
           "-- centre landed at (%.1f, %.1f)" % (cx, cy))
 
+    # ---- view rotation -----------------------------------------------------
+    import math as _m
+    v = ViewState(400, 300)
+    v.fit(800, 600)
+    v.rotate_by(_m.radians(30), anchor=(400, 300))
+    worst = max(abs(a - b) for x, y in ((0, 0), (399, 299), (123.4, 56.7))
+                for a, b in zip(v.widget_to_doc(*v.doc_to_widget(x, y)), (x, y)))
+    check("a rotated view round-trips doc -> widget -> doc", worst < 1e-9, "-- %.2e" % worst)
+    before = v.widget_to_doc(400, 300)
+    v.rotate_by(_m.radians(20), anchor=(400, 300))
+    check("rotating keeps the document point under the anchor still",
+          all(abs(p - q) < 1e-9 for p, q in zip(before, v.widget_to_doc(400, 300))))
+    a, b, c, d, dx, dy = v.affine()
+    check("the affine matrix is the same map", all(abs(p - q) < 1e-9 for p, q in zip(
+        (a * 50 + c * 80 + dx, b * 50 + d * 80 + dy), v.doc_to_widget(50, 80))))
+    v.zoom_at(Fraction(2), (100, 100))
+    check("zoom_at still pins the point under the cursor when rotated",
+          all(abs(p - q) < 1e-9 for p, q in zip(v.doc_to_widget(*v.widget_to_doc(100, 100)),
+                                               (100, 100))))
+    v2 = ViewState(400, 300)
+    v2.rotation = _m.radians(90)
+    v2.fit(800, 600)
+    check("fit allows for the rotated bounding box", v2.zoom == Fraction(3, 2),
+          "-- got %s" % v2.zoom)
+    r = v.widget_to_doc_rect(0, 0, 800, 600)
+    corners = [v.widget_to_doc(x, y) for x, y in ((0, 0), (800, 0), (800, 600), (0, 600))]
+    check("the visible document rect covers every rotated corner",
+          all(r.x <= cx <= r.x1 and r.y <= cy <= r.y1 for cx, cy in corners))
+    v.set_rotation(0.0, anchor=(400, 300))
+    check("set_rotation(0) returns upright", not v.rotated)
+
     print("\nall viewstate checks passed")
 
 

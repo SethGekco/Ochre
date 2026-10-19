@@ -1063,6 +1063,39 @@ def main():
     check("...and Q again leaves it", not win2.quick_mask_action.isChecked()
           and all(l.name != "Quick Mask" for l in ctl2.doc.layers()))
 
+    # ---- rotate view, marching ants, transforms through the window ----------
+    ctl2.new_document(300, 200)
+    win2.canvas.bind()
+    for _ in range(5):
+        app.processEvents()
+    win2.canvas.rotate_view(90)
+    app.processEvents()
+    vp2 = win2.canvas.viewport()
+    cell2 = ctl2.doc.cell(ctl2.active_layer)
+    ctl2.set_tool("pencil", size=3)
+    ctl2.set_primary((255, 0, 0, 255))
+    wx, wy = win2.canvas.view.doc_to_widget(150, 60)
+    QTest.mouseClick(vp2, Qt.LeftButton, Qt.NoModifier, QPoint(int(wx), int(wy)))
+    app.processEvents()
+    ys, xs = np.nonzero(cell2.plane("rgba")[..., 1] == 0)
+    check("ON A ROTATED VIEW, A CLICK PAINTS THE PIXEL UNDER THE POINTER",
+          len(xs) and abs(xs.mean() - 150) < 2 and abs(ys.mean() - 60) < 2,
+          "-- painted at %s" % ((xs.mean(), ys.mean()) if len(xs) else None,))
+    ctl2.selection.select_ellipse((50, 40, 250, 160))
+    win2.canvas.repaint()
+    check("marching ants trace the real outline, not the bounding box",
+          win2.canvas._selection_path().elementCount() > 8)
+    ctl2.selection.select_all()
+    win2.canvas.rotate_view(None)
+    check("View > Reset Rotation returns upright", not win2.canvas.view.rotated)
+    view_items = [a.text().replace("&", "") for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&View").menu().actions() if a.text()]
+    check("the View menu offers rotation", any("Rotate View" in t for t in view_items))
+    layer_items = [a.text().replace("&", "") for a in next(
+        a for a in win2.menuBar().actions() if a.text() == "&Layers").menu().actions() if a.text()]
+    for entry in ("Rotate by Angle...", "Scale Layer...", "Offset...", "Align"):
+        check("Layers menu offers %s" % entry, entry in layer_items, "-- %s" % layer_items)
+
     # Explicit teardown while the QApplication is alive -- see
     # MainWindow.shutdown for the crash this prevents.
     import gc

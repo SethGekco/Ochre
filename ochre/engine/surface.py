@@ -420,6 +420,39 @@ class Surface:
 
     # ---- whole-surface operations ----------------------------------------
 
+    def tight_bbox(self):
+        """The bounds of what is actually painted, measured, without storing it.
+
+        content_bbox only ever grows -- it is a cheap upper bound kept for
+        history and compositing -- so after a move or an erase it can enclose
+        a lot of nothing. Anything that SHOWS bounds to a user (transform
+        handles, a layer's position) wants these instead.
+        """
+        box = self.content_bbox
+        if box is None:
+            # Never recorded -- but an addon (or a script) that wrote a plane
+            # directly leaves real pixels with no bounds, and a transform tool
+            # that then silently did nothing would be baffling. Scan instead.
+            if not any(self.planes.get(n) is not None for n in self.authoritative):
+                return None
+            box = self.bounds
+        box = box.clipped_to(self.width, self.height)
+        if box is None:
+            return None
+        if INDEX in self.authoritative and self.planes.get(INDEX) is not None:
+            clear = 0 if self.palette is None or self.palette.transparent is None \
+                else int(self.palette.transparent)
+            here = self.planes[INDEX][box.slice()] != clear
+        elif self.planes.get(RGBA) is not None:
+            here = self.planes[RGBA][box.slice()][..., 3] > 0
+        else:
+            return None
+        if not here.any():
+            return None
+        ys, xs = np.nonzero(here)
+        return Rect.from_points(box.x + int(xs.min()), box.y + int(ys.min()),
+                                box.x + int(xs.max()), box.y + int(ys.max()))
+
     def recompute_content_bbox(self):
         """Measure content_bbox from the data instead of trusting a guess.
 

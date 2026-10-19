@@ -19,7 +19,11 @@ from .select import (EllipseSelectTool, LassoTool, MagicWandTool,
                      RectSelectTool)
 from .shapetools import (EllipseTool, FreeformTool, GradientTool, LineTool,
                          RectangleTool, ShapeTool, TextTool)
-from .viewtools import PanTool, ViewRequest, ZoomTool
+from .viewtools import PanTool, RotateViewTool, ViewRequest, ZoomTool
+from .transform import (CageTool, CropTool, FlipTool, HandleTransformTool,
+                        MoveLayerTool, PerspectiveCropTool, PerspectiveTool,
+                        RotateTool, ScaleTool, ShearTool, Transform3DTool,
+                        TransformTool, WarpTool)
 from .select import (ForegroundSelectTool, ObjectSelectTool, PolygonLassoTool,
                      QuickSelectTool, ScissorsTool, SelectByColorTool,
                      SingleColumnTool, SingleRowTool)
@@ -35,13 +39,16 @@ BUILTIN = {
         LineTool, ShapeTool, RectangleTool, EllipseTool, FreeformTool,
         GradientTool,
         TextTool, CloneStampTool, MovePixelsTool, MoveSelectionTool,
-        ZoomTool, PanTool,
+        ZoomTool, PanTool, RotateViewTool,
         AirbrushTool, InkTool, MixerBrushTool, RecolorTool, BlurBrushTool,
         SharpenBrushTool, SmudgeTool, DodgeTool, BurnTool, SpongeTool,
         BackgroundEraserTool, MagicEraserTool, PatternStampTool,
         HistoryBrushTool, HealTool, RedEyeTool,
         SingleRowTool, SingleColumnTool, PolygonLassoTool, ScissorsTool,
         SelectByColorTool, QuickSelectTool, ObjectSelectTool, ForegroundSelectTool,
+        TransformTool, RotateTool, ScaleTool, ShearTool, PerspectiveTool, FlipTool,
+        Transform3DTool, HandleTransformTool, CageTool, WarpTool, CropTool,
+        PerspectiveCropTool, MoveLayerTool,
     )
 }
 

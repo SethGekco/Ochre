@@ -219,6 +219,10 @@ class MainWindow(QMainWindow):
         self._act(view_menu, "Zoom &Out", lambda: self.canvas.zoom_step(-1), "Ctrl+-")
         self._act(view_menu, "&Actual Size", self.canvas.zoom_actual, "Ctrl+0")
         self._act(view_menu, "&Fit to Window", self.canvas.zoom_fit, "Ctrl+Shift+0")
+        view_menu.addSeparator()
+        self._act(view_menu, "Rotate View &Left 15\u00b0", lambda: self.canvas.rotate_view(-15))
+        self._act(view_menu, "Rotate View &Right 15\u00b0", lambda: self.canvas.rotate_view(15))
+        self._act(view_menu, "Reset View &Rotation", lambda: self.canvas.rotate_view(None))
 
         # Effects and adjustments, grouped exactly as the registry says --
         # so an addon's effect appears in the right menu without this file
@@ -244,6 +248,7 @@ class MainWindow(QMainWindow):
         self._act(image_menu, "Rotate 90\u00b0 Counter-Clockwise",
                   lambda: self._geometry(self.ctl.rotate_image, 3), "Ctrl+G")
         self._act(image_menu, "Rotate &180\u00b0", lambda: self._geometry(self.ctl.rotate_image, 2), "Ctrl+J")
+        self._act(image_menu, "Rotate by &Angle...", self.do_rotate_image_by)
         image_menu.addSeparator()
         self._act(image_menu, "Bind &Grayscale Palette", self.do_bind_palette)
         self._act(image_menu, "Convert Layer to &Indexed...", self.do_convert_indexed)
@@ -291,6 +296,14 @@ class MainWindow(QMainWindow):
         self._act(layer_menu, "Flip &Horizontal", lambda: self.ctl.flip_layer(True))
         self._act(layer_menu, "Flip &Vertical", lambda: self.ctl.flip_layer(False))
         self._act(layer_menu, "&Rotate 180\u00b0", lambda: self.ctl.rotate_layer_180())
+        self._act(layer_menu, "Rotate by An&gle...", self.do_rotate_layer)
+        self._act(layer_menu, "&Scale Layer...", self.do_scale_layer)
+        self._act(layer_menu, "&Offset...", self.do_offset_layer)
+        align = layer_menu.addMenu("&Align")
+        for how, label in (("left", "&Left"), ("hcenter", "&Center"), ("right", "&Right"),
+                           ("top", "&Top"), ("vcenter", "&Middle"), ("bottom", "&Bottom")):
+            self._act(align, label, lambda _c=False, h=how: self._refresh_after(
+                self.ctl.align_layer, h))
         layer_menu.addSeparator()
         self._act(layer_menu, "&Properties...", self.do_layer_properties, "F4")
 
@@ -687,6 +700,46 @@ class MainWindow(QMainWindow):
                 self.open_file(url.toLocalFile())
                 event.acceptProposedAction()
                 return
+
+    def _refresh_after(self, fn, *args):
+        result = fn(*args)
+        self.canvas.refresh()
+        self.canvas.viewport().update()
+        return result
+
+    def _ask_number(self, title, label, default, lo, hi, decimals=1):
+        from PySide6.QtWidgets import QInputDialog
+        value, ok = QInputDialog.getDouble(self, title, label, default, lo, hi, decimals)
+        return value if ok else None
+
+    def do_rotate_image_by(self):
+        v = self._ask_number("Rotate Image", "Angle (degrees, clockwise):", 15.0, -360, 360)
+        if v is not None:
+            self._geometry(self.ctl.rotate_image_by, v)
+
+    def do_rotate_layer(self):
+        v = self._ask_number("Rotate Layer", "Angle (degrees, clockwise):", 15.0, -360, 360)
+        if v is not None:
+            self._refresh_after(self.ctl.rotate_layer, v)
+
+    def do_scale_layer(self):
+        v = self._ask_number("Scale Layer", "Scale (percent):", 100.0, 1, 10000)
+        if v is not None:
+            self._refresh_after(self.ctl.scale_layer, v / 100.0)
+
+    def do_offset_layer(self):
+        from PySide6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getText(self, "Offset Layer",
+                                        "Offset x, y in pixels (wraps around the edges):",
+                                        text="%d, %d" % (self.ctl.doc.width // 2,
+                                                         self.ctl.doc.height // 2))
+        if not ok:
+            return
+        try:
+            dx, dy = (int(v) for v in text.replace(" ", "").split(","))
+        except ValueError:
+            return
+        self._refresh_after(self.ctl.offset_layer, dx, dy, True)
 
     def _sel(self, fn, *args):
         fn(*args)

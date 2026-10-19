@@ -269,22 +269,25 @@ class CanvasView(QAbstractScrollArea):
         target = QRect(int(self.view.offset_x), int(self.view.offset_y),
                        max(1, int(round(cw))), max(1, int(round(ch))))
 
-        # Checkerboard under the image, so transparency reads as transparency
-        # rather than as whatever the background happens to be.
-        painter.save()
-        painter.setBrushOrigin(target.topLeft())
-        painter.fillRect(target.intersected(event.rect()), self._checker_brush())
-        painter.restore()
+        if self.view.rotated:
+            self._paint_rotated(painter)
+        else:
+            # Checkerboard under the image, so transparency reads as
+            # transparency rather than as whatever the background happens to be.
+            painter.save()
+            painter.setBrushOrigin(target.topLeft())
+            painter.fillRect(target.intersected(event.rect()), self._checker_brush())
+            painter.restore()
 
-        # Nearest-neighbour at or above 100%: a pixel artist must see exactly
-        # the pixels they painted. Smooth below, where interpolation prevents
-        # aliasing when minifying.
-        painter.setRenderHint(QPainter.SmoothPixmapTransform,
-                              not self.view.use_nearest)
-        painter.drawImage(target, self.surface.image)
+            # Nearest-neighbour at or above 100%: a pixel artist must see
+            # exactly the pixels they painted. Smooth below, where
+            # interpolation prevents aliasing when minifying.
+            painter.setRenderHint(QPainter.SmoothPixmapTransform,
+                                  not self.view.use_nearest)
+            painter.drawImage(target, self.surface.image)
 
-        if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
-            self._draw_pixel_grid(painter, event.rect(), target)
+            if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
+                self._draw_pixel_grid(painter, event.rect(), target)
         self._draw_selection(painter, target)
         self._draw_footprint(painter)
         self._draw_zoom_band(painter)
@@ -321,9 +324,17 @@ class CanvasView(QAbstractScrollArea):
         if request is None:
             return
         self.user_took_view()
-        from ochre.engine.tools.viewtools import (PAN, ZOOM_IN, ZOOM_OUT,
-                                                  ZOOM_RECT)
+        from ochre.engine.tools.viewtools import (PAN, ROTATE, ROTATE_RESET, ZOOM_IN,
+                                                  ZOOM_OUT, ZOOM_RECT)
         vp = self.viewport()
+        if request.kind == ROTATE:
+            self.view.rotate_by(request.angle, (vp.width() / 2.0, vp.height() / 2.0))
+            vp.update()
+            return
+        if request.kind == ROTATE_RESET:
+            self.view.set_rotation(0.0, (vp.width() / 2.0, vp.height() / 2.0))
+            vp.update()
+            return
         if request.kind == PAN:
             self.view.pan_by(request.dx * self.view.scale,
                              request.dy * self.view.scale)
@@ -546,19 +557,106 @@ class CanvasView(QAbstractScrollArea):
             if y0 <= wy <= y1:
                 painter.drawLine(x0, wy, x1, wy)
 
+    def _view_transform(self):
+        return QTransform(*self.view.affine())
+
+    def _paint_rotated(self, painter):
+        """The canvas turned by the view's rotation (Photoshop's Rotate View).
+
+        The image is drawn through the doc->widget transform; the checkerboard
+        is drawn in WIDGET space under the rotated outline, so its squares
+        stay screen-sized and upright instead of zooming and turning with the
+        image.
+        """
+        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtGui import QPolygonF
+        w, h = self.view.doc_w, self.view.doc_h
+        corners = QPolygonF([QPointF(*self.view.doc_to_widget(x, y))
+                             for x, y in ((0, 0), (w, 0), (w, h), (0, h))])
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._checker_brush())
+        painter.drawPolygon(corners)
+        painter.setTransform(self._view_transform())
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, not self.view.use_nearest)
+        painter.drawImage(QRectF(0, 0, w, h), self.surface.image, QRectF(0, 0, w, h))
+        if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
+            pen = QPen(QColor(*self.cfg.get("Canvas", "GridColour")))
+            pen.setCosmetic(True)
+            pen.setWidth(0)
+            painter.setPen(pen)
+            vis = self.view.visible_doc_rect(self.viewport().width(), self.viewport().height())
+            if vis is not None:
+                for col in range(vis.x, vis.x1 + 1):
+                    painter.drawLine(QPointF(col, vis.y), QPointF(col, vis.y1))
+                for row in range(vis.y, vis.y1 + 1):
+                    painter.drawLine(QPointF(vis.x, row), QPointF(vis.x1, row))
+        painter.restore()
+
+    def _selection_path(self):
+        """The selection outline as a QPainterPath in document space, cached
+        until the selection changes."""
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPainterPath
+        from ..engine.selection import outline_segments
+        sel = self.ctl.selection
+        key = (id(sel.mask), sel.mask.shape, int(sel.mask[0, 0]), int(sel.mask[-1, -1]),
+               sel.bbox)
+        if getattr(self, "_sel_key", None) == key:
+            return self._sel_path
+        path = QPainterPath()
+        for x0, y0, x1, y1 in outline_segments(sel.mask):
+            path.moveTo(QPointF(x0, y0))
+            path.lineTo(QPointF(x1, y1))
+        self._sel_key, self._sel_path = key, path
+        return path
+
     def _draw_selection(self, painter, target):
+        """Marching ants along the REAL outline of the selection.
+
+        This used to draw the selection's bounding rectangle, so an elliptical
+        or lasso selection showed as a box and there was no way to see what
+        was actually selected.
+        """
         sel = self.ctl.selection
         if sel is None or sel.selects_all():
+            if getattr(self, "_ants_timer", None) is not None:
+                self._ants_timer.stop()
             return
-        box = sel.bbox
-        if box.is_empty:
+        if sel.bbox.is_empty:
             return
-        x, y, w, h = self.view.doc_to_widget_rect(box)
-        pen = QPen(QColor(255, 255, 255, 200))
-        pen.setStyle(Qt.DashLine)
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.drawRect(int(x), int(y), int(w), int(h))
+        path = self._selection_path()
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setTransform(self._view_transform())
+        painter.setBrush(Qt.NoBrush)
+        white = QPen(QColor(255, 255, 255))
+        white.setCosmetic(True)
+        white.setWidth(0)
+        painter.setPen(white)
+        painter.drawPath(path)
+        black = QPen(QColor(0, 0, 0))
+        black.setCosmetic(True)
+        black.setWidth(0)
+        black.setDashPattern([4.0, 4.0])
+        black.setDashOffset(getattr(self, "_ants_phase", 0))
+        painter.setPen(black)
+        painter.drawPath(path)
+        painter.restore()
+        if getattr(self, "_ants_timer", None) is None:
+            self._ants_timer = QTimer(self)
+            self._ants_timer.timeout.connect(self._march)
+        if not self._ants_timer.isActive():
+            self._ants_timer.start(150)
+
+    def _march(self):
+        sel = self.ctl.selection
+        if sel is None or sel.selects_all() or not self.isVisible():
+            self._ants_timer.stop()
+            return
+        self._ants_phase = (getattr(self, "_ants_phase", 0) + 1) % 8
+        x, y, w, h = self.view.doc_to_widget_rect(sel.bbox)
+        self.viewport().update(QRect(int(x) - 2, int(y) - 2, int(w) + 5, int(h) + 5))
 
     # ---- input -----------------------------------------------------------
 
@@ -956,6 +1054,18 @@ class CanvasView(QAbstractScrollArea):
         else:
             self.view.zoom_out(anchor)
         self.zoom_changed.emit(format_zoom(self.view.zoom))
+        vp.update()
+
+    def rotate_view(self, degrees=None):
+        """Turn the view by `degrees`, or back to upright when None."""
+        import math as _m
+        vp = self.viewport()
+        anchor = (vp.width() / 2.0, vp.height() / 2.0)
+        if degrees is None:
+            self.view.set_rotation(0.0, anchor)
+        else:
+            self.view.rotate_by(_m.radians(degrees), anchor)
+        self.user_took_view()
         vp.update()
 
     def zoom_actual(self):

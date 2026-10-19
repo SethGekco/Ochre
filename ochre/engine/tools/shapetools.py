@@ -364,6 +364,9 @@ class TextTool(_DragTool):
 
     name = "text"
     label = "Text"
+    # Typed text is work: switching tools commits it rather than throwing
+    # it away, as Paint.NET does.
+    commit_on_switch = True
     options_spec = (O.Opt("font", O.FONT, "DejaVu Sans", "Font"),
                     O.Opt("size", O.INT, 24, "Size", 4, 1000, suffix=" px"),
                     O.Opt("align", O.CHOICE, "left", "Align", choices=("left", "center", "right")),
@@ -528,6 +531,9 @@ class TextTool(_DragTool):
         if restored is None:
             return drawn
         return restored if drawn is None else restored.union(drawn)
+
+    def finish(self, ctx):
+        return self.commit_text(ctx)
 
     def commit_text(self, ctx):
         """Finish the edit and push one history entry."""

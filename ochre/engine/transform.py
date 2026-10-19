@@ -19,6 +19,8 @@ Two rules are load-bearing and both come from the design document:
     between two palette entries is a third, unrelated colour.
 """
 
+import math
+
 import numpy as np
 from PIL import Image
 
@@ -320,3 +322,132 @@ def merge_down(doc, upper, lower, blends):
         composite_onto(b, a.plane(RGBA)[rect.slice()], rect, opcode, upper.opacity)
     doc.remove_layer(upper)
     return doc.bounds
+
+
+# ---- arbitrary geometry through the warp engine --------------------------------
+
+def _warp_plane(surface, name, plane, h, width, height, method):
+    from . import warp
+    box = (0, 0, int(width), int(height))
+    if name == INDEX:
+        idx = warp.warp_homography(plane, h, box, index=True)
+        fill = _transparent_for(surface)
+        return np.where(idx >= 0, idx, fill).astype(np.uint8)
+    if name == RGBA:
+        return warp.warp_homography(plane, h, box,
+                                    warp.NEAREST if method == NEAREST else warp.BILINEAR)
+    idx = warp.warp_homography(plane, h, box, index=True)
+    return np.where(idx >= 0, idx, 0).astype(np.uint8)
+
+
+def perspective_crop(doc, quad, method=BILINEAR):
+    """Straighten the quadrilateral `quad` (TL, TR, BR, BL) into a rectangle.
+
+    The output is as wide as the quad's longer horizontal side and as tall
+    as its longer vertical one, so nothing in it is shrunk. Every layer and
+    frame goes through the same homography.
+    """
+    from . import warp
+    q = np.asarray(quad, dtype=np.float64)
+    w = int(round(max(np.hypot(*(q[1] - q[0])), np.hypot(*(q[2] - q[3])))))
+    h = int(round(max(np.hypot(*(q[3] - q[0])), np.hypot(*(q[2] - q[1])))))
+    if w < 1 or h < 1:
+        return None
+    hm = warp.homography(q, [(0, 0), (w, 0), (w, h), (0, h)])
+    return _rebuild(doc, w, h,
+                    lambda s, n, p: _warp_plane(s, n, p, hm, w, h, method), lambda r: r)
+
+
+def rotate_image_by(doc, degrees, method=BILINEAR, expand=True):
+    """Rotate the whole image by any angle, growing the canvas to fit."""
+    from . import warp
+    rad = math.radians(float(degrees))
+    w, h = doc.width, doc.height
+    if expand:
+        c, s = abs(math.cos(rad)), abs(math.sin(rad))
+        nw, nh = int(math.ceil(w * c + h * s)), int(math.ceil(w * s + h * c))
+    else:
+        nw, nh = w, h
+    hm = warp.translate(nw / 2.0, nh / 2.0) @ warp.rotate_about(rad, 0, 0) @ \
+        warp.translate(-w / 2.0, -h / 2.0)
+    return _rebuild(doc, nw, nh,
+                    lambda s_, n, p: _warp_plane(s_, n, p, hm, nw, nh, method), lambda r: r)
+
+
+def transform_layer(doc, layer, hm, method=BILINEAR):
+    """Send one layer, every frame, through a homography. Canvas size kept."""
+    w, h = doc.width, doc.height
+
+    def fn(plane, name="rgba"):
+        return plane
+
+    touched = None
+    for frame in doc.frames:
+        doc.ensure_warm(frame)
+        surface = doc.cells.get((layer.id, frame.id))
+        if surface is None or surface.content_bbox is None:
+            continue
+        for name in surface.authoritative:
+            plane = surface.planes.get(name)
+            if plane is not None:
+                surface.planes[name] = _warp_plane(surface, name, plane, hm, w, h, method)
+        surface.recompute_content_bbox()
+        surface.refresh_derived()
+        surface.dirty.add(doc.bounds)
+        touched = doc.bounds
+    return touched
+
+
+def offset_layer(doc, layer, dx, dy, wrap=False):
+    """Shift a layer's pixels. With wrap, what leaves one edge enters the
+    opposite one -- GIMP's Layer > Offset, the classic way to check that a
+    texture tiles."""
+    dx, dy = int(dx), int(dy)
+
+    def shift(surface, name, plane):
+        if wrap:
+            return np.roll(np.roll(plane, dy, axis=0), dx, axis=1)
+        fill = _transparent_for(surface) if name == INDEX else 0
+        out = np.full_like(plane, fill)
+        h, w = plane.shape[:2]
+        src = Rect(0, 0, w, h)
+        dst = src.translated(dx, dy).intersect(src)
+        if dst is not None:
+            out[dst.slice()] = plane[dst.y - dy:dst.y1 - dy, dst.x - dx:dst.x1 - dx]
+        return out
+
+    touched = None
+    for frame in doc.frames:
+        doc.ensure_warm(frame)
+        surface = doc.cells.get((layer.id, frame.id))
+        if surface is None or surface.content_bbox is None:
+            continue
+        for name in surface.authoritative:
+            plane = surface.planes.get(name)
+            if plane is not None:
+                surface.planes[name] = shift(surface, name, plane)
+        surface.recompute_content_bbox()
+        surface.refresh_derived()
+        surface.dirty.add(doc.bounds)
+        touched = doc.bounds
+    return touched
+
+
+ALIGNMENTS = ("left", "hcenter", "right", "top", "vcenter", "bottom")
+
+
+def align_offset(content, ref, how):
+    """(dx, dy) that aligns a content rect to a reference rect."""
+    if how == "left":
+        return ref.x - content.x, 0
+    if how == "right":
+        return ref.x1 - content.x1, 0
+    if how == "hcenter":
+        return int(round((ref.x + ref.x1 - content.x - content.x1) / 2.0)), 0
+    if how == "top":
+        return 0, ref.y - content.y
+    if how == "bottom":
+        return 0, ref.y1 - content.y1
+    if how == "vcenter":
+        return 0, int(round((ref.y + ref.y1 - content.y - content.y1) / 2.0))
+    raise ValueError("unknown alignment %r" % (how,))

@@ -26,6 +26,8 @@ PAN = "pan"
 ZOOM_IN = "zoom_in"
 ZOOM_OUT = "zoom_out"
 ZOOM_RECT = "zoom_rect"
+ROTATE = "rotate"
+ROTATE_RESET = "rotate_reset"
 
 
 class ViewRequest:
@@ -36,10 +38,11 @@ class ViewRequest:
     current scale.
     """
 
-    __slots__ = ("kind", "dx", "dy", "anchor", "rect")
+    __slots__ = ("kind", "dx", "dy", "anchor", "rect", "angle")
 
-    def __init__(self, kind, dx=0.0, dy=0.0, anchor=None, rect=None):
+    def __init__(self, kind, dx=0.0, dy=0.0, anchor=None, rect=None, angle=0.0):
         self.kind = kind
+        self.angle = angle          # for ROTATE: radians to turn the view by
         self.dx = dx                # for PAN: document units to shift by
         self.dy = dy
         self.anchor = anchor        # for ZOOM_IN/OUT: doc point to pin
@@ -170,3 +173,58 @@ class ZoomTool(Tool):
         if w <= 0 or h <= 0:
             return None
         return (x, y, w, h)
+
+
+
+class RotateViewTool(Tool):
+    """Turn the canvas on screen, like turning paper on a desk -- Photoshop's
+    Rotate View (R). Changes nothing in the document. Shift snaps to 15
+    degrees; a click without dragging resets to upright.
+
+    Measured, like the pan tool, as the angle the GRABBED document point has
+    moved about the canvas centre, rather than accumulated between events:
+    rotating the view changes the very coordinates the events arrive in.
+    """
+
+    name = "rotate_view"
+    label = "Rotate View"
+    wants_stroke = False
+    affects = "view"
+    cursor = "pointing"
+
+    def on_begin(self, ctx, event):
+        self._grab = (event.x, event.y)
+        self._moved = False
+        self._centre = (ctx.doc.width / 2.0, ctx.doc.height / 2.0) if ctx is not None \
+            and getattr(ctx, "doc", None) is not None else (0.0, 0.0)
+        self._total = 0.0
+        return None
+
+    def on_motion(self, ctx, event):
+        import math
+        if getattr(self, "_grab", None) is None:
+            return None
+        cx, cy = self._centre
+        a0 = math.atan2(self._grab[1] - cy, self._grab[0] - cx)
+        a1 = math.atan2(event.y - cy, event.x - cx)
+        delta = math.atan2(math.sin(a1 - a0), math.cos(a1 - a0))
+        if abs(delta) > 1e-4:
+            self._moved = True
+        if event.has(1):
+            step = math.radians(15)
+            target = round((self._total + delta) / step) * step
+            delta = target - self._total
+        self._total += delta
+        return ViewRequest(ROTATE, angle=delta)
+
+    def on_end(self, ctx, event):
+        result = self.on_motion(ctx, event)
+        moved = getattr(self, "_moved", False)
+        self._grab = None
+        if not moved:
+            return ViewRequest(ROTATE_RESET)
+        return result
+
+    def on_cancel(self, ctx):
+        self._grab = None
+        return None
