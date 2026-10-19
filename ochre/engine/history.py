@@ -43,6 +43,7 @@ class HistoryStack:
     def __init__(self, settings=None):
         self.entries = []
         self.position = -1          # index of the last APPLIED entry
+        self.evicted = 0            # entries dropped off the old end, ever
         self._nbytes = 0
         self._group = None
         self._group_depth = 0
@@ -60,6 +61,17 @@ class HistoryStack:
         return default if value is None else value
 
     # ---- state -----------------------------------------------------------
+
+    def marker(self):
+        """An opaque token for "the document as it is now".
+
+        Compared later to tell whether anything changed: the entry object at
+        the current position (identity survives undo, which only swaps the
+        command inside it), plus how many entries have fallen off the old
+        end -- position -1 after an eviction is NOT the original state.
+        """
+        entry = self.entries[self.position] if self.position >= 0 else None
+        return (id(entry) if entry is not None else None, entry, self.evicted)
 
     @property
     def can_undo(self):
@@ -80,6 +92,7 @@ class HistoryStack:
         return [e.label for e in self.entries]
 
     def clear(self):
+        self.evicted += len(self.entries)
         self.entries = []
         self.position = -1
         self._nbytes = 0
@@ -124,11 +137,13 @@ class HistoryStack:
             self._nbytes -= self.entries[0].nbytes()
             del self.entries[0]
             self.position -= 1
+            self.evicted += 1
         while (self._nbytes > self.max_bytes
                and len(self.entries) > self.min_entries):
             self._nbytes -= self.entries[0].nbytes()
             del self.entries[0]
             self.position -= 1
+            self.evicted += 1
         self.position = max(self.position, -1)
 
     # ---- grouping --------------------------------------------------------

@@ -220,3 +220,39 @@ class LayerPropertiesDialog(QDialog):
     def accept(self):
         self.apply()
         super().accept()
+
+
+class NewImageDialog(QDialog):
+    """File > New. Prefilled with the last document's size."""
+
+    def __init__(self, controller, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("New Image")
+        last = controller.session.last_size() if controller.session else None
+        if last is None and controller.doc is not None:
+            last = (controller.doc.width, controller.doc.height)
+        w0, h0 = last or (800, 600)
+        form = QFormLayout()
+        self.width = QSpinBox()
+        self.width.setRange(1, 32768)
+        self.width.setValue(w0)
+        self.height = QSpinBox()
+        self.height.setRange(1, 32768)
+        self.height.setValue(h0)
+        self.background = QComboBox()
+        for label, value in (("White", (255, 255, 255, 255)),
+                             ("Transparent", None),
+                             ("Black", (0, 0, 0, 255))):
+            self.background.addItem(label, value)
+        form.addRow("Width", self.width)
+        form.addRow("Height", self.height)
+        form.addRow("Background", self.background)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def result(self):
+        return (self.width.value(), self.height.value(), self.background.currentData())

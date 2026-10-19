@@ -75,7 +75,9 @@ class MainWindow(QMainWindow):
             return
         bus.subscribe("layers.changed", self._on_layers)
         bus.subscribe("layer.active", lambda **k: self.layers_dock.sync())
-        bus.subscribe("history.changed", lambda **k: self.history_dock.sync())
+        bus.subscribe("history.changed", lambda **k: (self.history_dock.sync(),
+                                                       self._update_title()))
+        bus.subscribe("document.saved", lambda **k: self._update_title())
         bus.subscribe("colour.changed", lambda **k: self.colors_dock.sync())
         bus.subscribe("palette.changed", lambda **k: self.palette_dock.sync())
         bus.subscribe("tool.changed", lambda **k: self._on_tool())
@@ -182,8 +184,8 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "&Invert Selection", self.do_invert, "Ctrl+I")
 
         view_menu = bar.addMenu("&View")
-        self._act(view_menu, "Zoom &In", self.canvas.view.zoom_in, "Ctrl++")
-        self._act(view_menu, "Zoom &Out", self.canvas.view.zoom_out, "Ctrl+-")
+        self._act(view_menu, "Zoom &In", lambda: self.canvas.zoom_step(+1), "Ctrl++")
+        self._act(view_menu, "Zoom &Out", lambda: self.canvas.zoom_step(-1), "Ctrl+-")
         self._act(view_menu, "&Actual Size", self.canvas.zoom_actual, "Ctrl+0")
         self._act(view_menu, "&Fit to Window", self.canvas.zoom_fit, "Ctrl+Shift+0")
 
@@ -262,8 +264,47 @@ class MainWindow(QMainWindow):
 
     # ---- commands --------------------------------------------------------
 
+    def confirm_discard(self, action="continue"):
+        """Ask before throwing away REAL unsaved work. True means go ahead.
+
+        Never asks about a document nobody touched: an ignored untitled
+        canvas, or one undone back to its last save, closes silently. This is
+        the only prompt of its kind, and every path that replaces the
+        document goes through it -- before it existed, opening a file or
+        quitting discarded edits without a word.
+        """
+        if not self.ctl.is_modified():
+            return True
+        name = os.path.basename(self.ctl.path) if self.ctl.path else "Untitled"
+        box = QMessageBox(self)
+        box.setWindowTitle("Unsaved changes")
+        box.setText("Save changes to %s before you %s?" % (name, action))
+        box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Save)
+        choice = box.exec()
+        if choice == QMessageBox.Save:
+            before = self.ctl.path
+            self.do_save()
+            # Cancelling the Save As dialog, or a failed save, must not
+            # then discard the work it was trying to protect.
+            return not self.ctl.is_modified() or (before is None and self.ctl.path is not None)
+        return choice == QMessageBox.Discard
+
+    def closeEvent(self, event):
+        if self.confirm_discard("closing"):
+            event.accept()
+        else:
+            event.ignore()
+
     def do_new(self):
-        self.ctl.new_document()
+        from .dialogs import NewImageDialog
+        if not self.confirm_discard("starting a new image"):
+            return
+        dlg = NewImageDialog(self.ctl, self)
+        if not dlg.exec():
+            return
+        w, h, background = dlg.result()
+        self.ctl.new_document(w, h, background=background)
         self.canvas.bind()
         self._sync_all()
 
@@ -484,6 +525,8 @@ class MainWindow(QMainWindow):
         return landed
 
     def do_paste_new_image(self):
+        if not self.confirm_discard("pasting into a new image"):
+            return
         foreign = self._system_clipboard_get()
         clip = foreign or self.ctl.clip
         if clip is None:
@@ -547,6 +590,8 @@ class MainWindow(QMainWindow):
 
     def open_file(self, path):
         """Open a path with error reporting. Shared by Open, Recent and drop."""
+        if not self.confirm_discard("opening another file"):
+            return False
         try:
             self.ctl.open_path(path)
         except Exception as exc:                            # noqa: BLE001

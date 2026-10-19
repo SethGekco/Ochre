@@ -232,8 +232,13 @@ class EffectDialog(QDialog):
         canvas = getattr(self.parent(), "canvas", None)
         if canvas is None:
             return self.ctl.doc.bounds
-        visible = canvas.view.visible_doc_rect(canvas.viewport().width(),
-                                               canvas.viewport().height())
+        vp = canvas.viewport()
+        # A canvas that is not on screen, or whose viewport is still being
+        # laid out, has no visible region to restrict to -- preview it all
+        # rather than a sliver that happens to match a placeholder size.
+        if not canvas.isVisible() or vp.width() < 64 or vp.height() < 64:
+            return self.ctl.doc.bounds
+        visible = canvas.view.visible_doc_rect(vp.width(), vp.height())
         if visible is None:
             return self.ctl.doc.bounds
         return visible.inflated(self.effect.halo).clipped_to(

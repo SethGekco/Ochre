@@ -96,6 +96,7 @@ class CanvasView(QAbstractScrollArea):
         self._panning = False
         self._pan_origin = QPoint()
         self._view_dragging = False
+        self._needs_fit = True
         self._drawing = False
         self._checker = None
         # Where the pointer is, in document coordinates, or None when it has
@@ -143,8 +144,15 @@ class CanvasView(QAbstractScrollArea):
             self.view.offset_x, self.view.offset_y = ox, oy
         else:
             self.view = ViewState(doc.width, doc.height)
-            self.view.fit(max(1, self.viewport().width()),
-                          max(1, self.viewport().height()), margin=16)
+            # Fit-to-window is a MODE, not a one-off calculation. bind() runs
+            # during window construction, before the window is shown, when
+            # the viewport is a pixel or two wide -- fitting then clamped the
+            # zoom to its 1% floor, drew an 800x600 canvas as an 8x6 speck,
+            # and mapped every click thousands of pixels off the document.
+            # So fitting waits for a viewport worth fitting to, and keeps
+            # re-fitting as the window settles until the user zooms or pans.
+            self._needs_fit = True
+            self._fit_if_real()
         self.ctl.invalidate()
         self.refresh()
         self.zoom_changed.emit(format_zoom(self.view.zoom))
@@ -310,6 +318,7 @@ class CanvasView(QAbstractScrollArea):
         """
         if request is None:
             return
+        self.user_took_view()
         from ochre.engine.tools.viewtools import (PAN, ZOOM_IN, ZOOM_OUT,
                                                   ZOOM_RECT)
         vp = self.viewport()
@@ -521,6 +530,7 @@ class CanvasView(QAbstractScrollArea):
             self.commit_text()
 
         if event.button() == Qt.MiddleButton:
+            self.user_took_view()
             self._panning = True
             self._pan_origin = event.position().toPoint()
             self.setCursor(Qt.ClosedHandCursor)
@@ -589,6 +599,7 @@ class CanvasView(QAbstractScrollArea):
                 self._start_caret()
 
     def wheelEvent(self, event):
+        self.user_took_view()
         if event.modifiers() & Qt.ControlModifier:
             pos = event.position()
             anchor = (pos.x(), pos.y())
@@ -748,22 +759,66 @@ class CanvasView(QAbstractScrollArea):
         # antialiasing off still leaves the pen straddling the boundary.
         self.viewport().update(area.adjusted(-2, -2, 2, 2))
 
+    # Below this the viewport is still being laid out, not a real view.
+    FIT_MIN_VIEWPORT = 64
+
+    def _fit_if_real(self):
+        vp = self.viewport()
+        if not getattr(self, "_needs_fit", False):
+            return False
+        if vp.width() < self.FIT_MIN_VIEWPORT or vp.height() < self.FIT_MIN_VIEWPORT:
+            return False
+        self.view.fit(vp.width(), vp.height(), margin=16)
+        self.zoom_changed.emit(format_zoom(self.view.zoom))
+        vp.update()
+        return True
+
+    def user_took_view(self):
+        """The user zoomed or panned: stop auto-fitting on resize."""
+        self._needs_fit = False
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._fit_if_real()
         self.viewport().update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_if_real()
 
     # ---- view commands ---------------------------------------------------
 
     def zoom_to(self, value):
+        self.user_took_view()
         self.view.zoom = Fraction(value)
         self.zoom_changed.emit(format_zoom(self.view.zoom))
         self.viewport().update()
 
     def zoom_fit(self):
-        self.view.fit(max(1, self.viewport().width()),
-                      max(1, self.viewport().height()), margin=16)
+        # Explicitly asking for fit puts the view back into fit mode.
+        self._needs_fit = True
+        if not self._fit_if_real():
+            self.view.fit(max(1, self.viewport().width()),
+                          max(1, self.viewport().height()), margin=16)
+            self.zoom_changed.emit(format_zoom(self.view.zoom))
+            self.viewport().update()
+
+    def zoom_step(self, direction):
+        """Zoom in (+1) or out (-1) about the centre of the view.
+
+        A method on the canvas, not a menu binding to view.zoom_in: bind()
+        REPLACES self.view, so a menu action bound to the old ViewState's
+        method kept zooming a view nobody could see.
+        """
+        self.user_took_view()
+        vp = self.viewport()
+        anchor = (vp.width() / 2.0, vp.height() / 2.0)
+        if direction > 0:
+            self.view.zoom_in(anchor)
+        else:
+            self.view.zoom_out(anchor)
         self.zoom_changed.emit(format_zoom(self.view.zoom))
-        self.viewport().update()
+        vp.update()
 
     def zoom_actual(self):
         self.zoom_to(Fraction(1, 1))

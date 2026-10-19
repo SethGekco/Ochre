@@ -19,6 +19,7 @@ Run: QT_QPA_PLATFORM=offscreen python3 tests/test_ui_smoke.py
 import math
 import os
 import sys
+import tempfile
 from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -760,6 +761,144 @@ def main():
           win.canvas.surface.array is ctl.display and ctl.display.shape[:2] == size_before[::-1])
     win.canvas.repaint()
     check("painting after a size change does not crash", True)
+
+    # ---- launch as a USER launches: no hand-resizing, real event routing ----
+    # Every check above resizes the canvas by hand and drives handlers
+    # directly. That is how the editor shipped with an 800x600 canvas drawn
+    # at 1% zoom -- bind() fitted to a viewport that was a pixel wide before
+    # the window was shown -- and every click landing off the document. This
+    # block does what a user does: construct, show, and drag with QTest,
+    # which goes through Qt's real delivery to the viewport.
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    from ochre.ui.session import Session
+
+    state2 = tempfile.mkdtemp()
+    ctl2 = Controller(Settings(DATA), DATA, EventBus(), addon_dirs=[], state_dir=state2)
+    win2 = MainWindow(ctl2, UiSettings(DATA))
+    win2.resize(1100, 760)
+    win2.show()
+    for _ in range(5):
+        app.processEvents()
+    vp2 = win2.canvas.viewport()
+    check("A FRESHLY LAUNCHED WINDOW FITS THE CANVAS TO A REAL VIEWPORT",
+          win2.canvas.view.zoom > Fraction(1, 20),
+          "-- zoom is %s; at the 1%% floor the canvas is an invisible speck"
+          % win2.canvas.view.zoom)
+    x0, y0 = win2.canvas.view.doc_to_widget(0, 0)
+    x1, y1 = win2.canvas.view.doc_to_widget(ctl2.doc.width, ctl2.doc.height)
+    check("...and the whole canvas is on screen",
+          x0 >= 0 and y0 >= 0 and x1 <= vp2.width() + 1 and y1 <= vp2.height() + 1,
+          "-- canvas spans (%.0f,%.0f)-(%.0f,%.0f) in a %dx%d viewport"
+          % (x0, y0, x1, y1, vp2.width(), vp2.height()))
+
+    cell2 = ctl2.doc.cell(ctl2.active_layer)
+    before2 = cell2.plane("rgba").copy()
+    cx, cy = int((x0 + x1) / 2), int((y0 + y1) / 2)
+    QTest.mousePress(vp2, Qt.LeftButton, Qt.NoModifier, QPoint(cx, cy))
+    for i in range(1, 12):
+        QTest.mouseMove(vp2, QPoint(cx + 6 * i, cy + 3 * i))
+        app.processEvents()
+    QTest.mouseRelease(vp2, Qt.LeftButton, Qt.NoModifier, QPoint(cx + 66, cy + 33))
+    app.processEvents()
+    changed = int((before2 != cell2.plane("rgba")).any(-1).sum())
+    check("A REAL MOUSE DRAG ON A FRESH LAUNCH PAINTS", changed > 0,
+          "-- %d pixels changed" % changed)
+    check("...and is undoable", ctl2.history.can_undo)
+
+    # Resizing the window keeps fitting until the user zooms...
+    z_before = win2.canvas.view.zoom
+    win2.resize(700, 500)
+    for _ in range(3):
+        app.processEvents()
+    check("before the user zooms, resizing re-fits", win2.canvas.view.zoom != z_before
+          or win2.canvas.view.zoom <= z_before)
+    # ...and stops once they do.
+    win2.canvas.zoom_step(+1)
+    z_mine = win2.canvas.view.zoom
+    win2.resize(1000, 700)
+    for _ in range(3):
+        app.processEvents()
+    check("after the user zooms, a resize leaves their zoom alone",
+          win2.canvas.view.zoom == z_mine)
+
+    # View > Zoom In must act on the CURRENT view, not the one that existed
+    # when the menu was built (bind() replaces it).
+    win2.canvas.bind()
+    for _ in range(3):
+        app.processEvents()
+    z0 = win2.canvas.view.zoom
+    for action in win2.menuBar().actions():
+        if action.text() == "&View":
+            for a in action.menu().actions():
+                if a.text().replace("&", "") == "Zoom In":
+                    a.trigger()
+    check("VIEW > ZOOM IN ZOOMS THE VIEW YOU CAN SEE", win2.canvas.view.zoom > z0,
+          "-- %s -> %s" % (z0, win2.canvas.view.zoom))
+
+    # ---- unsaved-work tracking: nag only about real work -----------------
+    ctl3 = Controller(Settings(DATA), DATA, EventBus(), addon_dirs=[], state_dir=tempfile.mkdtemp())
+    ctl3.new_document(64, 48)
+    check("AN UNTOUCHED UNTITLED DOCUMENT IS NOT MODIFIED", not ctl3.is_modified(),
+          "-- ignoring a fresh canvas must never trigger a save prompt")
+    ctl3.set_tool("pencil")
+    ctl3.begin_stroke(5, 5)
+    ctl3.end_stroke(5, 5)
+    check("painting makes it modified", ctl3.is_modified())
+    ctl3.undo()
+    check("undoing back to the start makes it clean again", not ctl3.is_modified())
+    ctl3.redo()
+    out3 = os.path.join(tempfile.mkdtemp(), "x.ochre")
+    ctl3.save_path(out3)
+    check("saving makes it clean", not ctl3.is_modified())
+    ctl3.begin_stroke(9, 9)
+    ctl3.end_stroke(9, 9)
+    check("an edit after saving is modified again", ctl3.is_modified())
+    ctl3.undo()
+    check("...and undoing back to the SAVE POINT is clean", not ctl3.is_modified())
+    ctl3.set_tool("text")
+    ctl3.begin_stroke(10, 10)
+    ctl3.end_stroke(10, 10)
+    ctl3.tool.insert(ctl3._context(), "hi")
+    check("uncommitted typed text counts as unsaved work", ctl3.is_modified())
+    ctl3.cancel_stroke()
+
+    # The window asks only when there is something to lose.
+    asked = []
+    from PySide6.QtWidgets import QMessageBox
+    real_exec = QMessageBox.exec
+    QMessageBox.exec = lambda self: (asked.append(self.text()), QMessageBox.Discard)[1]
+    try:
+        ctl2.undo()
+        while ctl2.history.can_undo:
+            ctl2.undo()
+        check("closing an untouched document does not prompt",
+              win2.confirm_discard("closing") and not asked)
+        ctl2.set_tool("pencil")
+        ctl2.begin_stroke(3, 3)
+        ctl2.end_stroke(3, 3)
+        check("closing with real changes DOES prompt",
+              win2.confirm_discard("closing") and len(asked) == 1, "-- prompts: %s" % asked)
+    finally:
+        QMessageBox.exec = real_exec
+
+    # ---- the last document's size is remembered between runs -------------
+    ses = Session(state2)
+    check("the session remembers the last document's size",
+          ses.last_size() == (ctl2.doc.width, ctl2.doc.height))
+    ctl2.resize_canvas(321, 123)
+    check("...including after a canvas resize", Session(state2).last_size() == (321, 123))
+    ctl4 = Controller(Settings(DATA), DATA, EventBus(), addon_dirs=[], state_dir=state2)
+    ctl4.new_document()
+    check("A NEW LAUNCH STARTS AT THE LAST DOCUMENT'S SIZE",
+          (ctl4.doc.width, ctl4.doc.height) == (321, 123),
+          "-- got %dx%d" % (ctl4.doc.width, ctl4.doc.height))
+    ctl5 = Controller(Settings(DATA), DATA, EventBus(), addon_dirs=[], state_dir=tempfile.mkdtemp())
+    ctl5.new_document()
+    check("with no history it falls back to the INI default",
+          (ctl5.doc.width, ctl5.doc.height) == (800, 600))
+    win2.close() if not ctl2.is_modified() else None
+    win2.hide()
 
     print("\nall UI smoke checks passed")
 

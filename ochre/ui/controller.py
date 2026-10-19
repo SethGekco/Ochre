@@ -57,6 +57,10 @@ class Controller:
         self.selection = None
         self.display = None
         self.clip = None
+        from .session import Session
+        self.state_dir = state_dir
+        self.session = Session(state_dir)
+        self._saved_marker = None
         self.path = None
         self.dirty_since_save = False
         self.active_layer = None
@@ -77,6 +81,12 @@ class Controller:
     # ---- document lifecycle ---------------------------------------------
 
     def new_document(self, width=None, height=None, background=(255, 255, 255, 255)):
+        # The size you were last working at, when there is one. A fresh launch
+        # opening at whatever the INI says is a small daily annoyance for
+        # anyone who works at one size -- sprites especially.
+        last = self.session.last_size() if self.session else None
+        if width is None and height is None and last is not None:
+            width, height = last
         width = width or self.settings.get("Canvas", "DefaultWidth") or 800
         height = height or self.settings.get("Canvas", "DefaultHeight") or 600
         doc = Document(width, height, settings=self.settings)
@@ -183,6 +193,7 @@ class Controller:
                 provider.save(self.doc, target, self.addons_host(owner), {})
                 self.path = target
                 self.dirty_since_save = False
+                self._saved_marker = self.history.marker()
                 self.emit("document.saved", path=target)
                 return target
             if guard.failed:
@@ -193,6 +204,7 @@ class Controller:
         else:
             export_flat(self.doc, target)
         self.dirty_since_save = False
+        self._saved_marker = self.history.marker()
         self.emit("document.saved", path=target)
         return target
 
@@ -205,6 +217,9 @@ class Controller:
         self.display = np.zeros((doc.height, doc.width, 4), dtype=np.uint8)
         self.path = path
         self.dirty_since_save = False
+        self._saved_marker = self.history.marker()
+        if self.session is not None:
+            self.session.remember_size(doc.width, doc.height)
         leaves = doc.layers()
         self.active_layer = leaves[-1] if leaves else None
         self._pending = [doc.bounds]
@@ -212,10 +227,30 @@ class Controller:
             self.set_tool(self.tool_name)
         self.emit("document.opened", document=doc, path=path)
 
+    def is_modified(self):
+        """True only when there is real unsaved work.
+
+        Measured against history rather than a dirty flag: an untouched
+        untitled canvas is not modified, and undoing back to the point of the
+        last save is not modified either. That is what lets the editor never
+        nag about a document nobody touched -- while still not silently
+        throwing away a document somebody did. An open tool session counts:
+        typed text that has not been committed yet is work.
+        """
+        if self.doc is None:
+            return False
+        if self.tool is not None and self.tool.active:
+            return True
+        current = self.history.marker()
+        saved = self._saved_marker
+        if saved is None:
+            return current[0] is not None or current[2] != 0
+        return current[1] is not saved[1] or current[2] != saved[2]
+
     @property
     def title(self):
         name = os.path.basename(self.path) if self.path else "Untitled"
-        return ("*" if self.dirty_since_save else "") + name
+        return ("*" if self.is_modified() else "") + name
 
     def addons_host(self, addon_id):
         """A Host bound to one addon, for calls made after registration."""
@@ -568,6 +603,8 @@ class Controller:
         self.compositor.invalidate()
         self._pending = [self.doc.bounds]
         self.dirty_since_save = True
+        if self.session is not None:
+            self.session.remember_size(self.doc.width, self.doc.height)
         self.emit("document.resized", width=self.doc.width, height=self.doc.height)
         self.emit("layers.changed")
         self.emit("selection.changed")
