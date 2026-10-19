@@ -87,6 +87,25 @@ def _ink(ctx, x, y, w, h, index):
     ctx.cell.refresh_derived()
 
 
+def _checker(ctx, x, y, w, h, a, b):
+    """Scaffolding: texture, for tools that move or transfer detail."""
+    yy, xx = np.mgrid[0:h, 0:w]
+    ctx.cell.plane("index")[y:y + h, x:x + w] = np.where((xx // 2 + yy // 2) % 2, a, b)
+    ctx.cell.refresh_derived()
+
+
+def _stroke(t, c, pts, mods=0):
+    t.begin(c, ToolEvent(pts[0][0], pts[0][1], 1.0, mods))
+    for x, y in pts[1:]:
+        t.motion(c, ToolEvent(x, y, 1.0, mods))
+    return t.end(c, ToolEvent(pts[-1][0], pts[-1][1], 1.0, mods))
+
+
+def _set(ctx, **kw):
+    for k, v in kw.items():
+        setattr(ctx, k, v)
+
+
 # How to drive each tool that paints. Anything in the registry not listed
 # here is checked to be deliberately exempt rather than quietly skipped.
 DRIVERS = {
@@ -129,6 +148,37 @@ DRIVERS = {
                               t.motion(c, ToolEvent(34, 28)),
                               t.end(c, ToolEvent(34, 28))),
     "text":     lambda t, c: (t.begin(c, ToolEvent(2, 10)), t.commit_text(c)),
+    # ---- retouch family: each needs content it can actually change -------
+    # An airbrush is used by HOLDING it: ticks while the pointer rests are
+    # what build coverage past an index's 50% threshold. A quick swipe at
+    # 12% flow legitimately changes no index -- just as it paints only a
+    # faint wash on an RGB layer.
+    "airbrush": lambda t, c: (t.begin(c, ToolEvent(20, 16)),
+                              [t.tick(c) for _ in range(12)],
+                              t.end(c, ToolEvent(20, 16))),
+    "ink":      lambda t, c: _stroke(t, c, [(4, 4), (34, 28)]),
+    "mixer":    lambda t, c: _stroke(t, c, [(4, 4), (34, 28)]),
+    "recolor":  lambda t, c: (_set(c, secondary=tuple(int(v) for v in c.doc.palette.entries[5])),
+                              _stroke(t, c, [(6, 6), (30, 24)])),
+    "blur":     lambda t, c: (_checker(c, 0, 0, 40, 16, 200, 5),
+                              _stroke(t, c, [(4, 12), (36, 12)])),
+    "sharpen":  lambda t, c: (_ink(c, 0, 0, 20, 32, 200),
+                              _stroke(t, c, [(20, 4), (20, 28)])),
+    "smudge":   lambda t, c: (_ink(c, 0, 0, 16, 32, 200),
+                              _stroke(t, c, [(10, 16), (16, 16), (24, 16), (32, 16)])),
+    "dodge":    lambda t, c: _stroke(t, c, [(6, 6), (30, 24)]),
+    "burn":     lambda t, c: (_ink(c, 0, 0, 40, 32, 120), _stroke(t, c, [(6, 6), (30, 24)])),
+    "sponge":   lambda t, c: (_ink(c, 0, 0, 40, 32, 200), _stroke(t, c, [(6, 6), (30, 24)])),
+    "background_eraser": lambda t, c: _stroke(t, c, [(6, 6), (30, 24)]),
+    "magic_eraser": lambda t, c: (t.begin(c, ToolEvent(20, 16)), t.end(c, ToolEvent(20, 16))),
+    "pattern_stamp": lambda t, c: _stroke(t, c, [(6, 6), (30, 24)]),
+    "history_brush": lambda t, c: (_set(c, history_source=lambda lid, fid: np.full(
+                                       (c.doc.height, c.doc.width, 4), (200, 120, 40, 255), np.uint8)),
+                                   _stroke(t, c, [(6, 6), (30, 24)])),
+    "heal":     lambda t, c: (_checker(c, 0, 0, 16, 16, 200, 5),
+                              _stroke(t, c, [(8, 8)], mods=2),
+                              _stroke(t, c, [(28, 22), (30, 24)])),
+    "red_eye":  lambda t, c: (_ink(c, 0, 0, 40, 32, 200), _stroke(t, c, [(6, 6), (30, 24)])),
 }
 
 # Tools that legitimately write no pixels. Listed explicitly so that a tool

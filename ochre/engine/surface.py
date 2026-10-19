@@ -282,6 +282,45 @@ class Surface:
         self._after_write(r, INDEX)
         return r
 
+    def lerp_masked(self, rect, src, mask=None):
+        """Move pixels TOWARD src by coverage. The write a filter brush needs.
+
+        apply_masked composites src OVER dst, which can never make a pixel
+        more transparent or take away colour that is there. A blur, a dodge,
+        a smudge or a background eraser has to be able to move a pixel to
+        any value at all, so this is a straight per-channel lerp instead.
+
+        On an index-locked surface the result lands as indices: the colour is
+        matched into the palette (exactly where it can be), transparent
+        results take the palette's transparent entry, and coverage is a
+        threshold for the same reason as everywhere else -- an index cannot
+        be half one value and half another.
+        """
+        r = rect.clipped_to(self.width, self.height)
+        if r is None:
+            return None
+        src = np.asarray(src, dtype=np.uint8)
+        if src.ndim == 1:
+            src = np.broadcast_to(src, (r.h, r.w, src.shape[-1]))
+        if self.index_locked:
+            from .quantize import index_for
+            dst = self.plane(INDEX)[r.slice()]
+            idx = np.asarray(index_for(src[..., :3], self.palette), dtype=np.uint8)
+            clear = 0 if self.palette is None or self.palette.transparent is None \
+                else int(self.palette.transparent)
+            idx = np.where(src[..., 3] >= 128, idx, clear).astype(np.uint8)
+            write = np.ones(dst.shape, dtype=bool) if mask is None \
+                else (np.asarray(mask, dtype=np.uint8) >= 128)
+            if not write.any():
+                return None
+            dst[write] = idx[write]
+            self._after_write(r, INDEX)
+            return r
+        dst = self.plane(RGBA)[r.slice()]
+        dst[...] = src if mask is None else apply_coverage(dst, src, mask)
+        self._after_write(r, RGBA)
+        return r
+
     def erase_masked(self, rect, mask=None):
         """Remove coverage. The counterpart to apply_masked, and its equal.
 

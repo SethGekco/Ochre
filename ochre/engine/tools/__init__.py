@@ -20,6 +20,10 @@ from .select import (EllipseSelectTool, LassoTool, MagicWandTool,
 from .shapetools import (EllipseTool, FreeformTool, GradientTool, LineTool,
                          RectangleTool, ShapeTool, TextTool)
 from .viewtools import PanTool, ViewRequest, ZoomTool
+from .retouch import (AirbrushTool, BackgroundEraserTool, BlurBrushTool, BurnTool,
+                      DodgeTool, HealTool, HistoryBrushTool, InkTool, MagicEraserTool,
+                      MixerBrushTool, PatternStampTool, RecolorTool, RedEyeTool,
+                      SharpenBrushTool, SmudgeTool, SpongeTool)
 
 BUILTIN = {
     cls.name: cls for cls in (
@@ -29,6 +33,10 @@ BUILTIN = {
         GradientTool,
         TextTool, CloneStampTool, MovePixelsTool, MoveSelectionTool,
         ZoomTool, PanTool,
+        AirbrushTool, InkTool, MixerBrushTool, RecolorTool, BlurBrushTool,
+        SharpenBrushTool, SmudgeTool, DodgeTool, BurnTool, SpongeTool,
+        BackgroundEraserTool, MagicEraserTool, PatternStampTool,
+        HistoryBrushTool, HealTool, RedEyeTool,
     )
 }
 
@@ -117,11 +125,13 @@ class ToolRegistry:
         return tuple(getattr(cls, "options_spec", ()) or ()) if cls else ()
 
     def defaults(self, name):
-        """The INI's option values for a tool, already coerced by its spec."""
-        raw = dict(self._defaults.get(name, {}))
+        """A tool's default option values: its spec, then the INI, coerced."""
+        raw = {o.name: o.default for o in self.spec(name)}
+        ini = dict(self._defaults.get(name, {}))
         for opt in self.spec(name):
-            if opt.name in raw:
-                raw[opt.name] = opt.coerce(raw[opt.name])
+            if opt.name in ini:
+                ini[opt.name] = opt.coerce(ini[opt.name])
+        raw.update(ini)
         return raw
 
     def shortcut(self, name):
@@ -147,7 +157,12 @@ class ToolRegistry:
         cls = self._classes.get(name)
         if cls is None:
             return None
-        options = dict(self._defaults.get(name, {}))
+        # A tool's declared defaults are REAL defaults. Without this the spec
+        # was only what the options bar displayed, while the tool fell back to
+        # whatever literal its code passed to option() -- the airbrush drew at
+        # full flow while the bar said 12%.
+        options = {o.name: o.default for o in getattr(cls, "options_spec", ()) or ()}
+        options.update(self._defaults.get(name, {}))
         options.update(overrides)
         tool = cls(**options)
         plane = options.get("target_plane")

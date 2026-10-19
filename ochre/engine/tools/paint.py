@@ -190,8 +190,31 @@ class BrushTool(_StrokeTool):
 
         src = np.empty((clipped.h, clipped.w, 4), dtype=np.uint8)
         src[:] = ctx.colour_for(event)
-        cell.apply_masked(clipped, src, ctx.coverage(cov, clipped))
+        cov = ctx.coverage(cov, clipped)
+        if cell.index_locked:
+            # An index cannot be partly changed, so a dab below 50% coverage
+            # writes nothing -- and a low-flow brush (the airbrush at 12%)
+            # would never write anything at all, however long it was held.
+            # Coverage is therefore ACCUMULATED over the stroke, and a pixel
+            # takes the new index once the total crosses the threshold:
+            # paint building up, which is what flow is supposed to mean.
+            acc = getattr(self, "_acc", None)
+            if acc is None or acc.shape != (cell.height, cell.width):
+                acc = self._acc = np.zeros((cell.height, cell.width), dtype=np.uint16)
+            window = acc[clipped.slice()]
+            window += (np.full(window.shape, 255, np.uint16) if cov is None
+                       else cov.astype(np.uint16))
+            np.minimum(window, 1024, out=window)
+            mask = np.where(window >= 128, 255, 0).astype(np.uint8)
+            if mask.any():
+                cell.apply_masked(clipped, src, mask)
+            return clipped
+        cell.apply_masked(clipped, src, cov)
         return clipped
+
+    def on_begin(self, ctx, event):
+        self._acc = None
+        return super().on_begin(ctx, event)
 
 
 class EraserTool(BrushTool):

@@ -552,6 +552,13 @@ class CanvasView(QAbstractScrollArea):
         dx, dy = self._doc_pos(event.position())
         button = 2 if event.button() == Qt.RightButton else 1
         self._drawing = True
+        # Tools that keep working while the pointer rests (the airbrush) get
+        # ticks, so holding still builds paint up instead of doing nothing.
+        if getattr(self.ctl.tool, "continuous", False):
+            if not hasattr(self, "_tick_timer"):
+                self._tick_timer = QTimer(self)
+                self._tick_timer.timeout.connect(self._tick)
+            self._tick_timer.start(40)
         self.ctl.begin_stroke(dx, dy, 1.0, self._mods(event), button)
         self.refresh()
         if self._text_tool() is not None:
@@ -580,6 +587,13 @@ class CanvasView(QAbstractScrollArea):
             self.ctl.motion_stroke(dx, dy, 1.0, self._mods(event))
             self.refresh()
 
+    def _tick(self):
+        if not self._drawing:
+            self._tick_timer.stop()
+            return
+        if self.ctl.tick_stroke() is not None:
+            self.refresh()
+
     def mouseReleaseEvent(self, event):
         if self._panning and event.button() in (Qt.MiddleButton, Qt.LeftButton):
             self._panning = False
@@ -599,6 +613,8 @@ class CanvasView(QAbstractScrollArea):
             self.viewport().update()
             return
         if self._drawing:
+            if hasattr(self, "_tick_timer"):
+                self._tick_timer.stop()
             dx, dy = self._doc_pos(event.position())
             self._drawing = False
             self.ctl.end_stroke(dx, dy, 1.0, self._mods(event))
@@ -807,6 +823,16 @@ class CanvasView(QAbstractScrollArea):
     def showEvent(self, event):
         super().showEvent(event)
         self._fit_if_real()
+
+    def viewportEvent(self, event):
+        # The VIEWPORT's own resize, not the scroll area's: Qt lays the
+        # viewport out in a separate pass, so on the scroll area's resize
+        # event the viewport can still be at its old size, and fitting to
+        # that stale size was timing-dependent -- it passed alone and could
+        # fail under load.
+        if event.type() == QEvent.Resize:
+            self._fit_if_real()
+        return super().viewportEvent(event)
 
     # ---- view commands ---------------------------------------------------
 

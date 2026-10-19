@@ -185,6 +185,8 @@ class MainWindow(QMainWindow):
                   lambda: self.do_paste(new_layer=True), "Ctrl+Shift+V")
         self._act(edit_menu, "Paste Into New &Image", self.do_paste_new_image, "Ctrl+Alt+V")
         edit_menu.addSeparator()
+        self._act(edit_menu, "Set &History Brush Source", lambda: self.ctl.set_history_source())
+        edit_menu.addSeparator()
         self._act(edit_menu, "&Erase Selection", lambda: self.ctl.erase_selection(), "Del")
         self._act(edit_menu, "&Fill Selection", lambda: self.ctl.fill_selection(), "Backspace")
         edit_menu.addSeparator()

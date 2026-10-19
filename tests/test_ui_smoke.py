@@ -778,8 +778,15 @@ def main():
     win2 = MainWindow(ctl2, UiSettings(DATA))
     win2.resize(1100, 760)
     win2.show()
-    for _ in range(5):
+    # Let layout settle the way it does on a real launch: until the viewport
+    # stops changing size, not a fixed number of event-loop turns.
+    last = None
+    for _ in range(50):
         app.processEvents()
+        size = (win2.canvas.viewport().width(), win2.canvas.viewport().height())
+        if size == last:
+            break
+        last = size
     vp2 = win2.canvas.viewport()
     check("A FRESHLY LAUNCHED WINDOW FITS THE CANVAS TO A REAL VIEWPORT",
           win2.canvas.view.zoom > Fraction(1, 20),

@@ -116,14 +116,14 @@ def tolerance(default=32):
                tip="How different a colour may be and still count as the same.")
 
 
-SELECTION_MODES = ("replace", "union", "exclude", "intersect", "xor")
-
-
 def selection_mode():
-    return Opt("mode", CHOICE, "replace", "Mode", choices=SELECTION_MODES,
-               labels={"replace": "Replace", "union": "Add (union)",
-                       "exclude": "Subtract", "intersect": "Intersect",
-                       "xor": "Invert (xor)"},
+    # The selection engine's own constants, not a parallel spelling: the
+    # first version declared "replace" while the engine expects "Replace",
+    # which no test noticed until declared defaults started being applied.
+    from ..selection import EXCLUDE, INTERSECT, MODES, REPLACE, UNION, XOR
+    return Opt("mode", CHOICE, REPLACE, "Mode", choices=MODES,
+               labels={REPLACE: "Replace", UNION: "Add (union)", EXCLUDE: "Subtract",
+                       INTERSECT: "Intersect", XOR: "Invert (xor)"},
                tip="How a new selection combines with the existing one.")
 
 

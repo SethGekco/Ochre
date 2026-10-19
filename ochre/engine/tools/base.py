@@ -73,6 +73,9 @@ class ToolContext:
         self.history = history
         self.primary_index = None     # set when the document is index-locked
         self.secondary_index = None
+        # Supplied by the controller; tools that need them check for None.
+        self.clip = None              # the clipboard Clip, for pattern stamping
+        self.history_source = None    # callable(layer_id, frame_id) -> rgba or None
 
     @property
     def cell(self):

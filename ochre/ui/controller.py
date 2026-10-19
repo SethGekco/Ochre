@@ -224,6 +224,7 @@ class Controller:
         leaves = doc.layers()
         self.active_layer = leaves[-1] if leaves else None
         self._pending = [doc.bounds]
+        self.set_history_source(auto=True)
         if self.tool_name:
             self.set_tool(self.tool_name)
         self.emit("document.opened", document=doc, path=path)
@@ -867,7 +868,55 @@ class Controller:
                           self.settings, self.history)
         ctx.primary_index = self.primary_index
         ctx.secondary_index = self.secondary_index
+        ctx.clip = self.clip
+        ctx.history_source = self.history_source
         return ctx
+
+    def tick_stroke(self):
+        """A pointer-at-rest tick, for tools that keep working (airbrush)."""
+        if self.tool is None or not self.tool.active or not hasattr(self.tool, "tick"):
+            return None
+        return self.tool.tick(self._ctx)
+
+    # ---- history brush source --------------------------------------------
+
+    # Snapshotting at open costs memory proportional to the document, so it
+    # is skipped above this many pixels (layers x canvas, current frame).
+    HISTORY_SOURCE_AUTO_LIMIT = 64 * 1000 * 1000
+
+    def set_history_source(self, auto=False):
+        """Capture the current frame's layers for the History Brush.
+
+        Compressed, like the history itself. At open this happens
+        automatically for documents of sane size, so the history brush works
+        out of the box -- painting back to "as opened" is what it is for.
+        """
+        import zlib
+        doc = self.doc
+        if doc is None:
+            return False
+        if auto and doc.width * doc.height * max(1, len(doc.layers())) > self.HISTORY_SOURCE_AUTO_LIMIT:
+            self._history_src = {}
+            return False
+        snap = {}
+        frame = doc.frame
+        for layer in doc.layers():
+            cell = doc.cells.get((layer.id, frame.id))
+            if cell is None:
+                continue
+            rgba = cell.plane("rgba")
+            snap[(layer.id, frame.id)] = (zlib.compress(rgba.tobytes(), 1), rgba.shape)
+        self._history_src = snap
+        self.emit("history.source")
+        return True
+
+    def history_source(self, layer_id, frame_id):
+        import zlib
+        entry = getattr(self, "_history_src", {}).get((layer_id, frame_id))
+        if entry is None:
+            return None
+        blob, shape = entry
+        return np.frombuffer(zlib.decompress(blob), dtype=np.uint8).reshape(shape)
 
     def begin_stroke(self, x, y, pressure=1.0, modifiers=0, button=1):
         if self.tool is None or self.active_layer is None:
