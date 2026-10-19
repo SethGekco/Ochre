@@ -59,6 +59,11 @@ class Controller:
         self.clip = None
         from .session import Session
         self.state_dir = state_dir
+        try:
+            from ..engine import brushtips
+            brushtips.load_custom(state_dir)
+        except Exception:                                   # noqa: BLE001
+            pass
         self.session = Session(state_dir)
         self._saved_marker = None
         self._tool_overrides = {}
@@ -252,7 +257,7 @@ class Controller:
     _PER_DOC = ("doc", "history", "selection", "compositor", "blends", "display",
                 "path", "dirty_since_save", "_saved_marker", "active_layer",
                 "_pending", "quick_mask", "last_measure", "_history_src",
-                "editing_mask", "smart_link")
+                "editing_mask", "smart_link", "snapshots", "guides_locked")
 
     def _capture(self):
         return {k: getattr(self, k, None) for k in self._PER_DOC}
@@ -374,6 +379,8 @@ class Controller:
         self._saved_marker = self.history.marker()
         # A smart object's contents tab: (parent document, layer id).
         self.smart_link = link
+        self.snapshots = []            # History snapshots: [(name, document copy)]
+        self.guides_locked = False
         if self.session is not None and link is None:
             self.session.remember_size(doc.width, doc.height)
         leaves = doc.layers()
@@ -2621,7 +2628,7 @@ class Controller:
         return self._marks_change("New Guide", run, ("guides",))
 
     def move_guide(self, index, position):
-        if not (0 <= index < len(self.doc.guides)):
+        if not (0 <= index < len(self.doc.guides)) or getattr(self, "guides_locked", False):
             return False
         limit = self.doc.height if self.doc.guides[index][0] == "h" else self.doc.width
         if position < 0 or position > limit:
@@ -2635,13 +2642,88 @@ class Controller:
         return self._marks_change("Move Guide", run, ("guides",))
 
     def remove_guide(self, index):
-        if not (0 <= index < len(self.doc.guides)):
+        if not (0 <= index < len(self.doc.guides)) or getattr(self, "guides_locked", False):
             return False
 
         def run():
             self.doc.guides = self.doc.guides[:index] + self.doc.guides[index + 1:]
             return True
         return self._marks_change("Remove Guide", run, ("guides",))
+
+    def new_guide_layout(self, columns=0, rows=0, gutter=0, margin=0, clear=True):
+        """View > New Guide Layout: guides for N columns and M rows with a
+        gutter between them, inside a margin. One undo step."""
+        w, h = float(self.doc.width), float(self.doc.height)
+
+        def edges(total, n, gap, m):
+            out = []
+            if n <= 0:
+                return out
+            inner = total - 2 * m
+            cell = (inner - gap * (n - 1)) / float(n)
+            if cell <= 0:
+                return out
+            x = float(m)
+            for i in range(n):
+                out.append(x)
+                out.append(x + cell)
+                x += cell + gap
+            return sorted(set(round(v, 3) for v in out))
+
+        def run():
+            guides = [] if clear else list(self.doc.guides)
+            guides += [("v", x) for x in edges(w, int(columns), float(gutter), float(margin))]
+            guides += [("h", y) for y in edges(h, int(rows), float(gutter), float(margin))]
+            self.doc.guides = guides
+            return len(guides)
+        return self._marks_change("New Guide Layout", run, ("guides",))
+
+    def set_guides_locked(self, locked):
+        self.guides_locked = bool(locked)
+        return self.guides_locked
+
+    # ---- History snapshots --------------------------------------------------------
+
+    def new_snapshot(self, name=None):
+        """History > New Snapshot: the document as it is now, kept for the
+        session, to come back to whatever happens in between."""
+        from ..engine.commands import copy_document
+        name = name or "Snapshot %d" % (len(self.snapshots) + 1)
+        self.snapshots.append((name, copy_document(self.doc)))
+        self.emit("history.changed")
+        return name
+
+    def restore_snapshot(self, index):
+        """Go back to a snapshot -- as a new, undoable history step."""
+        from ..engine.commands import SnapshotDelta
+        if not (0 <= index < len(self.snapshots)):
+            return False
+        name, state = self.snapshots[index]
+        if self.tool is not None and self.tool.active:
+            self.tool.cancel(self._context())
+        active_id = getattr(self.active_layer, "id", None)
+        before = SnapshotDelta(self.doc, "Snapshot: %s" % name)
+        SnapshotDelta.restore(self.doc, state)
+        self.history.push(before, "Snapshot: %s" % name)
+        self._after_restore(active_id)
+        return True
+
+    def delete_snapshot(self, index):
+        if 0 <= index < len(self.snapshots):
+            del self.snapshots[index]
+            self.emit("history.changed")
+            return True
+        return False
+
+    def _after_restore(self, active_id):
+        """The document's state was swapped wholesale (snapshot, or undoing
+        one): re-find the active layer and rebuild what depends on the tree."""
+        node = self.doc.layer(active_id) if active_id else None
+        leaves = self.doc.layers()
+        self.active_layer = node if node is not None else (leaves[-1] if leaves else None)
+        self.compositor.invalidate()
+        self._after_geometry_change()
+        self._after_structure_change()
 
     def clear_guides(self):
         def run():
@@ -3013,6 +3095,23 @@ class Controller:
         self.dirty_since_save = True
         self.emit("history.changed")
         return rect
+
+    def define_brush_tip(self):
+        """Edit > Define Brush Tip (Photoshop's Define Brush Preset): the
+        merged image inside the selection's box becomes the 'Defined' brush
+        tip -- dark paints, light does not. True when one was made."""
+        from ..engine import brushtips
+        image = self.merged()
+        if self.selection.mask is not None:
+            r = self.selection.bbox.clipped_to(self.doc.width, self.doc.height)
+            if r is None or r.is_empty:
+                return False
+            image = image[r.slice()]
+        tip = brushtips.tip_from_image(image)
+        if tip is None:
+            return False
+        brushtips.save_custom(self.state_dir, tip)
+        return True
 
     def define_pattern(self, name="Pattern"):
         """Edit > Define Pattern: the merged image inside the selection's box
@@ -3527,10 +3626,15 @@ class Controller:
                 self.compositor.invalidate()
                 self.invalidate(rect)
             self.dirty_since_save = True
-            # Structure may have changed under the active layer.
-            if self.active_layer is not None and self.doc.layer(self.active_layer.id) is None:
-                leaves = self.doc.layers()
-                self.active_layer = leaves[-1] if leaves else None
+            # Structure may have changed under the active layer -- or been
+            # swapped wholesale (a snapshot), leaving an equal-id NEW object.
+            if self.active_layer is not None:
+                node = self.doc.layer(self.active_layer.id)
+                if node is None:
+                    leaves = self.doc.layers()
+                    self.active_layer = leaves[-1] if leaves else None
+                elif node is not self.active_layer:
+                    self.active_layer = node
             self.emit("layers.changed")
             self.emit("frames.changed")
         self.emit("paths.changed")

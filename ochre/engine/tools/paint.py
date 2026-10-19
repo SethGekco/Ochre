@@ -173,7 +173,14 @@ class BrushTool(_StrokeTool):
                     O.Opt("scatter", O.INT, 0, "Scatter", 0, 500, 10, suffix=" %",
                           tip="How far dabs stray from the stroke, as a share of the size."),
                     O.Opt("count", O.INT, 1, "Count", 1, 16, 1,
-                          tip="Dabs laid at each step (with scatter: a spray)."))
+                          tip="Dabs laid at each step (with scatter: a spray)."),
+                    # Photoshop's Brush Tip Shape: a sampled tip, turned.
+                    O.Opt("tip", O.CHOICE, "round", "Tip",
+                          choices=("round", "square", "chalk", "spatter", "star", "leaf",
+                                   "grass", "custom"),
+                          labels={"custom": "Defined (Edit > Define Brush Tip)"}),
+                    O.Opt("angle", O.INT, 0, "Angle", -180, 180, 5, suffix="\u00b0"),
+                    O.Opt("angle_jitter", O.INT, 0, "Angle jitter", 0, 100, 5, suffix=" %"))
     default_size = 16
 
     def _dab(self, ctx, event, x, y):
@@ -182,7 +189,8 @@ class BrushTool(_StrokeTool):
         oj = int(self.option("opacity_jitter", 0) or 0)
         sc = int(self.option("scatter", 0) or 0)
         n = max(1, int(self.option("count", 1) or 1))
-        if not (sj or oj or sc) and n == 1:
+        aj = int(self.option("angle_jitter", 0) or 0)
+        if not (sj or oj or sc or aj) and n == 1:
             return self._one_dab(ctx, event, x, y, 1.0, 1.0)
         rng = getattr(self, "_rng", None)
         if rng is None:
@@ -194,6 +202,7 @@ class BrushTool(_StrokeTool):
             ko = 1.0 - rng.random() * oj / 100.0
             ang = rng.random() * 2 * math.pi
             dist = rng.random() * sc / 100.0 * size
+            self._turn = (rng.random() * 2 - 1) * 180.0 * aj / 100.0
             r = self._one_dab(ctx, event, x + math.cos(ang) * dist, y + math.sin(ang) * dist, ks, ko)
             if r is not None:
                 covered = r if covered is None else covered.union(r)
@@ -204,11 +213,14 @@ class BrushTool(_StrokeTool):
         size = max(1, float(self.option("size", self.default_size)) * size_k)
         if self.option("pressure_size", True) and event.pressure < 1.0:
             size = max(1.0, size * event.pressure)
-        cov = _circle_coverage(size, float(self.option("hardness", 0.85)),
-                               antialias=True)
-        d = cov.shape[0]
-        ox, oy = int(math.floor(x - d / 2.0)), int(math.floor(y - d / 2.0))
-        rect = Rect(ox, oy, d, d)
+        from .. import brushtips
+        cov = brushtips.coverage(self.option("tip", "round"), size,
+                                 float(self.option("angle", 0) or 0) + getattr(self, "_turn", 0.0))
+        if cov is None:
+            cov = _circle_coverage(size, float(self.option("hardness", 0.85)), antialias=True)
+        dh, dw = cov.shape
+        ox, oy = int(math.floor(x - dw / 2.0)), int(math.floor(y - dh / 2.0))
+        rect = Rect(ox, oy, dw, dh)
         clipped = rect.clipped_to(cell.width, cell.height)
         if clipped is None:
             return None

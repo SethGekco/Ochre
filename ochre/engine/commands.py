@@ -788,3 +788,42 @@ class SourceDelta(Command):
 
     def nbytes(self):
         return sum(c.nbytes() for c in self.cells.values())
+
+
+def copy_document(doc):
+    """A deep copy of a document's whole state (tree, cells, marks, paths),
+    sharing only the settings."""
+    import copy as _copy
+    for frame in doc.frames:
+        doc.ensure_warm(frame)
+    settings = getattr(doc, "_settings", None)
+    return _copy.deepcopy(doc, {id(settings): settings})
+
+
+class SnapshotDelta(Command):
+    """The whole document as it was: what restoring a History snapshot
+    pushes, so going back to a snapshot is itself one undoable step.
+
+    Restoring swaps the document's STATE in place (its __dict__), so every
+    object holding the document -- compositor, canvas, tools -- keeps a
+    valid reference."""
+
+    __slots__ = ("label", "state")
+
+    def __init__(self, doc, label="Snapshot", state=None):
+        self.label = label
+        self.state = state if state is not None else copy_document(doc)
+
+    @staticmethod
+    def restore(doc, state):
+        fresh = copy_document(state)
+        doc.__dict__.clear()
+        doc.__dict__.update(fresh.__dict__)
+
+    def undo(self, doc):
+        opposite = SnapshotDelta(doc, self.label)
+        SnapshotDelta.restore(doc, self.state)
+        return opposite, doc.bounds
+
+    def nbytes(self):
+        return sum(c.nbytes() for c in self.state.cells.values())

@@ -643,6 +643,8 @@ class CanvasView(QAbstractScrollArea):
         return idx
 
     def _moves_guides(self):
+        if getattr(self.ctl, "guides_locked", False):
+            return False                      # View > Lock Guides
         return getattr(self.ctl, "tool_name", "") in ("move_layer", "move_pixels", "move_selection")
 
     def _channel_image(self):

@@ -606,14 +606,39 @@ class HistoryDock(QDockWidget):
         self.setObjectName("History")
         self.ctl = controller
         self._syncing = False
+        # Snapshots above the steps, as in Photoshop's History panel.
+        self.snaps = QListWidget()
+        self.snaps.setMaximumHeight(90)
+        self.snaps.itemActivated.connect(lambda item: self._restore(self.snaps.row(item)))
+        self.snaps.itemClicked.connect(lambda item: self._restore(self.snaps.row(item)))
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._goto)
-        self.setWidget(self.list)
+        holder = QWidget()
+        box = QVBoxLayout(holder)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(self.snaps)
+        box.addWidget(self.list, 1)
+        buttons = QHBoxLayout()
+        new = QPushButton("New Snapshot")
+        new.clicked.connect(lambda: self.ctl.new_snapshot())
+        delete = QPushButton("Delete Snapshot")
+        delete.clicked.connect(lambda: self.ctl.delete_snapshot(self.snaps.currentRow()))
+        buttons.addWidget(new)
+        buttons.addWidget(delete)
+        box.addLayout(buttons)
+        self.setWidget(holder)
+
+    def _restore(self, row):
+        if not self._syncing and row >= 0:
+            self.ctl.restore_snapshot(row)
 
     def sync(self, **_):
         if self.ctl.history is None:
             return
         self._syncing = True
+        self.snaps.clear()
+        for name, _state in getattr(self.ctl, "snapshots", None) or []:
+            self.snaps.addItem("\u25a3 " + name)
         self.list.clear()
         self.list.addItem("(original)")
         for label in self.ctl.history_labels():

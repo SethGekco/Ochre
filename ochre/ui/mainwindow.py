@@ -609,6 +609,7 @@ class MainWindow(QMainWindow):
         self._act(edit_menu, "F&ill...", self.do_fill_dialog, "Shift+F5")
         self._act(edit_menu, "Stro&ke...", self.do_stroke_dialog)
         self._act(edit_menu, "Define &Pattern...", self.do_define_pattern)
+        self._act(edit_menu, "Define &Brush Tip", self.do_define_brush_tip)
         edit_menu.addSeparator()
         self._act(edit_menu, "Auto-Align La&yers...", self.do_auto_align)
         self._act(edit_menu, "Auto-Blend Layers...", self.do_auto_blend)
@@ -699,7 +700,16 @@ class MainWindow(QMainWindow):
         self._act(view_menu, "&New Guide...", self.do_new_guide)
         self._act(view_menu, "C&lear Guides", lambda: (self.ctl.clear_guides(),
                                                        self.canvas.viewport().update()))
+        self._act(view_menu, "New Guide &Layout...", self.do_guide_layout)
+        self.lock_guides_action = self._act(view_menu, "Lock Gui&des",
+                                            lambda: self.ctl.set_guides_locked(
+                                                self.lock_guides_action.isChecked()),
+                                            "Ctrl+Alt+;")
+        self.lock_guides_action.setCheckable(True)
         self._act(view_menu, "Grid &Settings...", self.do_grid_settings)
+        view_menu.addSeparator()
+        self._act(view_menu, "&Full Screen", self.do_full_screen, "F11")
+        self._act(view_menu, "Show / Hide &Panels", self.do_toggle_panels, "Shift+F11")
 
         # Effects and adjustments, grouped exactly as the registry says --
         # so an addon's effect appears in the right menu without this file
@@ -1382,6 +1392,43 @@ class MainWindow(QMainWindow):
         self._busy(self.ctl.load_files_into_stack, paths, v["align"])
         self.canvas.bind()
         self._sync_all()
+
+    def do_guide_layout(self):
+        from .formdialog import ask
+        v = ask(self, "New Guide Layout", [("columns", "Columns", "int", 4, (0, 100)),
+                                           ("rows", "Rows", "int", 0, (0, 100)),
+                                           ("gutter", "Gutter (px)", "int", 20, (0, 2000)),
+                                           ("margin", "Margin (px)", "int", 0, (0, 2000)),
+                                           ("clear", "Clear existing guides", "bool", True, None)])
+        if v is not None:
+            self.ctl.new_guide_layout(v["columns"], v["rows"], v["gutter"], v["margin"], v["clear"])
+            self.canvas.viewport().update()
+
+    def do_full_screen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def do_toggle_panels(self):
+        """Photoshop's Tab: hide every panel for the image alone, or bring
+        back the ones that were showing."""
+        from PySide6.QtWidgets import QDockWidget
+        docks = self.findChildren(QDockWidget)
+        shown = [d for d in docks if d.isVisible()]
+        if shown:
+            self._hidden_docks = shown
+            for d in shown:
+                d.hide()
+        else:
+            for d in getattr(self, "_hidden_docks", docks):
+                d.show()
+
+    def do_define_brush_tip(self):
+        ok = self.ctl.define_brush_tip()
+        self.statusBar().showMessage(
+            "Brush tip defined: pick Tip = Defined in the Paintbrush options." if ok else
+            "No brush tip: select something dark on light first.", 6000)
 
     def do_filter_gallery(self):
         from .gallery import FilterGalleryDialog

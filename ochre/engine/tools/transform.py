@@ -760,9 +760,14 @@ class WarpTool(Tool):
     options_spec = (O.size(60), O.Opt("strength", O.FLOAT, 0.5, "Strength", 0.01, 1.0, 0.05,
                                       percent=True),
                     O.Opt("mode", O.CHOICE, "move", "Behaviour",
-                          choices=("move", "grow", "shrink", "swirl_cw", "swirl_ccw", "restore"),
-                          labels={"swirl_cw": "Swirl clockwise",
-                                  "swirl_ccw": "Swirl counter-clockwise"}))
+                          choices=("move", "grow", "shrink", "swirl_cw", "swirl_ccw", "push_left",
+                                   "smooth", "restore", "freeze", "thaw"),
+                          labels={"move": "Forward warp", "grow": "Bloat", "shrink": "Pucker",
+                                  "swirl_cw": "Twirl clockwise",
+                                  "swirl_ccw": "Twirl counter-clockwise",
+                                  "push_left": "Push left", "smooth": "Smooth",
+                                  "restore": "Reconstruct", "freeze": "Freeze mask",
+                                  "thaw": "Thaw mask"}))
 
     def __init__(self, **options):
         super().__init__(**options)
@@ -782,8 +787,14 @@ class WarpTool(Tool):
             self._orig_index = cell.plane("index").copy() if cell.index_locked else None
             self._dx = np.zeros((cell.height, cell.width), np.float32)
             self._dy = np.zeros((cell.height, cell.width), np.float32)
+            # Liquify's freeze mask: 1 where the image is protected.
+            self._frozen = np.zeros((cell.height, cell.width), np.float32)
         self._session = StrokeSession(ctx.doc, ctx.layer, ctx.frame, label=self.label)
         self._last = (event.x, event.y)
+        if self.option("mode", "move") not in ("move", "push_left"):
+            # Modes with no direction act where you press, as in Photoshop --
+            # a click freezes, bloats or reconstructs without a drag.
+            return self._dab(ctx, event.x, event.y, 0.0, 0.0)
         return None
 
     def on_motion(self, ctx, event):
@@ -809,9 +820,35 @@ class WarpTool(Tool):
         px, py = gx + 0.5 - x, gy + 0.5 - y
         d = np.sqrt(px * px + py * py) / r
         fall = np.clip(1.0 - d, 0.0, 1.0) ** 2 * s
+        frozen = self._frozen[box.slice()]
+        if mode in ("freeze", "thaw"):
+            # Painting the mask moves no pixels.
+            if mode == "freeze":
+                np.maximum(frozen, np.clip(fall * 2.0, 0, 1), out=frozen)
+            else:
+                frozen *= 1.0 - np.clip(fall * 2.0, 0, 1)
+            return box
+        fall = fall * (1.0 - frozen)
         dx = self._dx[box.slice()]
         dy = self._dy[box.slice()]
-        if mode == "move":
+        if mode == "push_left":
+            # Photoshop's Push Left: pixels move to the left of the direction
+            # of travel (drag up, they go left; drag down, right). The field
+            # says where each pixel SAMPLES from, so moving pixels by L means
+            # sampling from -L, as "move" does.
+            n = math.hypot(mx, my) or 1.0
+            lx, ly = my / n, -mx / n
+            amount = 0.5 * max(1.0, math.hypot(mx, my))
+            dx -= fall * lx * amount
+            dy -= fall * ly * amount
+        elif mode == "smooth":
+            # Pull the distortion toward its local average: kinks relax.
+            from ..refine import _box
+            k = max(1, int(r / 3))
+            mean_x, mean_y = _box(dx.astype(np.float64), k), _box(dy.astype(np.float64), k)
+            dx += (mean_x.astype(np.float32) - dx) * np.clip(fall * 2, 0, 1)
+            dy += (mean_y.astype(np.float32) - dy) * np.clip(fall * 2, 0, 1)
+        elif mode == "move":
             dx -= fall * mx
             dy -= fall * my
         elif mode in ("grow", "shrink"):
