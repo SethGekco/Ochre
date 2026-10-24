@@ -341,6 +341,19 @@ class Selection:
         self.geometry.append(("polygon", tuple(map(tuple, points)), mode))
         return self.combine(mask, mode)
 
+    def select_shape(self, kind, rect, mode=REPLACE, antialias=True, **params):
+        """Any shape from the shape palette (engine/shapelib.py) -- star,
+        heart, arrow, callout... -- inscribed in rect, as a selection."""
+        from . import shapes
+        if kind == "rectangle":
+            return self.select_rect(rect, mode, antialias)
+        if kind == "ellipse":
+            return self.select_ellipse(rect, mode, antialias)
+        mask = shapes.coverage(self.width, self.height, kind, tuple(rect), shapes.FILL, 1.0,
+                               antialias, **params)
+        self.geometry.append(("shape", kind, tuple(rect), mode))
+        return self.combine(np.asarray(mask, np.uint8), mode)
+
     def select_stencil(self, stencil, mode=REPLACE):
         """Adopt a boolean stencil, e.g. from a flood fill."""
         mask = (np.asarray(stencil, dtype=bool).astype(np.uint8)) * 255

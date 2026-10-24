@@ -49,8 +49,14 @@ class _DragSelectTool(Tool):
         antialias = bool(self.option("antialias", True))
         working = self._base.copy()
         rect = self._rect(event)
+        kind = self.option("shape", None) if self.shape == "rect" else None
         if self.shape == "ellipse":
             working.select_ellipse(rect, mode, antialias)
+        elif kind and kind != "rectangle":
+            radius = self.option("radius", 0)
+            params = {"radius": float(radius)} if radius and kind in (
+                "rounded_rectangle", "callout_rounded") else {}
+            working.select_shape(kind, rect, mode, antialias, **params)
         else:
             working.select_rect(rect, mode, antialias)
         if commit:
@@ -75,10 +81,25 @@ class _DragSelectTool(Tool):
         return None
 
 
+def _shape_option():
+    """The Shapes tool's palette, for selecting: rectangle by default, and
+    every other shape the Shapes tool draws (stars, arrows, hearts...)."""
+    from .. import shapelib
+    return O.Opt("shape", O.CHOICE, "rectangle", "Shape", choices=tuple(shapelib.CATALOG),
+                 labels={k: shapelib.label(k) for k in shapelib.CATALOG},
+                 groups=shapelib.grouped())
+
+
 class RectSelectTool(_DragSelectTool):
+    """Drag out a selection: a rectangle, or any shape from the palette.
+    Shift keeps proportions, Alt draws from the centre."""
+
     name = "select_rect"
     label = "Rectangle Select"
-    options_spec = (O.selection_mode(), O.antialias(True))
+    options_spec = (O.selection_mode(), _shape_option(),
+                    O.Opt("radius", O.INT, 0, "Corner radius", 0, 2000, suffix=" px",
+                          tip="Rounded shapes only. 0 picks a radius from the size."),
+                    O.antialias(True))
     shape = "rect"
 
 
