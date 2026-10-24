@@ -49,7 +49,7 @@ class _DragSelectTool(Tool):
         antialias = bool(self.option("antialias", True))
         working = self._base.copy()
         rect = self._rect(event)
-        kind = self.option("shape", None) if self.shape == "rect" else None
+        kind = self.option("shape", None) if self.shape in ("rect", "lasso") else None
         if self.shape == "ellipse":
             working.select_ellipse(rect, mode, antialias)
         elif kind and kind != "rectangle":
@@ -81,13 +81,24 @@ class _DragSelectTool(Tool):
         return None
 
 
-def _shape_option():
+def _shape_option(freehand=False):
     """The Shapes tool's palette, for selecting: rectangle by default, and
-    every other shape the Shapes tool draws (stars, arrows, hearts...)."""
+    every other shape the Shapes tool draws (stars, arrows, hearts...). For
+    the lasso, Freehand comes first and is the default."""
     from .. import shapelib
-    return O.Opt("shape", O.CHOICE, "rectangle", "Shape", choices=tuple(shapelib.CATALOG),
-                 labels={k: shapelib.label(k) for k in shapelib.CATALOG},
-                 groups=shapelib.grouped())
+    choices = tuple(shapelib.CATALOG)
+    labels = {k: shapelib.label(k) for k in shapelib.CATALOG}
+    groups = shapelib.grouped()
+    if freehand:
+        choices = ("freehand",) + choices
+        labels["freehand"] = "Freehand"
+        groups = (("Lasso", ("freehand",)),) + tuple(groups)
+    return O.Opt("shape", O.CHOICE, "freehand" if freehand else "rectangle", "Shape",
+                 choices=choices, labels=labels, groups=groups)
+
+
+_RADIUS = O.Opt("radius", O.INT, 0, "Corner radius", 0, 2000, suffix=" px",
+                tip="Rounded shapes only. 0 picks a radius from the size.")
 
 
 class RectSelectTool(_DragSelectTool):
@@ -96,10 +107,7 @@ class RectSelectTool(_DragSelectTool):
 
     name = "select_rect"
     label = "Rectangle Select"
-    options_spec = (O.selection_mode(), _shape_option(),
-                    O.Opt("radius", O.INT, 0, "Corner radius", 0, 2000, suffix=" px",
-                          tip="Rounded shapes only. 0 picks a radius from the size."),
-                    O.antialias(True))
+    options_spec = (O.selection_mode(), _shape_option(), _RADIUS, O.antialias(True))
     shape = "rect"
 
 
@@ -112,19 +120,30 @@ class EllipseSelectTool(_DragSelectTool):
 
 class LassoTool(Tool):
     changes_selection = True
-    """Freehand polygon selection."""
+    """Freehand polygon selection -- or, with a shape chosen from the
+    palette, a dragged shape, as Rectangle Select does."""
 
     name = "lasso"
     label = "Lasso Select"
-    options_spec = (O.selection_mode(), O.antialias(True))
+    options_spec = (O.selection_mode(), _shape_option(freehand=True), _RADIUS, O.antialias(True))
     wants_stroke = False
+    shape = "lasso"
+
+    def _shaped(self):
+        return self.option("shape", "freehand") not in (None, "", "freehand")
 
     def on_begin(self, ctx, event):
         self._points = [(event.x, event.y)]
         self._base = ctx.selection.copy() if ctx.selection is not None else None
+        self._start = event
         return None
 
+    def _rect(self, event):
+        return drag_rect(self._start, event, square=event.has(1), centre=event.has(4))
+
     def on_motion(self, ctx, event):
+        if self._shaped():
+            return _DragSelectTool._apply(self, ctx, event, commit=False)
         # Skip points that add no detail; a dense freehand path makes the
         # even-odd test needlessly expensive without changing the result.
         if self._points:
@@ -135,10 +154,17 @@ class LassoTool(Tool):
         return None
 
     def overlay(self):
+        if self._shaped():
+            return []                    # the marching ants of the preview show it
         pts = getattr(self, "_points", None)
         return [("poly", list(pts), False)] if pts and len(pts) > 1 else []
 
     def on_end(self, ctx, event):
+        if self._shaped():
+            result = _DragSelectTool._apply(self, ctx, event, commit=True)
+            self._points = []
+            self._base = None
+            return result
         if ctx.selection is None or len(self._points) < 3:
             self._points = []
             return None

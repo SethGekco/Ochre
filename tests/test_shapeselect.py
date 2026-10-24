@@ -84,6 +84,30 @@ def main():
     check("every shape in the palette selects (%d shapes), inside its box only" % len(shapelib.CATALOG),
           not empty, str(empty))
 
+    # ---- the Lasso has the same shapes, Freehand first ---------------------------
+    ctl.selection.select_all()
+    ctl.set_tool("lasso")
+    check("Lasso Select defaults to Freehand", ctl.tool.option("shape") == "freehand")
+    pts = [(20, 20), (100, 20), (100, 80), (60, 50), (20, 80)]
+    ctl.begin_stroke(*pts[0])
+    for p in pts[1:-1]:
+        ctl.motion_stroke(*p)
+    ctl.end_stroke(*pts[-1])
+    m = ctl.selection.mask
+    check("...and freehand still selects the outline drawn (the notch stays out)",
+          m[30, 60] == 255 and m[75, 60] == 0)
+    ctl.selection.select_all()
+    ctl.set_tool("lasso", shape="star5")
+    pos = ctl.history.position
+    drag(ctl, (20, 20), (100, 80))
+    m = ctl.selection.mask
+    check("with a shape chosen, the lasso drags that shape (star: centre in, corners out)",
+          m[50, 60] == 255 and m[22, 22] == 0 and ctl.history.position == pos + 1)
+    ctl.set_tool("lasso", shape="heart", mode=UNION)
+    drag(ctl, (0, 0), (30, 30))
+    check("...in every combine mode", ctl.selection.mask[50, 60] == 255
+          and ctl.selection.mask[12, 15] == 255)
+
     from PySide6.QtWidgets import QApplication
     from ochre.ui.bus import EventBus
     from ochre.ui.config import UiSettings
@@ -99,6 +123,12 @@ def main():
           isinstance(palette, ShapePalette) and len(palette.buttons) == len(shapelib.CATALOG))
     palette._pick("star5")
     check("...and picking a shape there sets it", c2.tool.option("shape") == "star5")
+    c2.set_tool("lasso")
+    app.processEvents()
+    lp = win.options_bar.widgets["shape"][1]
+    check("the Lasso's options bar shows the palette too, Freehand first",
+          isinstance(lp, ShapePalette) and list(lp.buttons)[0] == "freehand"
+          and len(lp.buttons) == len(shapelib.CATALOG) + 1 and lp.value == "freehand")
     del app
     print("\nall shape-select checks passed")
     sys.stdout.flush()

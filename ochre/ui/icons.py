@@ -822,8 +822,13 @@ def shape_icon(ident, size=24):
         painter = QPainter(px)
         try:
             g = G(painter, s, _fg())
-            g.path(shape_path(ident), fill=QColor(205, 228, 246), w=1.2,
-                   color=QColor(60, 110, 170))
+            if ident == "freehand":
+                # Not a catalog shape: the lasso's own drawing, scaled.
+                painter.scale(s / 24.0, s / 24.0)
+                ICONS["lasso"](G(painter, 24, _fg()))
+            else:
+                g.path(shape_path(ident), fill=QColor(205, 228, 246), w=1.2,
+                       color=QColor(60, 110, 170))
         finally:
             painter.end()
         icon.addPixmap(px)
