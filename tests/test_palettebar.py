@@ -171,11 +171,41 @@ def main():
     from ochre.ui.config import UiSettings
     from ochre.ui.mainwindow import MainWindow
     app = QApplication.instance() or QApplication([])
-    ctl = Controller(Settings(DATA), DATA, EventBus(), addon_dirs=[], state_dir=state)
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QToolBar
+    wstate = tempfile.mkdtemp()
+    ctl = Controller(Settings(DATA), DATA, EventBus(), addon_dirs=[ADDONS], state_dir=wstate)
+    for ident in ctl.addons.addons:
+        ctl.addons.trust(ident)
     win = MainWindow(ctl, UiSettings(DATA))
     ctl.new_document(64, 48)
     win.canvas.bind()
+    check("before the Palette addon loads there is no Palette bar",
+          win.palette_bar is None and not win.findChildren(QToolBar, "PaletteBar"))
+    ctl.load_addons(only=["palette"])
     bar = win.palette_bar
+    check("loading the Palette addon puts the Palette bar on the toolbar",
+          bar is not None and win.toolBarArea(bar) == Qt.TopToolBarArea
+          and ctl.addons.addons["cnc"].state != "loaded")
+    ctl.load_addons(only=[])
+    app.processEvents()
+    check("switching it off takes the bar away",
+          win.palette_bar is None and not [b for b in win.findChildren(QToolBar, "PaletteBar")
+                                           if b.isVisible()])
+    ctl.load_addons(only=["cnc"])
+    bar = win.palette_bar
+    check("loading the C&C addon turns the Palette addon on with it",
+          ctl.addons.addons["palette"].state == "loaded" and bar is not None,
+          ctl.addons.addons["palette"].state)
+    check("...and the remembered choice keeps both (Palette is required, not skipped)",
+          "palette" not in ctl.addons.skipped() and "cnc" not in ctl.addons.skipped())
+    ctl.addons.set_choices(["cnc"])                 # a choice file that leaves Palette out
+    ctl_b = Controller(Settings(DATA), DATA, addon_dirs=[ADDONS], state_dir=wstate)
+    ctl_b.load_addons()
+    check("at the next start, C&C still brings Palette even if it was left unticked",
+          ctl_b.addons.addons["palette"].state == "loaded")
+    check("...and the Choose dialog can say who needs it",
+          ctl_b.addons.required_by("palette") == ["cnc"])
     ctl.set_swatch_palette(("builtin", "PICO-8 (16)"))
     app.processEvents()
     check("the Palette bar shows the palette's swatches", len(bar.strip.colours) == 16)

@@ -1,7 +1,8 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
 # Licensed under the GNU General Public License v3 or later. See LICENSE.
-"""The Palette bar: a row of the top toolbar for working with palettes.
+"""The Palette bar: a row of the top toolbar for working with palettes
+(the Palette addon's toolbar panel).
 
   Palette    the palette in use: the document's, a built-in one, any file in
              the palette folders (Preferences > Palette > Folders, searched
@@ -122,6 +123,21 @@ class PaletteBar(QToolBar):
             except Exception:                               # noqa: BLE001
                 pass
         self.show_palette()
+        if self.ctl.bus is not None:
+            self.ctl.bus.subscribe("palette.swatches", self._on_swatches)
+
+    # ---- as a panel: the window syncs it, and closes it when the addon unloads -----
+
+    def _on_swatches(self, **_):
+        self.show_palette()
+
+    def sync(self):
+        self.refresh_sources()
+        self.show_palette()
+
+    def close_panel(self):
+        if self.ctl.bus is not None:
+            self.ctl.bus.unsubscribe("palette.swatches", self._on_swatches)
 
     def _button(self, text, slot, tip):
         b = QToolButton()
@@ -186,7 +202,7 @@ class PaletteBar(QToolBar):
                 self.win.palette_dock.sync()
 
     def show_palette(self):
-        from ..engine import palettefiles as PF
+        from ochre.engine import palettefiles as PF
         pal = self.ctl.swatch_palette
         self.strip.set_colours(PF.colours(pal).tolist() if pal is not None else [])
         if pal is not None:
@@ -215,7 +231,7 @@ class PaletteBar(QToolBar):
         self.show_palette()
 
     def save(self):
-        from ..engine import palettefiles as PF
+        from ochre.engine import palettefiles as PF
         if self.ctl.swatch_palette is None:
             return
         path, _ = QFileDialog.getSaveFileName(self.win, "Save Palette", "palette.gpl",
@@ -224,7 +240,7 @@ class PaletteBar(QToolBar):
             PF.write(self.ctl.swatch_palette, path)
 
     def from_image(self):
-        from .colourpicker import BuildPaletteDialog
+        from .pickertab import BuildPaletteDialog
         if BuildPaletteDialog(self.ctl, self.win).exec():
             self.refresh_sources()
             self.show_palette()

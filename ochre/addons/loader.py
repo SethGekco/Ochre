@@ -205,6 +205,9 @@ class AddonManager:
         except those the user chose not to load (Addons > Choose Addons),
         unless respect_choices is False."""
         skip = self.skipped() if respect_choices else set()
+        # An addon the user wants brings what it requires with it, even one
+        # they had switched off on its own.
+        skip -= self.with_requirements(set(self.addons) - skip)
         for addon in self._ordered():
             if addon.id in skip and addon.state != "loaded":
                 addon.state = "not chosen"
@@ -227,6 +230,23 @@ class AddonManager:
                 return set(json.load(fh).get("skip", []))
         except (OSError, ValueError):
             return set()
+
+    def with_requirements(self, ids):
+        """The ids plus everything they require, transitively (known
+        addons only; a missing requirement fails at load, by name)."""
+        out, todo = set(), [i for i in ids if i in self.addons]
+        while todo:
+            aid = todo.pop()
+            if aid in out:
+                continue
+            out.add(aid)
+            todo.extend(d for d in self.addons[aid].manifest.requires
+                        if d in self.addons and d not in out)
+        return out
+
+    def required_by(self, addon_id):
+        """Ids of the addons that require this one."""
+        return sorted(a.id for a in self.addons.values() if addon_id in a.manifest.requires)
 
     def set_choices(self, load_ids):
         """Remember which addons to load from now on (the rest are skipped)."""

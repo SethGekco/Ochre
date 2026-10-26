@@ -47,15 +47,17 @@ def main():
     check("addons are discovered (%s)" % ids, "cnc" in ids)
     ctl.load_addons(only=["cnc"])
     states = {a.id: a.state for a in ctl.addons.addons.values()}
-    check("Choose Addons: only the chosen ones load", states["cnc"] == "loaded"
-          and all(s != "loaded" for k, s in states.items() if k != "cnc"), str(states))
-    check("...and the choice is remembered", "cnc" not in ctl.addons.skipped()
-          and ctl.addons.skipped() == set(ids) - {"cnc"})
+    want = {"cnc", "palette"}                     # cnc requires the Palette addon
+    check("Choose Addons: only the chosen ones load, with what they require",
+          all(states[k] == "loaded" for k in want)
+          and all(s != "loaded" for k, s in states.items() if k not in want), str(states))
+    check("...and the choice is remembered", not (want & ctl.addons.skipped())
+          and ctl.addons.skipped() == set(ids) - want)
     ctl2 = fresh(state)
     ctl2.load_addons()
     s2 = {a.id: a.state for a in ctl2.addons.addons.values()}
-    check("...next start loads just those", s2["cnc"] == "loaded"
-          and all(s == "not chosen" for k, s in s2.items() if k != "cnc"), str(s2))
+    check("...next start loads just those", all(s2[k] == "loaded" for k in want)
+          and all(s == "not chosen" for k, s in s2.items() if k not in want), str(s2))
     ctl2.load_addons(only=[])
     check("unticking a loaded addon unloads it (its formats go too)",
           ctl2.addons.addons["cnc"].state != "loaded" and not ctl2.addon_formats(writing=True))

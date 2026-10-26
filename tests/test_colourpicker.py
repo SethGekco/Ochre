@@ -4,7 +4,8 @@
 # Licensed under the GNU General Public License v3 or later. See LICENSE.
 """Building a palette from the image's colours (closest merged when there
 are too many), converting every layer to a palette, and the colour picker
-that opens on the palette with an All Colors tab.
+that opens on the palette with an All Colors tab -- the Palette tab only
+while the Palette addon is loaded.
 
 Run: python3 tests/test_colourpicker.py
 """
@@ -22,7 +23,9 @@ from ochre.engine import palettefiles as PF
 from ochre.engine.settings import Settings
 from ochre.ui.controller import Controller
 
-DATA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.path.join(ROOT, "data")
+ADDONS = os.path.join(ROOT, "addons")
 
 
 def check(name, cond, detail=""):
@@ -61,7 +64,8 @@ def main():
     check("...a merged colour is the pixel-weighted average (leans to the commoner red)",
           abs(red[0] - 200) <= 1)
 
-    ctl = Controller(Settings(DATA), DATA, addon_dirs=[], state_dir=tempfile.mkdtemp())
+    ctl = Controller(Settings(DATA), DATA, addon_dirs=[ADDONS], state_dir=tempfile.mkdtemp())
+    ctl.addons.trust("palette")
     ctl.new_document(60, 30, background=None)
     lay = ctl.active_layer
     ctl.doc.cell(lay).plane("rgba")[...] = img
@@ -94,13 +98,22 @@ def main():
 
     # ---- dialogs ---------------------------------------------------------------------
     from PySide6.QtWidgets import QApplication
-    from ochre.ui.colourpicker import BuildPaletteDialog, ColourPickerDialog
+    from ochre.ui.colourpicker import ColourPickerDialog
     app = QApplication.instance() or QApplication([])
     ctl.set_swatch_palette(("builtin", "PICO-8 (16)"))
     dlg = ColourPickerDialog(ctl, (0, 0, 0, 255))
+    check("without the Palette addon the picker is only the full chooser, no Palette tab",
+          dlg.tabs.count() == 1 and not dlg.tabs.tabBar().isVisibleTo(dlg) and not dlg.pages)
+    dlg.reject()
+    ctl.load_addons(only=["palette"])
+    check("the Palette addon loads", ctl.addons.addons["palette"].state == "loaded")
+    dlg = ColourPickerDialog(ctl, (0, 0, 0, 255))
+    import importlib
+    BuildPaletteDialog = importlib.import_module("ochre_addon_palette.pickertab").BuildPaletteDialog
+    dlg.grid = dlg.pages[0].grid
     check("the colour picker opens on the palette tab, showing the chosen palette",
           dlg.tabs.currentIndex() == 0 and len(dlg.grid.colours) == 16
-          and dlg.tabs.tabText(1) == "All Colors")
+          and dlg.tabs.tabText(0) == "Palette" and dlg.tabs.tabText(1) == "All Colors")
     dlg.grid.chosen.emit(8)
     check("...a swatch picks its colour", dlg.result_colour()[:3] == dlg.grid.colours[8])
     from PySide6.QtGui import QColor
@@ -123,6 +136,11 @@ def main():
     b.size.setValue(4)
     b.accept()
     check("...Build makes the palette", ctl.swatch_palette is not None and ctl.swatch_palette.size == 4)
+    ctl.load_addons(only=[])
+    dlg = ColourPickerDialog(ctl, (0, 0, 0, 255))
+    check("switch the Palette addon off and the Palette tab is gone again",
+          dlg.tabs.count() == 1 and ctl.addons.addons["palette"].state != "loaded")
+    dlg.reject()
     del app
     print("\nall colour-picker checks passed")
     sys.stdout.flush()

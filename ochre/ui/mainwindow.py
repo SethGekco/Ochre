@@ -116,11 +116,10 @@ class MainWindow(QMainWindow):
         from .tooloptions import ToolOptionsBar
         self.options_bar = ToolOptionsBar(controller, self)
         self.addToolBar(Qt.TopToolBarArea, self.options_bar)
-        # The Palette bar, on its own row under the tool options.
-        from .palettebar import PaletteBar
-        self.addToolBarBreak(Qt.TopToolBarArea)
-        self.palette_bar = PaletteBar(controller, self)
-        self.addToolBar(Qt.TopToolBarArea, self.palette_bar)
+        # Addons' toolbars and docks (the Palette addon's bar among them),
+        # added and removed as addons load and unload.
+        self.addon_panels = {}
+        self._addon_holders = {}
 
         self._build_menus()
         # The user's menu keys (Edit > Keyboard Shortcuts), over the built-in ones.
@@ -132,6 +131,7 @@ class MainWindow(QMainWindow):
         self._build_status()
         self._subscribe()
 
+        self._sync_addon_panels()
         controller.set_tool(settings.get("Tools", "DefaultTool") or "brush")
         controller.new_document()
         self.canvas.bind()
@@ -143,7 +143,7 @@ class MainWindow(QMainWindow):
         bus = self.ctl.bus
         if bus is None:
             return
-        bus.subscribe("palette.swatches", lambda **k: self.palette_bar.show_palette())
+        bus.subscribe("addons.changed", lambda **k: self._sync_addon_panels())
         bus.subscribe("layers.changed", self._on_layers)
         bus.subscribe("layer.active", lambda **k: self.layers_dock.sync())
         bus.subscribe("history.changed", lambda **k: (self.history_dock.sync(),
@@ -208,9 +208,57 @@ class MainWindow(QMainWindow):
                      self.paths_dock, self.info_dock, self.histogram_dock,
                      self.navigator_dock, self.channels_dock, self.comps_dock):
             dock.sync()
+        for widget in self.addon_panels.values():
+            if hasattr(widget, "sync"):
+                widget.sync()
         self._sync_tabs()
         self._update_frames_visible()
         self._update_title()
+
+    @property
+    def palette_bar(self):
+        """The Palette addon's bar, or None while that addon is not loaded."""
+        return self.addon_panels.get("palette.bar")
+
+    def _sync_addon_panels(self):
+        """Match the window to the loaded addons: build the toolbars and
+        docks of newly loaded ones, take away those of unloaded ones."""
+        from PySide6.QtWidgets import QDockWidget
+        sides = {"left": Qt.LeftDockWidgetArea, "right": Qt.RightDockWidgetArea,
+                 "bottom": Qt.BottomDockWidgetArea}
+        wanted = {p.name: (owner, area, p) for area in ("toolbar",) + tuple(sides)
+                  for owner, p in self.ctl.panels(area)}
+        for name in [n for n in self.addon_panels if n not in wanted]:
+            widget = self.addon_panels.pop(name)
+            holder = self._addon_holders.pop(name)
+            if hasattr(widget, "close_panel"):
+                widget.close_panel()
+            if isinstance(holder, QDockWidget):
+                self.removeDockWidget(holder)
+            else:
+                self.removeToolBarBreak(holder)
+                self.removeToolBar(holder)
+            holder.deleteLater()
+        for name, (owner, area, provider) in wanted.items():
+            if name in self.addon_panels:
+                continue
+            widget = self.ctl.create_panel(owner, provider, self)
+            if widget is None:
+                continue
+            if area == "toolbar":
+                # Each on its own row under the tool options.
+                self.addToolBarBreak(Qt.TopToolBarArea)
+                self.addToolBar(Qt.TopToolBarArea, widget)
+                holder = widget
+            else:
+                holder = widget if isinstance(widget, QDockWidget) else QDockWidget(
+                    getattr(provider, "label", name), self)
+                if holder is not widget:
+                    holder.setObjectName("addon:%s:%s" % (owner, name))
+                    holder.setWidget(widget)
+                self.addDockWidget(sides[area], holder)
+            self.addon_panels[name] = widget
+            self._addon_holders[name] = holder
 
     def _update_frames_visible(self):
         """Show the frame strip only for documents that HAVE frames.
@@ -1737,12 +1785,17 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Choose Addons to Load")
         box = QVBoxLayout(dlg)
-        box.addWidget(QLabel("Tick the addons to load. Your choice is remembered for next time."))
+        box.addWidget(QLabel("Tick the addons to load. Your choice is remembered for next time.\n"
+                             "An addon another one needs is loaded with it."))
         lst = QListWidget()
         skip = self.ctl.addons.skipped()
         for a in addons:
             text = "%s  v%s   [%s]\n    %s" % (a.name, a.manifest.version or "?", a.state,
                                               a.manifest.description or a.id)
+            needers = self.ctl.addons.required_by(a.id)
+            if needers:
+                text += "\n    Needed by: %s" % ", ".join(
+                    self.ctl.addons.addons[n].name for n in needers)
             item = QListWidgetItem(text)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             on = a.state == "loaded" or (a.id not in skip and a.state not in ("disabled",))
@@ -2032,8 +2085,6 @@ class MainWindow(QMainWindow):
         self._sync_all()
         if getattr(self.ctl, "indexed_note", None):
             self.statusBar().showMessage(self.ctl.indexed_note, 15000)
-            self.palette_bar.refresh_sources()
-            self.palette_bar.show_palette()
         changed = [l.name for l, st in self.ctl.linked_status() if st != "ok"]
         if changed:
             self.statusBar().showMessage(

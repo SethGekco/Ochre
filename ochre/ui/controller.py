@@ -592,13 +592,15 @@ class Controller:
 
         Default: every addon except those the user chose not to load.
         all_addons: every one, and forget earlier choices (Load All Addons).
-        only: exactly these ids -- the others are unloaded -- and remember
-        that choice for the next start (Choose Addons)."""
+        only: exactly these ids, plus whatever they require -- the others
+        are unloaded -- and remember that choice for the next start (Choose
+        Addons)."""
         if all_addons:
             self.addons.set_choices(list(self.addons.addons))
             self.addons.load_all(respect_choices=False)
         elif only is not None:
-            only = set(only)
+            only = self.addons.with_requirements(set(only))
+            # Requirements included, so nothing left loaded needs an addon withdrawn here.
             for aid, addon in self.addons.addons.items():
                 if aid not in only and addon.state == "loaded":
                     for name in [n for n, _c in self.addons.registry.all("tools").items()
@@ -617,6 +619,26 @@ class Controller:
             self.tools._classes[name] = cls
         self.emit("addons.changed")
         return self.addons.loaded()
+
+    def panels(self, area):
+        """[(owner id, provider)] of loaded addons' panels for one area
+        (toolbar, picker, left, right, bottom), by name."""
+        reg = self.addons.registry
+        return [(reg.owner("panels", n), p) for n, p in sorted(reg.all("panels").items())
+                if getattr(p, "area", None) == area]
+
+    def create_panel(self, owner, provider, parent):
+        """Build one panel's widget inside its addon's fault guard; None if
+        it raised (the fault is counted against the addon)."""
+        widget = None
+        with self.addons.guard(owner, "panel"):
+            widget = provider.create(self.addons_host(owner), parent)
+        return widget
+
+    def create_panels(self, area, parent):
+        """[(provider, widget)] for every panel of that area that builds."""
+        built = ((p, self.create_panel(owner, p, parent)) for owner, p in self.panels(area))
+        return [(p, w) for p, w in built if w is not None]
 
     def addon_extensions(self):
         out = []
