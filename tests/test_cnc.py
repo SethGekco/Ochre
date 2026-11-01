@@ -149,6 +149,20 @@ def main():
             bad.append(i)
     check("EVERY SHP FRAME ROUND-TRIPS BIT-EXACTLY", not bad, "-- frames %r" % bad)
 
+    # Compression 2: raw scanlines behind a u16 length. A literal 0 in one
+    # is a transparent pixel, not the start of an RLE run.
+    two = struct.pack("<HHHH", 0, 4, 2, 1) + struct.pack("<HHHHI4sII", 0, 0, 4, 2, 2, b"\0" * 4, 0, 32) \
+        + struct.pack("<H", 6) + bytes([5, 0, 7, 9]) + struct.pack("<H", 6) + bytes([0, 0, 3, 0])
+    _w, _h, two_frames = cncshp.read_frames(two)
+    check("compression 2 is read as raw lines (a 0 is a pixel, not a run)",
+          two_frames[0]["plane"].tolist() == [[5, 0, 7, 9], [0, 0, 3, 0]],
+          str(two_frames[0]["plane"].tolist()))
+    edited = np.array([[5, 0, 8, 9], [0, 0, 3, 0]], np.uint8)
+    again = cncshp.build_shp(4, 2, [edited], source=two_frames, bounds=[Rect(0, 0, 4, 2)])
+    _w, _h, again_frames = cncshp.read_frames(again)
+    check("...and an edited compression-2 frame is written back as compression 2",
+          (again_frames[0]["flags"] & 0xFF) == 2 and again_frames[0]["plane"].tolist() == edited.tolist())
+
     # Uncompressed frames must decode too.
     plain = cncshp.build_shp(W, H, planes, compress=False)
     _w, _h, plain_frames = cncshp.read_frames(plain)

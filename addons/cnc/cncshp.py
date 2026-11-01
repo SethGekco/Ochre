@@ -189,12 +189,14 @@ def read_frames(data):
             # Only the low bits are meaningful: some writers pack a size into
             # the upper half of this dword, so reading it whole yields values
             # like 0x02A40002 rather than 2.
-            if flags & FLAG_RLE:
-                entry["plane"] = decode_rle(data, data_off, w, h)
-                span = rle_span(data, data_off, h)
-            elif (flags & 0xFF) == 2:
+            # 2 is tested first: its low bits overlap FLAG_RLE, and reading
+            # it as RLE would turn a literal 0 in a raw line into a run.
+            if (flags & 0xFF) == 2:
                 entry["plane"] = _decode_prefixed(data, data_off, w, h)
                 span = _prefixed_span(data, data_off, h)
+            elif flags & FLAG_RLE:
+                entry["plane"] = decode_rle(data, data_off, w, h)
+                span = rle_span(data, data_off, h)
             else:
                 need = w * h
                 raw = data[data_off:data_off + need]
@@ -229,6 +231,12 @@ def _prefixed_span(data, offset, height):
             break
         pos += max(2, data[pos] | (data[pos + 1] << 8))
     return min(pos, len(data)) - offset
+
+
+def encode_prefixed(plane):
+    """Compression 2: each raw scanline behind a u16 length counting itself."""
+    return b"".join(struct.pack("<H", plane.shape[1] + 2) + plane[y].tobytes()
+                    for y in range(plane.shape[0]))
 
 
 def _decode_prefixed(data, offset, width, height):
@@ -324,6 +332,8 @@ def build_shp(width, height, planes, transparent=0, compress=True,
             flags = was["flags"]
             if _unchanged(sub, box, was):
                 payload = was["payload"]
+            elif (was["flags"] & 0xFF) == 2:
+                payload = encode_prefixed(sub)
             else:
                 payload = (encode_rle(sub) if was["flags"] & FLAG_RLE else raw)
         else:
