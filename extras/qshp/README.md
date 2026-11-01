@@ -106,6 +106,10 @@ Needs CMake, a C++17 compiler and the Qt development package
   holds through a full-colour RGBA PNG, which is what an editor exports, for
   120 of 120 sampled files.
 
+- **Qt versions:** built against Qt 6.4 (Ubuntu's `qt6-base-dev`), the plugin
+  loads in a separately bundled Qt 6.11.2, the same minor version Kooka
+  Pictura ships. It decodes the same as the Qt 5 build there.
+
 `tests/readcheck.cpp` is the tool used for these checks. It reads files the
 way a program that knows nothing about the format does, and prints the
 format Qt detected and an MD5 of every frame.
