@@ -1737,15 +1737,76 @@ class Controller:
 
     # ---- refine edge, sky replacement, merge to HDR, PDF -----------------------------
 
-    def refine_selection(self, radius=4, smooth=0, feather=0.0, contrast=0, shift=0):
-        """Select > Refine Edge: snap the selection to the image's edges."""
+    def refine_selection(self, radius=4, smooth=0, feather=0.0, contrast=0, shift=0,
+                         decontaminate=False, amount=50, output="selection"):
+        """Select > Refine Edge: snap the selection to the image's edges.
+
+        output (refine.OUTPUTS) is CS6's Output To: the selection itself, a
+        mask on the active layer, or a copy of the active layer cut out by
+        the refined edge -- its alpha ("new_layer") or a layer mask
+        ("new_layer_mask"). The new layer is put above the original, which
+        is hidden, and the selection is dropped, as Photoshop does.
+        Decontaminate Colors cleans the copy's edge colours (refine.
+        decontaminate), so it forces a new-layer output: asked for with
+        "selection" or "layer_mask" it becomes "new_layer_mask", which is
+        what Photoshop switches to. One undo step either way."""
         from ..engine import refine
         if self.selection.mask is None:
             return False
+        if output not in refine.OUTPUTS:
+            raise ValueError("unknown Refine Edge output %r" % (output,))
         image = self.merged()
-        return self._selection_op("Refine Edge", lambda sel: setattr(
-            sel, "mask", refine.refine_mask(image, sel.mask, radius, smooth, feather,
-                                            contrast, shift)))
+        if output == "selection" and not decontaminate:
+            return self._selection_op("Refine Edge", lambda sel: setattr(
+                sel, "mask", refine.refine_mask(image, sel.mask, radius, smooth, feather,
+                                                contrast, shift)))
+        if decontaminate and output not in refine.COLOR_OUTPUTS:
+            output = "new_layer_mask"
+        source = self.active_layer
+        if source is None or source.is_group or getattr(source, "kind", "raster") != "raster":
+            return False
+        if output == "layer_mask" and source.mask is not None:
+            return False
+        mask = refine.refine_mask(image, self.selection.mask, radius, smooth, feather,
+                                  contrast, shift)
+
+        def masked(layer):
+            # As Sky Replacement does: a reveal-all mask, then its values.
+            self.add_layer_mask("reveal", layer)
+            mcell = self.doc.cell(layer.mask)
+            px = mcell.plane("rgba")
+            px[..., 0] = px[..., 1] = px[..., 2] = mask
+            mcell._touched(self.doc.bounds)
+            self.editing_mask = False
+
+        self.history.begin_group()
+        try:
+            if output == "layer_mask":
+                masked(source)
+            else:
+                rgba = self.doc.cell(source).plane("rgba").copy()
+                if decontaminate:
+                    rgba = refine.decontaminate(rgba, mask, amount)
+                if output == "new_layer":
+                    rgba[..., 3] = (rgba[..., 3].astype(np.uint16) * mask // 255).astype(np.uint8)
+                parent = source.parent
+                index = parent.index_of(source) + 1 if parent is not None else None
+                layer = self.add_layer("%s copy" % (source.name or "Layer"), parent=parent,
+                                       index=index)
+                cell = self.doc.cell(layer)
+                cell.plane("rgba")[...] = rgba
+                cell._touched(self.doc.bounds)
+                if output == "new_layer_mask":
+                    masked(layer)
+                self.set_layer_property(source, "visible", False)
+                self.set_active_layer(layer)
+            self._selection_op("Deselect", lambda s: s.select_all())
+        finally:
+            self.history.end_group("Refine Edge")
+        self.invalidate()
+        self.dirty_since_save = True
+        self.emit("history.changed")
+        return True
 
     def select_sky(self, tolerance=3.0, shift=0):
         """Select > Sky: where the sky is, as a selection."""

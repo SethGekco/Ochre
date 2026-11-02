@@ -14,6 +14,7 @@ re-derives something we already have.
 | [FS-21 SHP/TMP editors](https://github.com/FS-21/Advanced-SHP-Editor) | LGPL-3.0 | Yes — addon only |
 | [EngieFileConverter](https://github.com/Nyerguds/EngieFileConverter) | WTFPL | Yes — addon only |
 | OS SHP Builder | none stated | **No.** Read-only reference. |
+| [Kooka Pictura](https://github.com/KookaStudio/KookaPictura) | GPL-3.0-or-later | Yes |
 
 ## Two things from OpenPDN we deliberately do not use
 
@@ -136,3 +137,12 @@ free early-out.
 k-means and port only the two-pass structure), `ConvolutionFilterEffect`
 (`scipy.ndimage.convolve` supersedes it), the GDI+ shape rasterisers (use
 `QPainter` with antialiasing), and the entire WinForms application shell.
+
+## From Kooka Pictura
+
+Algorithms re-written in Ochre's style, not code copied; the comparison
+that picked them is `docs/KOOKA-COMPARISON-2026-10-31.md`.
+
+| Ochre | Kooka source | What came across |
+|---|---|---|
+| `engine/refine.py` `decontaminate` | `crates/pictura-select/src/refine.rs` `decontaminate` | Decontaminate Colors: edge colour pulled toward the mean of nearby fully selected pixels by (1 - coverage) * amount. Ochre widens the search step by step instead of a fixed 5x5. Output To's four targets and the "colour needs a new layer" rule are the same. |
