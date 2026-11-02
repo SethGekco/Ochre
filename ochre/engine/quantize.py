@@ -57,11 +57,14 @@ _BAYER8 = np.array([
 
 
 def quantize(rgba, palette, dither=NONE, bits=5, strength=1.0, force=False,
-             origin=(0, 0)):
+             origin=(0, 0), spread=None):
     """Map (H, W, 4) uint8 to a (H, W) uint8 index plane.
 
     `origin` is the image's position in a larger canvas, so an ordered dither
-    tiles seamlessly when a region is quantised on its own.
+    tiles seamlessly when a region is quantised on its own. `spread` is the
+    ordered dither's full swing in levels; by default one snap step, which
+    suits a dense palette. A sparse one (a 4-colour export) needs about the
+    gap between its colours, or the pattern never reaches the next colour.
     """
     rgba = np.asarray(rgba, dtype=np.uint8)
     if rgba.ndim != 3 or rgba.shape[2] != 4:
@@ -79,7 +82,7 @@ def quantize(rgba, palette, dither=NONE, bits=5, strength=1.0, force=False,
         return _floyd(rgba, palette, bits, strength)
 
     if dither == ORDERED:
-        return _ordered(rgba, palette, bits, strength, origin)
+        return _ordered(rgba, palette, bits, strength, origin, spread)
 
     indices = _snap_exact_first(rgba[..., :3], palette, bits)
     return _apply_transparency(indices, rgba, palette)
@@ -181,7 +184,7 @@ def _apply_transparency(indices, rgba, palette):
     return out
 
 
-def _ordered(rgba, palette, bits, strength, origin):
+def _ordered(rgba, palette, bits, strength, origin, spread=None):
     """Bayer-threshold dithering. Vectorised, deterministic, tile-safe."""
     h, w = rgba.shape[:2]
     oy, ox = int(origin[1]), int(origin[0])
@@ -193,7 +196,7 @@ def _ordered(rgba, palette, bits, strength, origin):
 
     # Spread is the size of one quantisation step, so the dither nudges a
     # colour at most as far as the gap it is trying to hide.
-    step = 256 >> bits
+    step = (256 >> bits) if spread is None else float(spread)
     amount = (threshold - 32) * step * float(strength) / 64.0
 
     nudged = np.clip(rgba[..., :3].astype(np.float64) + amount[..., None],
