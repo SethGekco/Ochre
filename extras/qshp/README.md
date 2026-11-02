@@ -11,6 +11,17 @@ works the same way in other Qt image viewers and editors. It is a C++ port of
 the SHP codec in [Ochre](https://github.com/SethGekco/Ochre)'s C&C addon and
 is licensed GPL-3.0-or-later, like both.
 
+> **Warning for Kooka Pictura users: never press Save (Ctrl+S) on an SHP.**
+> Kooka Pictura 0.3.0 saves any file type it does not know as a Photoshop
+> file, keeping the name. Saving `unit.shp` there replaces your sprite with a
+> PSD that games and tools cannot read. Work on a copy, and save your edits
+> with **File > Export As...** (PNG) or **Quick Export as PNG**, then convert the PNG back with
+> `qshp-convert` (below). This was checked against the real 0.3.0 program:
+> Save As `saved.shp` wrote a file starting with the PSD signature `8BPS`.
+> The plugin cannot prevent it, because Kooka's save never reaches the
+> plugin. [KookaPictura-SHP](https://github.com/SethGekco/KookaPictura-SHP),
+> a fork made for SHP editing, is where native SHP saving is being built.
+
 ## What you get
 
 - **Open SHP** in the host program. A multi-frame SHP opens as a **sprite
