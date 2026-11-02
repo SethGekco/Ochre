@@ -878,8 +878,8 @@ class MainWindow(QMainWindow):
         self.nde_action.setChecked(bool(getattr(self.ctl, "non_destructive", False)))
         self._act(effects_menu, "Layer &Filters...", self.do_layer_filters)
         effects_menu.addSeparator()
-        order = ["Artistic", "Blurs", "Distort", "Edge & Generic", "Noise", "Photo",
-                 "Render", "Stylize"]
+        order = ["Artistic", "Blurs", "Brush Strokes", "Distort", "Edge & Generic", "Noise",
+                 "Photo", "Render", "Sketch", "Stylize", "Texture"]
         for category in sorted((c for c in groups if c != "Adjustments"),
                                key=lambda c: (order.index(c) if c in order else 99, c)):
             sub = effects_menu.addMenu(category.replace("&", "&&"))

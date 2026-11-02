@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout, QHBoxLayo
 
 from .effectdialog import _Row
 
-CATEGORIES = ("Artistic", "Stylize", "Distort", "Noise", "Blurs", "Edge & Generic")
+# Photoshop's six gallery families first, in its order, then Ochre's extras.
+CATEGORIES = ("Artistic", "Brush Strokes", "Distort", "Sketch", "Stylize", "Texture",
+              "Noise", "Blurs", "Edge & Generic")
 PREVIEW = (420, 320)
 THUMB = 64
 

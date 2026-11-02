@@ -578,6 +578,11 @@ def _more_builtins():
         out += tuple(MORE)
     except ImportError:
         pass
+    try:
+        from .sketch import SKETCH
+        out += tuple(SKETCH)
+    except ImportError:
+        pass
     return out
 
 
