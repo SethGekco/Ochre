@@ -20,11 +20,12 @@ from .layerdialogs import ColourButton
 
 
 class PreferencesDialog(QDialog):
-    def __init__(self, ctl, parent=None):
+    def __init__(self, ctl, parent=None, page=None):
         super().__init__(parent)
         self.ctl = ctl
         self.setWindowTitle("Preferences")
         self.widgets = {}
+        start = page            # the section to open on (Help > Search)
         outer = QVBoxLayout(self)
         tabs = QTabWidget()
         for section, keys in DEFAULTS.items():
@@ -49,6 +50,9 @@ class PreferencesDialog(QDialog):
             scroll.setWidgetResizable(True)
             scroll.setWidget(page)
             tabs.addTab(scroll, section)
+            if section == start:
+                tabs.setCurrentIndex(tabs.count() - 1)
+        self.tabs = tabs
         outer.addWidget(tabs)
         outer.addWidget(QLabel("Changes apply to new documents; some need a restart."))
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -78,7 +82,7 @@ class PreferencesDialog(QDialog):
         if self.ctl.state_dir:
             path = os.path.join(self.ctl.state_dir, "preferences.ini")
             Settings.save_user(path, changed)
-            self.ctl.settings.apply_user(path)
+            self.ctl.settings.reapply_user(path)
         super().accept()
 
 

@@ -6,7 +6,7 @@
 import os
 import numpy as np
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QStatusBar)
@@ -122,11 +122,13 @@ class MainWindow(QMainWindow):
         self._addon_holders = {}
 
         self._build_menus()
-        # The user's menu keys (Edit > Keyboard Shortcuts), over the built-in ones.
+        self._build_window_menu()
+        self._build_help_menu()
+        # The user's menu keys (Edit > Keyboard Shortcuts), over the built-in
+        # ones -- after every menu exists, Window and Help included.
         from . import keymap
         from .prefsdialog import apply_menu_keys
         apply_menu_keys(self.menuBar(), keymap.load(getattr(self.ctl, "state_dir", None)))
-        self._build_window_menu()
         self._scrollable_menus()
         self._build_status()
         self._subscribe()
@@ -137,13 +139,24 @@ class MainWindow(QMainWindow):
         self.canvas.bind()
         self._sync_all()
 
+        # Autosave and crash recovery (ui/recovery.py): this instance's
+        # recovery session, the autosave timer, and -- once the event loop
+        # is running, so after addons and command-line files -- the offer to
+        # bring back what an Ochre that crashed left behind.
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(self.autosave_tick)
+        if controller.enable_recovery():
+            self.apply_autosave_settings()
+            QTimer.singleShot(0, self.offer_recovery)
+
     # ---- wiring ----------------------------------------------------------
 
     def _subscribe(self):
         bus = self.ctl.bus
         if bus is None:
             return
-        bus.subscribe("addons.changed", lambda **k: self._sync_addon_panels())
+        bus.subscribe("addons.changed", lambda **k: (self._sync_addon_panels(),
+                                                     self._rebuild_addon_commands()))
         bus.subscribe("layers.changed", self._on_layers)
         bus.subscribe("layer.active", lambda **k: self.layers_dock.sync())
         bus.subscribe("history.changed", lambda **k: (self.history_dock.sync(),
@@ -288,12 +301,27 @@ class MainWindow(QMainWindow):
 
     def _build_window_menu(self):
         menu = self.menuBar().addMenu("&Window")
-        for dock in (self.tools_dock, self.layers_dock, self.colors_dock, self.palette_dock,
-                     self.history_dock, self.paths_dock, self.navigator_dock, self.info_dock,
-                     self.histogram_dock, self.actions_dock, self.channels_dock,
-                     self.comps_dock, self.brushes_dock, self.frames_dock):
+        self.panel_docks = (self.tools_dock, self.layers_dock, self.colors_dock,
+                            self.palette_dock, self.history_dock, self.paths_dock,
+                            self.navigator_dock, self.info_dock, self.histogram_dock,
+                            self.actions_dock, self.channels_dock, self.comps_dock,
+                            self.brushes_dock, self.frames_dock)
+        for dock in self.panel_docks:
             menu.addAction(dock.toggleViewAction())
         return menu
+
+    def _build_help_menu(self):
+        menu = self.menuBar().addMenu("&Help")
+        self.search_action = self._act(menu, "&Search...", self.do_search, "Shift+Space")
+        return menu
+
+    def do_search(self):
+        """Help > Search: the command search popup (ui/commandsearch.py)."""
+        if getattr(self, "command_search", None) is None:
+            from .commandsearch import CommandSearch
+            self.command_search = CommandSearch(self)
+        self.command_search.open()
+        return self.command_search
 
     # ---- documents (tabs) -------------------------------------------------
 
@@ -916,6 +944,7 @@ class MainWindow(QMainWindow):
             for name in members:
                 act = self._act(target, self.ctl.tools.label(name),
                                 lambda _c=False, n=name: self.ctl.set_tool(n))
+                act.setData("tool:" + name)     # Help > Search lists tools itself
                 act.setIcon(_icons.tool_icon(self.ctl.tools.icon(name)))
                 key = self.ctl.tools.shortcut(name)
                 if key:
@@ -1234,7 +1263,7 @@ class MainWindow(QMainWindow):
         """
         if not self.ctl.is_modified():
             return True
-        name = os.path.basename(self.ctl.path) if self.ctl.path else "Untitled"
+        name = self.ctl.document_name
         box = QMessageBox(self)
         box.setWindowTitle("Unsaved changes")
         box.setText("Save changes to %s before you %s?" % (name, action))
@@ -1273,6 +1302,12 @@ class MainWindow(QMainWindow):
             timer = getattr(self.canvas, timer_name, None)
             if timer is not None:
                 timer.stop()
+        # Reaching here is a clean exit: whatever was not saved, the user
+        # chose not to keep, so the recovery snapshots go too.
+        if getattr(self, "_autosave_timer", None) is not None:
+            self._autosave_timer.stop()
+        if hasattr(self.ctl, "shutdown_recovery"):
+            self.ctl.shutdown_recovery()
         bus = getattr(self.ctl, "bus", None)
         if bus is not None and hasattr(bus, "clear"):
             bus.clear()
@@ -1381,6 +1416,10 @@ class MainWindow(QMainWindow):
         start = "untitled.ochre"
         if self.ctl.path:
             start = os.path.splitext(self.ctl.path)[0] + ".ochre"
+        elif getattr(self.ctl, "display_name", None):
+            # A recovered document: beside the file it came from, never on it.
+            folder = os.path.dirname(self.ctl.recovered_from or "")
+            start = os.path.join(folder, self.ctl.display_name + ".ochre")
         path, chosen = QFileDialog.getSaveFileName(self, "Save As", start, ";;".join(texts))
         if not path:
             return
@@ -1673,9 +1712,75 @@ class MainWindow(QMainWindow):
             self.ctl.relink(path)
             self._after_pixels()
 
-    def do_preferences(self):
+    def do_preferences(self, page=None):
         from .prefsdialog import PreferencesDialog
-        PreferencesDialog(self.ctl, self).exec()
+        if PreferencesDialog(self.ctl, self, page=page).exec():
+            self.apply_autosave_settings()
+
+    # ---- autosave and crash recovery -----------------------------------------
+
+    def apply_autosave_settings(self):
+        """Start, retime or stop the autosave timer from Preferences
+        ([Recovery] Autosave, AutosaveMinutes). Turning it off deletes the
+        snapshots already taken: off means none are kept."""
+        if self.ctl.autosave_enabled():
+            minutes = max(1, min(int(self.ctl.settings.get("Recovery", "AutosaveMinutes") or 5),
+                                 24 * 60))
+            self._autosave_timer.start(minutes * 60 * 1000)
+        else:
+            self._autosave_timer.stop()
+            self.ctl.drop_all_recovery()
+
+    def autosave_tick(self):
+        """The autosave timer's callback."""
+        self.ctl.autosave()
+
+    def offer_recovery(self):
+        """Offer back the documents an Ochre that did not exit cleanly left.
+
+        Recover opens them as unsaved "-Recovered" tabs; Discard deletes them;
+        Later leaves them for the next start. Returns the number recovered.
+        """
+        import time
+        store = self.ctl.recovery
+        # A modal with nobody to answer it is a hang; leave them for later.
+        if store is None or os.environ.get("OCHRE_SELFTEST") or os.environ.get("OCHRE_NO_PROMPT"):
+            return 0
+        orphans = store.orphans()
+        docs = [d for o in orphans for d in o.documents]
+        if not docs:
+            return 0
+        rows = []
+        for d in docs:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(d.saved))
+            rows.append("%s  (autosaved %s)%s" % (d.name, when, "\n    from %s" % d.path if d.path else ""))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Recover Documents")
+        box.setText("Ochre did not shut down normally. Recover the unsaved work it was editing?")
+        box.setInformativeText("\n".join(rows) + "\n\nRecovered documents open as new, unsaved "
+                               "tabs; the original files are not touched.")
+        recover = box.addButton("Recover", QMessageBox.AcceptRole)
+        discard = box.addButton("Discard", QMessageBox.DestructiveRole)
+        box.addButton("Later", QMessageBox.RejectRole)
+        box.setDefaultButton(recover)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is recover:
+            names, failed = self.ctl.recover_documents(orphans)
+            self.canvas.bind()
+            self._sync_all()
+            if failed:
+                QMessageBox.warning(self, "Recover Documents",
+                                    "Could not open: %s\n\nThe snapshots were kept in %s."
+                                    % (", ".join(failed), os.path.join(store.root, "unrecoverable")))
+            return len(names)
+        for orphan in orphans:
+            if clicked is discard:
+                orphan.discard()
+            else:
+                orphan.release()
+        return 0
 
     def do_shortcuts(self):
         from .prefsdialog import ShortcutsDialog

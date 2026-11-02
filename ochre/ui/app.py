@@ -113,7 +113,9 @@ def main(argv=None):
     # the nearest-neighbour path and drawImage -- precisely the code that
     # would segfault if the buffer-lifetime rules were broken.
     if os.environ.get("OCHRE_SELFTEST"):
-        return _selftest(window, controller)
+        code = _selftest(window, controller)
+        window.shutdown()          # a clean exit: no recovery session left behind
+        return code
 
     # Agent control (controlbar.py): opt-in, never on by default.
     control = None

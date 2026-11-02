@@ -36,6 +36,8 @@ directly, so a tiled backend could be substituted behind this interface
 without touching the compositor, the tools or the history.
 """
 
+import itertools
+
 import numpy as np
 
 from .arith import apply_coverage, blend_over, expand_palette, mul255
@@ -52,11 +54,17 @@ def plane_channels(name):
     return PLANE_CHANNELS.get(name, 1)
 
 
+# One number per Surface ever made in this process. id() is no identity for
+# a cache that outlives the object: a freed Surface's id is handed straight
+# to the next one, which would then inherit its cached state.
+_serials = itertools.count(1)
+
+
 class Surface:
     """Pixel storage for one cell. Not thread-safe for writes."""
 
     __slots__ = ("width", "height", "planes", "authoritative", "palette",
-                 "content_bbox", "dirty", "revision")
+                 "content_bbox", "dirty", "revision", "serial")
 
     def __init__(self, width, height, planes=(RGBA,), authoritative=None,
                  palette=None, max_dirty_rects=8):
@@ -76,6 +84,9 @@ class Surface:
         # Bumped on every recorded write, so derived results (a layer's
         # styles) can tell they are stale without comparing pixels.
         self.revision = 0
+        # (serial, revision) names this surface's content for its lifetime:
+        # the save cache (fileio/ochre_format.py) keys encoded planes on it.
+        self.serial = next(_serials)
 
     # ---- introspection ---------------------------------------------------
 
@@ -501,6 +512,20 @@ class Surface:
             self.planes[name] = None
         self.content_bbox = None
         self.dirty.clear()
+
+    def __deepcopy__(self, memo):
+        """A deep copy is a new surface, so it gets a new serial. A History
+        snapshot is a deep copy, and restoring one would otherwise bring back
+        a surface under its original's serial at an OLDER revision -- whose
+        next edit then reuses a (serial, revision) pair that named different
+        pixels, and the save cache hands back the wrong ones."""
+        import copy as _copy
+        out = Surface.__new__(Surface)
+        memo[id(self)] = out
+        for name in Surface.__slots__:
+            setattr(out, name, _copy.deepcopy(getattr(self, name), memo))
+        out.serial = next(_serials)
+        return out
 
     def copy(self):
         out = Surface(self.width, self.height, tuple(self.planes),
