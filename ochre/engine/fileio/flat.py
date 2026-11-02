@@ -276,14 +276,28 @@ def _save_kwargs(name, spec, options):
     return kw
 
 
-def encode_flat(doc, fmt, options=None, table=None, flat=None):
+def encode_flat(doc, fmt, options=None, table=None, flat=None, report=None):
     """The exported file's bytes, without writing it -- what Export As uses
-    to show the real size before you commit to a quality."""
+    to show the real size before you commit to a quality.
+
+    GIF and PNG8 are written indexed (fileio/indexedexport.py); `report`,
+    a dict, is filled with what that did."""
     import io
     table = table or DEFAULT_TABLE
     name = fmt.upper()
     spec = table.formats.get(name, {})
     options = options or {}
+    from .indexedexport import INDEXED_FORMATS, encode_indexed
+    if name in INDEXED_FORMATS:
+        scale = float(options.get("scale", 1.0) or 1.0)
+        img = _prepare(doc, name, {"alpha": True}, options.get("frame"), None, scale, flat)
+        extra = {}
+        if name == "PNG8":
+            plain = dict((k, v) for k, v in options.items() if k != "cmyk_profile")
+            _img, extra = _colour_out(doc, "PNG", img, plain)
+            extra.update(_metadata_out(doc, "PNG", img, options))
+        return encode_indexed(doc, name, options, flat=np.asarray(img.convert("RGBA")),
+                              scaled=abs(scale - 1.0) > 1e-6, report=report, extra=extra)
     img = _prepare(doc, name, spec, options.get("frame"), options.get("matte"),
                    options.get("scale", 1.0), flat)
     img, extra = _colour_out(doc, name, img, options)

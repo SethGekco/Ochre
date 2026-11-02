@@ -211,7 +211,8 @@ def main():
     # ---- nothing writes around the helper -----------------------------------------
     # open(..., "w"/"wb"/"a") or ZipFile(path, "w") anywhere in the editor or
     # its addons is a save that truncates first. The helper itself is the one
-    # place allowed to open a file for writing (via os.fdopen).
+    # place allowed to open a file for writing (via os.fdopen); ZipFile(fh,
+    # "w") writes into a file object the helper handed out.
     pattern = re.compile(r"""\bopen\([^)]*,\s*["'][wax]b?\+?["']|ZipFile\([^)]*,\s*["'][wa]["']""")
     hits = []
     for base in (os.path.join(ROOT, "ochre"), ADDONS):
@@ -223,7 +224,7 @@ def main():
                 with open(full, encoding="utf-8") as fh:
                     for n, line in enumerate(fh, 1):
                         code = line.split("#", 1)[0]
-                        if pattern.search(code) and "fh, zipfile.ZipFile(fh" not in code:
+                        if pattern.search(code) and "ZipFile(fh," not in code:
                             hits.append("%s:%d" % (os.path.relpath(full, ROOT), n))
     check("no writer in ochre/ or addons/ opens its target for writing directly",
           not hits, str(hits[:5]))

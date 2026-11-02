@@ -35,18 +35,22 @@ rather than merely close.
 
 import io
 import os
+import threading
 import zipfile
+import zlib
 
 import numpy as np
 from PIL import Image
 
 from .. import budget
+from ..arith import expand_palette
 from ..atomic import atomic_write
+from ..frame import COLD
 from ..geometry import Rect
 from ..ini import IniDB
 from ..layer import Layer, LayerGroup
 from ..palette import LENGTH, Palette
-from ..surface import plane_channels
+from ..surface import INDEX, RGBA, plane_channels
 
 FORMAT_VERSION = 1
 MANIFEST = "manifest.ini"
@@ -85,198 +89,403 @@ def _decode_plane(data, plane, size=None, what="a layer image"):
     return np.array(img, dtype=np.uint8, copy=True)
 
 
-# ---- saving -------------------------------------------------------------
+# ---- the encode cache ---------------------------------------------------
 
-def save(doc, path, selection=None, thumbnail_max=256):
-    """Write a document. Returns the path."""
-    lines = []
-    add = lines.append
+class EncodeCache:
+    """Encoded plane PNGs from the latest save, keyed by what they encode.
 
-    add("; Ochre document. The pixel data lives in the PNGs alongside this")
-    add("; file; everything else is here, in plain text, on purpose.")
-    add("")
-    add("[Document]")
-    add("FormatVersion = %d" % FORMAT_VERSION)
-    add("Width = %d" % doc.width)
-    add("Height = %d" % doc.height)
-    add("Generator = Ochre")
-    add("CurrentFrame = %d" % doc.current)
-    add("AxisLayout = %s" % _esc(doc.axis_layout))
-    add("AxisColumns = %d" % doc.axis_columns)
-    if doc.palette is not None:
-        add("Palette = %s" % _esc(doc.palette.name or "palette"))
-    for key, value in sorted(doc.meta.items()):
-        add("Meta.%s = %s" % (key, _esc(value)))
-    add("")
+    Re-encoding every plane is what makes saving a 20-layer document take
+    seconds after a one-layer edit, and what would make autosave too dear to
+    run. A Surface already names its content: (serial, revision) changes on
+    every recorded write (surface.py). So a plane whose key matches the one
+    the last save wrote is written from that save's bytes, and only what
+    changed is encoded. A reused entry is byte-identical to a fresh encode:
+    the encoder is deterministic and the key covers every input to it.
 
-    # Layers, flattened. Parent/Index rebuild the tree, so the INI stays flat
-    # and a human can read it without tracking indentation.
-    def emit_nodes(group, parent_id=""):
-        for index, node in enumerate(group.children):
-            add("[Layer:%s]" % node.id)
-            add("Name = %s" % _esc(node.name))
-            add("Type = %s" % ("group" if node.is_group else "raster"))
-            add("Parent = %s" % parent_id)
-            add("Index = %d" % index)
-            add("Opacity = %d" % node.opacity)
-            add("Visible = %s" % ("1" if node.visible else "0"))
-            add("BlendMode = %s" % _esc(node.blend))
-            if node.is_group and getattr(node, "region", None):
-                from ..regions import encode as encode_region
-                add("Region = %s" % _esc(encode_region(node.region)))
-            if not node.is_group:
-                add("Planes = %s" % ",".join(node.planes))
-                add("Authoritative = %s" % ",".join(node.authoritative))
-                if getattr(node, "kind", "raster") != "raster":
-                    add("Kind = %s" % node.kind)
-                for key, value in sorted(getattr(node, "params", {}).items()):
-                    add("Param.%s = %s" % (key, _esc(_encode_value(value))))
-                if getattr(node, "clip", False):
-                    add("Clip = 1")
-                if getattr(node, "blend_if", None):
-                    add("BlendIf = %s" % ",".join(str(int(v)) for v in node.blend_if))
-                if getattr(node, "fill_opacity", 255) != 255:
-                    add("FillOpacity = %d" % node.fill_opacity)
-                if getattr(node, "knockout", "none") != "none":
-                    add("Knockout = %s" % node.knockout)
-                if getattr(node, "vector_mask", None) is not None:
-                    from ..paths import encode_subpath as _enc
-                    for k, sub in enumerate(node.vector_mask.subpaths):
-                        add("VectorMask.%d = %s" % (k, _enc(sub)))
-                    if not getattr(node, "vector_mask_enabled", True):
-                        add("VectorMaskEnabled = 0")
-                if getattr(node, "mask", None) is not None:
-                    add("Mask = 1")
-                    if not node.mask_enabled:
-                        add("MaskEnabled = 0")
-                from ..layerstyles import encode as encode_styles
-                for key, value in sorted(encode_styles(getattr(node, "styles", {})).items()):
-                    add("%s = %s" % (key, _esc(value)))
-            for key, value in sorted(node.meta.items()):
-                add("Meta.%s = %s" % (key, _esc(value)))
-            add("")
-            if node.is_group:
-                emit_nodes(node, node.id)
+    One cache per open document, pruned to the planes the latest complete
+    save wrote -- about one encoded copy of the document, never its history.
+    Locked, because an autosave fills it from a worker thread.
 
-    emit_nodes(doc.root)
+    The limit of the key: a write that changes pixels WITHOUT bumping the
+    revision (assigning into plane() and never calling _touched) leaves a
+    stale entry behind. So an explicit save checks each reused plane's CRC-32
+    against the live pixels first -- about 14 ms per 64 MB, against ~180 ms
+    or more to encode it -- re-encodes on a mismatch and counts it in
+    `stale`. Autosave trusts the key: it runs while you work, and it only
+    ever writes a recovery copy.
+    """
 
-    for index, frame in enumerate(doc.frames):
-        add("[Frame:%s]" % frame.id)
-        add("Name = %s" % _esc(frame.name))
-        add("Index = %d" % index)
-        add("DurationMs = %d" % frame.duration_ms)
-        for key, value in sorted(frame.meta.items()):
+    def __init__(self):
+        self._entries = {}        # (layer_id, frame_id, plane) -> (key, crc, png)
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+        self.stale = 0
+
+    def lookup(self, slot, key):
+        """(crc, png) for slot when it was last encoded under key, else None."""
+        with self._lock:
+            entry = self._entries.get(slot)
+        if entry is None or entry[0] != key:
+            return None
+        return entry[1], entry[2]
+
+    def store(self, slot, key, crc, data):
+        with self._lock:
+            self._entries[slot] = (key, crc, data)
+
+    def keep_only(self, slots):
+        """Forget every slot the latest complete save did not write."""
+        slots = set(slots)
+        with self._lock:
+            for slot in [s for s in self._entries if s not in slots]:
+                del self._entries[slot]
+
+    def nbytes(self):
+        with self._lock:
+            return sum(len(e[2]) for e in self._entries.values())
+
+    def __len__(self):
+        with self._lock:
+            return len(self._entries)
+
+
+def _crc(arr):
+    return zlib.crc32(np.ascontiguousarray(arr))
+
+
+def _plane_key(surface, plane):
+    """What a plane's encoded bytes depend on. A derived plane is a function
+    of its source AND the palette, and a palette edit recolours it without
+    a write, so the palette's colours are part of its key."""
+    key = (surface.serial, surface.revision, surface.width, surface.height)
+    if surface.is_derived(plane) and surface.palette is not None:
+        key += (zlib.crc32(np.ascontiguousarray(surface.palette.render_entries).tobytes()),)
+    return key
+
+
+def _plane_reader(surface, frame, layer_id, plane, copy):
+    """A zero-argument function returning the plane's pixels, or None when
+    there is nothing to write.
+
+    A cold frame's arrays are gone (frame.py) -- its authoritative planes
+    are zlib blobs -- so they are read from those, without thawing the frame
+    into the document. Saving used to read surface.planes alone and wrote
+    nothing at all for a cold frame's cells, which then loaded blank.
+    """
+    derived = surface.is_derived(plane)
+    frozen = frame._frozen if frame.residency == COLD else None
+    if frozen is not None:
+        def thawed(name):
+            blob = frozen.get((layer_id, name))
+            if blob is None:
+                return None
+            data, shape = blob
+            return np.frombuffer(zlib.decompress(data), dtype=np.uint8).reshape(shape)
+        if not derived:
+            if frozen.get((layer_id, plane)) is None:
+                return None
+            return lambda: thawed(plane)
+        shape = (surface.height, surface.width, plane_channels(plane))
+        if plane_channels(plane) == 1:
+            shape = shape[:2]
+        if plane == RGBA and INDEX in surface.authoritative and surface.palette is not None:
+            entries = np.array(surface.palette.render_entries, copy=True)
+
+            def expanded():
+                idx = thawed(INDEX)
+                if idx is None:
+                    idx = np.zeros(shape[:2], dtype=np.uint8)
+                return expand_palette(entries, idx)
+            return expanded
+        return lambda: np.zeros(shape, dtype=np.uint8)
+    arr = surface.planes.get(plane)
+    if arr is None:
+        if not derived:
+            return None
+        arr = surface.plane(plane)            # materialise for interchange
+    if copy:
+        arr = arr.copy()
+    return lambda: arr
+
+
+class Snapshot:
+    """Everything one save writes, taken from the document in one go.
+
+    Taking it (the constructor) runs where the document lives -- the UI
+    thread -- and is cheap: the manifest text, the bytes the cache already
+    holds, and for every other plane a way to read it. write() is the slow
+    part, PNG encoding and the zip, and may run on another thread while
+    editing carries on.
+
+    Off the document's thread, the planes still to encode are read LIVE
+    unless copy=True. Each one's revision is checked again after encoding;
+    one that moved means the bytes may mix two states, so the plane is not
+    cached and write() returns False. Nothing is lost by that: the planes
+    that held still are cached, and the retry encodes only what moved.
+    """
+
+    def __init__(self, doc, selection=None, thumbnail_max=256, cache=None,
+                 verify=True, copy=False):
+        self.cache = cache
+        self.jobs = []        # [rel, plane, slot, key, crc, png, reader, surface, revision]
+        self.torn = []
+        self.encoded = 0
+        self.reused = 0
+        self.manifest = self._manifest(doc, verify, copy)
+        self.palette_png = None
+        if doc.palette is not None:
+            self.palette_png = _encode_plane(doc.palette.entries.reshape(1, LENGTH, 4), "rgba")
+        self.selection = None
+        if selection is not None and not selection.selects_all():
+            self.selection = np.array(selection.mask, copy=True)
+        self.thumbnail = _thumbnail(doc, thumbnail_max) if thumbnail_max else None
+
+    def _manifest(self, doc, verify, copy):
+        lines = []
+        add = lines.append
+
+        add("; Ochre document. The pixel data lives in the PNGs alongside this")
+        add("; file; everything else is here, in plain text, on purpose.")
+        add("")
+        add("[Document]")
+        add("FormatVersion = %d" % FORMAT_VERSION)
+        add("Width = %d" % doc.width)
+        add("Height = %d" % doc.height)
+        add("Generator = Ochre")
+        add("CurrentFrame = %d" % doc.current)
+        add("AxisLayout = %s" % _esc(doc.axis_layout))
+        add("AxisColumns = %d" % doc.axis_columns)
+        if doc.palette is not None:
+            add("Palette = %s" % _esc(doc.palette.name or "palette"))
+        for key, value in sorted(doc.meta.items()):
             add("Meta.%s = %s" % (key, _esc(value)))
         add("")
 
-    if doc.palette is not None:
-        pal = doc.palette
-        add("[Palette]")
-        add("Name = %s" % _esc(pal.name or "palette"))
-        add("File = %s" % PALETTE)
-        if pal.transparent is not None:
-            add("Transparent = %d" % pal.transparent)
-        if pal.protected:
-            add("Protected = %s" % ",".join(str(i) for i in sorted(pal.protected)))
-        for n, (lo, hi, label, role) in enumerate(pal.annotations):
-            add("Annotation.%d = %d-%d,%s,%s" % (n, lo, hi, _esc(label), _esc(role)))
-        add("")
+        # Layers, flattened. Parent/Index rebuild the tree, so the INI stays flat
+        # and a human can read it without tracking indentation.
+        def emit_nodes(group, parent_id=""):
+            for index, node in enumerate(group.children):
+                add("[Layer:%s]" % node.id)
+                add("Name = %s" % _esc(node.name))
+                add("Type = %s" % ("group" if node.is_group else "raster"))
+                add("Parent = %s" % parent_id)
+                add("Index = %d" % index)
+                add("Opacity = %d" % node.opacity)
+                add("Visible = %s" % ("1" if node.visible else "0"))
+                add("BlendMode = %s" % _esc(node.blend))
+                if node.is_group and getattr(node, "region", None):
+                    from ..regions import encode as encode_region
+                    add("Region = %s" % _esc(encode_region(node.region)))
+                if not node.is_group:
+                    add("Planes = %s" % ",".join(node.planes))
+                    add("Authoritative = %s" % ",".join(node.authoritative))
+                    if getattr(node, "kind", "raster") != "raster":
+                        add("Kind = %s" % node.kind)
+                    for key, value in sorted(getattr(node, "params", {}).items()):
+                        add("Param.%s = %s" % (key, _esc(_encode_value(value))))
+                    if getattr(node, "clip", False):
+                        add("Clip = 1")
+                    if getattr(node, "blend_if", None):
+                        add("BlendIf = %s" % ",".join(str(int(v)) for v in node.blend_if))
+                    if getattr(node, "fill_opacity", 255) != 255:
+                        add("FillOpacity = %d" % node.fill_opacity)
+                    if getattr(node, "knockout", "none") != "none":
+                        add("Knockout = %s" % node.knockout)
+                    if getattr(node, "vector_mask", None) is not None:
+                        from ..paths import encode_subpath as _enc
+                        for k, sub in enumerate(node.vector_mask.subpaths):
+                            add("VectorMask.%d = %s" % (k, _enc(sub)))
+                        if not getattr(node, "vector_mask_enabled", True):
+                            add("VectorMaskEnabled = 0")
+                    if getattr(node, "mask", None) is not None:
+                        add("Mask = 1")
+                        if not node.mask_enabled:
+                            add("MaskEnabled = 0")
+                    from ..layerstyles import encode as encode_styles
+                    for key, value in sorted(encode_styles(getattr(node, "styles", {})).items()):
+                        add("%s = %s" % (key, _esc(value)))
+                for key, value in sorted(node.meta.items()):
+                    add("Meta.%s = %s" % (key, _esc(value)))
+                add("")
+                if node.is_group:
+                    emit_nodes(node, node.id)
 
-    # Vector paths, as text: one value per subpath, anchors and handles in
-    # document coordinates (engine/paths.py encode_subpath).
-    from ..paths import encode_subpath
-    for n, vpath in enumerate(getattr(doc, "paths", ())):
-        add("[Path:%04d]" % n)
-        add("Name = %s" % _esc(vpath.name))
-        if doc.active_path == n:
-            add("Active = 1")
-        for k, sub in enumerate(vpath.subpaths):
-            add("Subpath.%d = %s" % (k, encode_subpath(sub)))
-        add("")
+        emit_nodes(doc.root)
 
-    # Saved selections (their pixels are cells, written with the rest) and
-    # layer comps (plain state, as one JSON line each).
-    for ch in getattr(doc, "channels", ()):
-        add("[Channel:%s]" % ch.id)
-        add("Name = %s" % _esc(ch.name))
-        add("")
-    import json as _json
-    for n, comp in enumerate(getattr(doc, "comps", ())):
-        add("[Comp:%04d]" % n)
-        add("Name = %s" % _esc(comp.get("name", "")))
-        add("State = %s" % _esc(_json.dumps(comp.get("state", {}), separators=(",", ":"))))
-        add("")
+        for index, frame in enumerate(doc.frames):
+            add("[Frame:%s]" % frame.id)
+            add("Name = %s" % _esc(frame.name))
+            add("Index = %d" % index)
+            add("DurationMs = %d" % frame.duration_ms)
+            for key, value in sorted(frame.meta.items()):
+                add("Meta.%s = %s" % (key, _esc(value)))
+            add("")
 
-    # Guides and the other non-pixel marks (engine/annotations.py).
-    from ..annotations import encode_note
-    if getattr(doc, "guides", None):
-        add("[Guides]")
-        for n, (orient, pos) in enumerate(doc.guides):
-            add("%s.%d = %g" % ("H" if orient == "h" else "V", n, pos))
-        add("")
-    marks = [("Sampler", "%g,%g" % p) for p in getattr(doc, "samplers", [])]
-    marks += [("Count", "%g,%g" % p) for p in getattr(doc, "counts", [])]
-    marks += [("Note", encode_note(*n)) for n in getattr(doc, "notes", [])]
-    marks += [("Slice", "%s,%d,%d,%d,%d" % ((_esc(nm).replace(",", "_"),) + tuple(r)))
-              for nm, r in getattr(doc, "slices", [])]
-    marks += [("Plane", ",".join("%g" % v for p in quad for v in p))
-              for quad in getattr(doc, "planes", [])]
-    if marks:
-        add("[Marks]")
-        for n, (kind, value) in enumerate(marks):
-            add("%s.%d = %s" % (kind, n, value))
-        add("")
-
-    # Cells: one section per (layer, frame) that actually has pixels.
-    blobs = {}
-    frame_index = {f.id: i for i, f in enumerate(doc.frames)}
-    for (layer_id, frame_id), surface in sorted(doc.cells.items()):
-        node = doc.layer(layer_id)
-        if node is None or frame_id not in frame_index:
-            continue
-        fi = frame_index[frame_id]
-        written = []
-        for plane in surface.planes:
-            arr = surface.planes.get(plane)
-            derived = surface.is_derived(plane)
-            if arr is None:
-                if not derived:
-                    continue
-                arr = surface.plane(plane)       # materialise for interchange
-            rel = _plane_path(fi, layer_id, plane)
-            blobs[rel] = _encode_plane(arr, plane)
-            written.append((plane, rel, derived))
-        if not written:
-            continue
-        add("[Cell:%s@%s]" % (layer_id, frame_id))
-        for plane, rel, derived in written:
-            add("%sPlane.%s = %s" % ("; derived, not loaded -- " if derived else "",
-                                     plane, rel))
-        if surface.content_bbox is not None:
-            b = surface.content_bbox
-            add("ContentBBox = %d,%d,%d,%d" % (b.x, b.y, b.w, b.h))
-        add("")
-
-    manifest = "\n".join(lines) + "\n"
-
-    # Atomic: written beside the target and renamed over it, so a save that
-    # fails halfway leaves the previous file exactly as it was.
-    with atomic_write(path) as fh, zipfile.ZipFile(fh, "w") as zf:
-        # The manifest compresses well and is tiny; the PNGs are already
-        # compressed, so deflating them again costs CPU for nothing.
-        zf.writestr(MANIFEST, manifest, zipfile.ZIP_DEFLATED)
-        for rel, data in sorted(blobs.items()):
-            zf.writestr(rel, data, zipfile.ZIP_STORED)
         if doc.palette is not None:
-            zf.writestr(PALETTE,
-                        _encode_plane(doc.palette.entries.reshape(1, LENGTH, 4), "rgba"),
-                        zipfile.ZIP_STORED)
-        if selection is not None and not selection.selects_all():
-            zf.writestr(SELECTION, _encode_plane(selection.mask, "mask"),
-                        zipfile.ZIP_STORED)
-        thumb = _thumbnail(doc, thumbnail_max)
-        if thumb is not None:
-            zf.writestr(THUMBNAIL, thumb, zipfile.ZIP_STORED)
+            pal = doc.palette
+            add("[Palette]")
+            add("Name = %s" % _esc(pal.name or "palette"))
+            add("File = %s" % PALETTE)
+            if pal.transparent is not None:
+                add("Transparent = %d" % pal.transparent)
+            if pal.protected:
+                add("Protected = %s" % ",".join(str(i) for i in sorted(pal.protected)))
+            for n, (lo, hi, label, role) in enumerate(pal.annotations):
+                add("Annotation.%d = %d-%d,%s,%s" % (n, lo, hi, _esc(label), _esc(role)))
+            add("")
+
+        # Vector paths, as text: one value per subpath, anchors and handles in
+        # document coordinates (engine/paths.py encode_subpath).
+        from ..paths import encode_subpath
+        for n, vpath in enumerate(getattr(doc, "paths", ())):
+            add("[Path:%04d]" % n)
+            add("Name = %s" % _esc(vpath.name))
+            if doc.active_path == n:
+                add("Active = 1")
+            for k, sub in enumerate(vpath.subpaths):
+                add("Subpath.%d = %s" % (k, encode_subpath(sub)))
+            add("")
+
+        # Saved selections (their pixels are cells, written with the rest) and
+        # layer comps (plain state, as one JSON line each).
+        for ch in getattr(doc, "channels", ()):
+            add("[Channel:%s]" % ch.id)
+            add("Name = %s" % _esc(ch.name))
+            add("")
+        import json as _json
+        for n, comp in enumerate(getattr(doc, "comps", ())):
+            add("[Comp:%04d]" % n)
+            add("Name = %s" % _esc(comp.get("name", "")))
+            add("State = %s" % _esc(_json.dumps(comp.get("state", {}), separators=(",", ":"))))
+            add("")
+
+        # Guides and the other non-pixel marks (engine/annotations.py).
+        from ..annotations import encode_note
+        if getattr(doc, "guides", None):
+            add("[Guides]")
+            for n, (orient, pos) in enumerate(doc.guides):
+                add("%s.%d = %g" % ("H" if orient == "h" else "V", n, pos))
+            add("")
+        marks = [("Sampler", "%g,%g" % p) for p in getattr(doc, "samplers", [])]
+        marks += [("Count", "%g,%g" % p) for p in getattr(doc, "counts", [])]
+        marks += [("Note", encode_note(*n)) for n in getattr(doc, "notes", [])]
+        marks += [("Slice", "%s,%d,%d,%d,%d" % ((_esc(nm).replace(",", "_"),) + tuple(r)))
+                  for nm, r in getattr(doc, "slices", [])]
+        marks += [("Plane", ",".join("%g" % v for p in quad for v in p))
+                  for quad in getattr(doc, "planes", [])]
+        if marks:
+            add("[Marks]")
+            for n, (kind, value) in enumerate(marks):
+                add("%s.%d = %s" % (kind, n, value))
+            add("")
+
+        # Cells: one section per (layer, frame) that actually has pixels.
+        cache = self.cache
+        frame_index = {f.id: i for i, f in enumerate(doc.frames)}
+        for (layer_id, frame_id), surface in sorted(doc.cells.items()):
+            node = doc.layer(layer_id)
+            if node is None or frame_id not in frame_index:
+                continue
+            fi = frame_index[frame_id]
+            frame = doc.frames[fi]
+            written = []
+            for plane in surface.planes:
+                derived = surface.is_derived(plane)
+                slot = (layer_id, frame_id, plane)
+                key = _plane_key(surface, plane)
+                hit = cache.lookup(slot, key) if cache is not None else None
+                live = surface.planes.get(plane) if frame.residency != COLD else None
+                if hit is not None and verify and live is not None and _crc(live) != hit[0]:
+                    # Pixels changed under an unchanged revision: some write
+                    # skipped _touched. Encode afresh; never save stale bytes.
+                    cache.stale += 1
+                    hit = None
+                if hit is not None:
+                    cache.hits += 1
+                    self.reused += 1
+                    reader = None
+                else:
+                    reader = _plane_reader(surface, frame, layer_id, plane, copy)
+                    if reader is None:
+                        continue
+                    if cache is not None:
+                        cache.misses += 1
+                rel = _plane_path(fi, layer_id, plane)
+                self.jobs.append([rel, plane, slot, key,
+                                  None if hit is None else hit[0],
+                                  None if hit is None else hit[1],
+                                  reader, surface, surface.revision])
+                written.append((plane, rel, derived))
+            if not written:
+                continue
+            add("[Cell:%s@%s]" % (layer_id, frame_id))
+            for plane, rel, derived in written:
+                add("%sPlane.%s = %s" % ("; derived, not loaded -- " if derived else "",
+                                         plane, rel))
+            if surface.content_bbox is not None:
+                b = surface.content_bbox
+                add("ContentBBox = %d,%d,%d,%d" % (b.x, b.y, b.w, b.h))
+            add("")
+
+        return "\n".join(lines) + "\n"
+
+    def encode(self):
+        """Encode every plane the cache could not supply. False when one of
+        them changed while it was being read (see the class note)."""
+        for job in self.jobs:
+            if job[5] is not None:
+                continue
+            arr = np.ascontiguousarray(job[6]())
+            crc = _crc(arr)
+            job[4], job[5] = crc, _encode_plane(arr, job[1])
+            job[6] = None                       # let a copy go as soon as it is encoded
+            self.encoded += 1
+            if job[7].revision != job[8]:
+                self.torn.append(job[0])
+            elif self.cache is not None:
+                self.cache.store(job[2], job[3], crc, job[5])
+        return not self.torn
+
+    def write(self, target):
+        """Encode what is left and write the zip to target: a path, written
+        atomically (beside it, then renamed over it, so a save that fails
+        halfway leaves the previous file exactly as it was), or a binary
+        file object the caller commits. Returns True when the file is a
+        consistent picture of the document as it was taken."""
+        complete = self.encode()
+        if hasattr(target, "write"):
+            self._zip(target)
+        else:
+            with atomic_write(target) as fh:
+                self._zip(fh)
+        if complete and self.cache is not None:
+            self.cache.keep_only(job[2] for job in self.jobs)
+        return complete
+
+    def _zip(self, fh):
+        with zipfile.ZipFile(fh, "w") as zf:
+            # The manifest compresses well and is tiny; the PNGs are already
+            # compressed, so deflating them again costs CPU for nothing.
+            zf.writestr(MANIFEST, self.manifest, zipfile.ZIP_DEFLATED)
+            for job in sorted(self.jobs, key=lambda j: j[0]):
+                zf.writestr(job[0], job[5], zipfile.ZIP_STORED)
+            if self.palette_png is not None:
+                zf.writestr(PALETTE, self.palette_png, zipfile.ZIP_STORED)
+            if self.selection is not None:
+                zf.writestr(SELECTION, _encode_plane(self.selection, "mask"),
+                            zipfile.ZIP_STORED)
+            if self.thumbnail is not None:
+                zf.writestr(THUMBNAIL, self.thumbnail, zipfile.ZIP_STORED)
+
+
+def save(doc, path, selection=None, thumbnail_max=256, cache=None):
+    """Write a document. Returns the path.
+
+    cache: an EncodeCache kept with the document, so planes unchanged since
+    the last save are written without encoding them again.
+    """
+    Snapshot(doc, selection, thumbnail_max, cache, verify=True).write(path)
     return path
 
 
