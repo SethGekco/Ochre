@@ -143,6 +143,8 @@ def run_steps(ctl, steps, flags):
             except Exception as exc:                       # noqa: BLE001
                 raise scripting.CommandError(str(exc)) from exc
             _say(flags, "opened %s (%dx%d)" % (value, ctl.doc.width, ctl.doc.height))
+            for note in getattr(ctl, "open_notes", None) or ():
+                print("ochre: note: %s" % note, file=sys.stderr)
         elif kind == "new":
             ctl.new_document(*value)
             _say(flags, "new %dx%d" % value)

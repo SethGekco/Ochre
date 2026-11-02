@@ -8,10 +8,14 @@ Pillow can read a PSD's layers, but not their opacity, blend mode,
 visibility, masks, clipping or group structure -- which is most of what makes
 a PSD worth opening as one -- so this reads the layer records itself.
 
-READ: 8- and 16-bit RGB and greyscale (16-bit is reduced to 8). Layers with
-names (Unicode when present), position, opacity, blend mode, visibility,
-clipping, layer masks, and groups (nested). Raw, RLE (PackBits) and ZIP
-channel data. Anything else -- CMYK, Lab, adjustment and smart-object
+READ: 8-, 16- and 32-bit RGB and greyscale. Ochre works in 8 bits, so deeper
+files are reduced on opening -- rounded, not truncated (see _narrow) -- and
+the document carries a note saying so, which the window, the headless CLI
+and the control server pass on. Layers with names (Unicode when present),
+position, opacity, blend mode, visibility, clipping, layer masks, and groups
+(nested), whether in the layer info or, as Photoshop stores 16- and 32-bit
+layers, in the document's Lr16 / Lr32 block. Raw, RLE (PackBits) and ZIP
+(with or without prediction) channel data. Anything else -- CMYK, Lab, adjustment and smart-object
 layers, layer effects -- falls back to the flattened composite the file
 carries, so the picture still opens.
 
@@ -104,34 +108,65 @@ class _Reader:
         return struct.unpack(">Q", self.take(8))[0]
 
 
+def _narrow(raw, h, w, depth):
+    """Samples at `depth` bits -> (h, w) uint8, ROUNDED to Ochre's 8 bits.
+
+    16-bit is round(v / 257), half up (65535 / 257 = 255 exactly, and no
+    16-bit value lies halfway, 257 being odd). Truncating with v >> 8
+    instead would put every value whose low byte is 128 or more one step
+    too dark. 32-bit is floating point: clipped to 0..1 (NaN reads as 0)
+    and rounded to v * 255, taken as stored -- no transfer curve is
+    applied to it."""
+    n = h * w
+    if depth == 8:
+        return np.frombuffer(raw, np.uint8, n).reshape(h, w)
+    if depth == 16:
+        v = np.frombuffer(raw, ">u2", n).astype(np.uint32)
+        return ((v + 128) // 257).astype(np.uint8).reshape(h, w)
+    f = np.nan_to_num(np.frombuffer(raw, ">f4", n).astype(np.float32), nan=0.0)
+    return np.floor(np.clip(f, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8).reshape(h, w)
+
+
+def _unpredict(raw, h, w, depth):
+    """Undo ZIP-with-prediction: a running sum along each row, of bytes at
+    8 bits and of 16-bit samples at 16. A 32-bit row stores its floats'
+    four byte planes one after another, summed bytewise; summing, then
+    interleaving the planes back, gives big-endian floats."""
+    if depth == 8:
+        a = np.frombuffer(raw, np.uint8, h * w).reshape(h, w)
+        return np.cumsum(a, axis=1, dtype=np.uint8).tobytes()
+    if depth == 16:
+        a = np.frombuffer(raw, ">u2", h * w).reshape(h, w).astype(np.uint16)
+        return np.cumsum(a, axis=1, dtype=np.uint16).astype(">u2").tobytes()
+    a = np.frombuffer(raw, np.uint8, h * w * 4).reshape(h, 4 * w)
+    a = np.cumsum(a, axis=1, dtype=np.uint8).reshape(h, 4, w)
+    return np.ascontiguousarray(a.transpose(0, 2, 1)).tobytes()
+
+
 def _channel(r, w, h, depth, psb, length):
     """One channel's pixels (h, w) uint8, from compressed channel data."""
     start = r.p
     comp = r.u16()
-    bpp = depth // 8
-    rowbytes = w * bpp
+    rowbytes = w * (depth // 8)
     if w == 0 or h == 0:
         r.p = start + length
         return np.zeros((h, w), np.uint8)
     if comp == 0:
         raw = r.take(rowbytes * h)
     elif comp == 1:
-        raw = _rle_rows(r, h, rowbytes, psb).tobytes()
+        raw = _rle_rows(r, h, rowbytes, psb)
     elif comp in (2, 3):
         # Bounded by what the channel can hold: a zip bomb in a channel
         # stops at rowbytes * h instead of at the end of memory.
         raw = budget.inflate(r.take(length - 2), rowbytes * h, "a layer channel")
+        if len(raw) < rowbytes * h:
+            raise ValueError("a PSD layer channel inflates to less than its size")
         if comp == 3:
-            a = np.frombuffer(raw, np.uint8 if bpp == 1 else ">u2").reshape(h, w).copy()
-            a = np.cumsum(a, axis=1, dtype=a.dtype)
-            raw = a.astype(">u2").tobytes() if bpp == 2 else a.astype(np.uint8).tobytes()
+            raw = _unpredict(raw, h, w, depth)
     else:
         raise ValueError("unknown PSD compression %d" % comp)
     r.p = start + length
-    if bpp == 2:
-        a = np.frombuffer(raw[:rowbytes * h], ">u2").reshape(h, w)
-        return (a >> 8).astype(np.uint8)
-    return np.frombuffer(raw[:rowbytes * h], np.uint8).reshape(h, w)
+    return _narrow(raw, h, w, depth)
 
 
 def _pascal(r, pad):
@@ -143,12 +178,73 @@ def _pascal(r, pad):
     return name.decode("latin-1", "replace")
 
 
+# Tagged-block keys whose length is 8 bytes in a PSB (psd-tools' set, which
+# Kooka's codec uses as well); every other key's length is 4 bytes.
+BIG_KEYS = frozenset((b"Alph", b"FELS", b"FEid", b"FMsk", b"FXid", b"LMsk", b"Layr", b"Lr16",
+                      b"Lr32", b"Mt16", b"Mt32", b"Mtrn", b"PxSD", b"artd", b"cinf", b"extd",
+                      b"extn", b"lnk2", b"lnk3", b"lnkE", b"pths"))
+SIGNATURES = (b"8BIM", b"8B64")
+
+
+def _tagged(r, end, psb, pad):
+    """Tagged blocks from r.p up to `end`: [(key, data, raw, at)], raw being
+    the block exactly as stored (signature to padding) and `at` where its
+    data starts. Data is padded to `pad` bytes (2 in a layer record, 4 at
+    document level) -- or less, when the next signature starts sooner, as
+    some writers pad less. A block that does not parse ends the walk."""
+    out = []
+    d = r.d
+    while r.p + 12 <= end:
+        start = r.p
+        if d[start:start + 4] not in SIGNATURES:
+            break
+        r.p += 4
+        key = r.take(4)
+        n = r.u64() if psb and key in BIG_KEYS else r.u32()
+        if r.p + n > end:
+            r.p = start
+            break
+        at = r.p
+        data = r.take(n)
+        skip = (-n) % pad
+        for candidate in (skip, n % 2, 0):
+            if r.p + candidate >= end or d[r.p + candidate:r.p + candidate + 4] in SIGNATURES:
+                skip = candidate
+                break
+        r.p = min(end, r.p + skip)
+        out.append((key, data, d[start:r.p], at))
+    return out
+
+
+def _resources(section):
+    """The image resources section as [(id, raw block)] in stored order, and
+    the bytes after the last block that parses (kept as they are)."""
+    out = []
+    r = _Reader(section)
+    end = len(section)
+    try:
+        while r.p + 12 <= end and section[r.p:r.p + 4] in (b"8BIM", b"MeSa", b"8B64", b"AgHg",
+                                                            b"PHUT", b"DCSR"):
+            start = r.p
+            r.take(4)
+            rid = r.u16()
+            n = r.u8()
+            r.take(n + ((n + 1) % 2))         # Pascal name, padded to even
+            size = r.u32()
+            r.take(size + size % 2)
+            out.append((rid, section[start:r.p]))
+    except ValueError:
+        r.p = start
+    return out, section[r.p:]
+
+
 class PSDLayer:
     def __init__(self):
         self.name = ""
         self.rect = (0, 0, 0, 0)          # top, left, bottom, right
         self.channels = []                # (id, length)
         self.blend = "Normal"
+        self.blend_key = b"norm"          # as stored, known to Ochre or not
         self.opacity = 255
         self.clipping = False
         self.hidden = False
@@ -157,140 +253,188 @@ class PSDLayer:
         self.mask_disabled = False
         self.section = 0                  # lsct: 0 layer, 1/2 group open/closed, 3 group end
         self.blend_if = None
+        self.ranges = b""                 # the blending ranges as stored
         self.fill = 255                   # iOpa: Fill opacity
         self.knockout = False             # knko (PSD stores one flag: shallow)
+        self.blocks = []                  # tagged blocks Ochre does not model: (key, data, raw)
+        self.index = 0                    # the record's place in the file, bottom-first
         self.pixels = None                # (h, w, 4)
         self.mask = None                  # (mh, mw)
 
 
+# Tagged blocks the reader turns into Ochre's own layer state. The writer
+# makes them from that state; they are never copied.
+MODELED = frozenset((b"luni", b"lsct", b"lsdk", b"iOpa", b"knko"))
+
+
+class PSDFile:
+    """Everything parse() reads from one file."""
+
+    def __init__(self):
+        self.width = self.height = 0
+        self.depth = 8
+        self.mode = 3
+        self.nchan = 3
+        self.psb = False
+        self.layers = []                  # bottom-first
+        self.composite = None
+        self.resources = []               # image resources: (id, raw block)
+        self.resources_tail = b""         # what follows the last block that parses
+        self.global_mask = b""            # global layer mask info, as stored
+        self.global_blocks = []           # document-level tagged blocks: (key, data, raw)
+
+
 def read(path):
     """Parse a PSD/PSB. Returns (width, height, layers bottom-first, composite)."""
+    f = parse(path)
+    return f.width, f.height, f.layers, f.composite
+
+
+def parse(path):
+    """Parse a PSD/PSB into a PSDFile."""
     with open(path, "rb") as fh:
         data = fh.read()
+    f = PSDFile()
     r = _Reader(data)
     if r.take(4) != b"8BPS":
         raise ValueError("not a Photoshop file")
     version = r.u16()
-    psb = version == 2
+    f.psb = psb = version == 2
     r.take(6)
-    nchan = r.u16()
-    height, width = r.u32(), r.u32()
-    depth, mode = r.u16(), r.u16()
-    if depth not in (8, 16):
-        raise ValueError("PSD bit depth %d is not supported (8 and 16 are)" % depth)
+    f.nchan = nchan = r.u16()
+    f.height, f.width = height, width = r.u32(), r.u32()
+    f.depth, f.mode = depth, mode = r.u16(), r.u16()
+    if depth not in (8, 16, 32):
+        raise ValueError("PSD bit depth %d is not supported (8, 16 and 32 are)" % depth)
     # Sizes the header declares, checked before anything that size exists.
     budget.check_frame(width, height, "the image")
     if not 1 <= nchan <= MAX_CHANNELS:
         raise ValueError("PSD declares %d channels (the format allows 1 to %d)"
                          % (nchan, MAX_CHANNELS))
     r.take(r.u32())                       # colour mode data
-    r.take(r.u32())                       # image resources
+    f.resources, f.resources_tail = _resources(r.take(r.u32()))
     lm_len = r.u64() if psb else r.u32()
     lm_end = r.p + lm_len
-    layers = []
     if lm_len:
         li_len = r.u64() if psb else r.u32()
         li_end = r.p + li_len
         if li_len:
-            count = abs(r.i16())
-            # Per frame: each layer (and each layer mask, and the composite)
-            # may be as large as one frame, however many layers there are.
-            allowance = budget.Budget(2 * count + 1, "the file")
-            for _ in range(count):
-                L = PSDLayer()
-                t, l, b, rt = r.i32(), r.i32(), r.i32(), r.i32()
-                L.rect = (t, l, b, rt)
-                nlc = r.u16()
-                if nlc > MAX_CHANNELS:
-                    raise ValueError("a PSD layer declares %d channels (at most %d)"
-                                     % (nlc, MAX_CHANNELS))
-                for _c in range(nlc):
-                    cid = r.i16()
-                    clen = r.u64() if psb else r.u32()
-                    L.channels.append((cid, clen))
-                if r.take(4) not in (b"8BIM", b"8B64"):
-                    raise ValueError("bad layer record signature")
-                L.blend = BLEND_KEYS.get(r.take(4), "Normal")
-                L.opacity = r.u8()
-                L.clipping = r.u8() == 1
-                flags = r.u8()
-                L.hidden = bool(flags & 2)
-                r.u8()
-                extra = r.u32()
-                extra_end = r.p + extra
-                mlen = r.u32()
-                if mlen >= 20:
-                    mt, ml, mb, mr = r.i32(), r.i32(), r.i32(), r.i32()
-                    L.mask_default = r.u8()
-                    mflags = r.u8()
-                    L.mask_disabled = bool(mflags & 2)
-                    L.mask_rect = (mt, ml, mb, mr)
-                    r.take(mlen - 18)
-                else:
-                    r.take(mlen)
-                br = r.u32()              # blending ranges: Photoshop's Blend If
-                ranges = r.take(br)
-                if br >= 8:
-                    vals = tuple(ranges[:8])
-                    # Gray source then destination, each black lo/hi, white lo/hi.
-                    if vals != (0, 0, 255, 255, 0, 0, 255, 255):
-                        L.blend_if = vals
-                L.name = _pascal(r, 4)
-                while r.p + 12 <= extra_end:
-                    sig = r.take(4)
-                    if sig not in (b"8BIM", b"8B64"):
-                        break
-                    key = r.take(4)
-                    big = psb and key in (b"LMsk", b"Lr16", b"Lr32", b"Layr", b"Mt16", b"Mt32",
-                                          b"Mtrn", b"Alph", b"FMsk", b"lnk2", b"FEid", b"FXid",
-                                          b"PxSD")
-                    klen = r.u64() if big else r.u32()
-                    kend = r.p + klen
-                    if key == b"luni" and klen >= 4:
-                        n = r.u32()
-                        L.name = r.take(n * 2).decode("utf-16-be", "replace")
-                    elif key in (b"lsct", b"lsdk") and klen >= 4:
-                        L.section = r.u32()
-                    elif key == b"iOpa" and klen >= 1:
-                        L.fill = r.u8()
-                    elif key == b"knko" and klen >= 1:
-                        L.knockout = r.u8() != 0
-                    r.p = kend
-                    if klen % 2 and r.p < extra_end and data[r.p:r.p + 4] not in (b"8BIM", b"8B64"):
-                        r.p += 1
-                r.p = extra_end
-                layers.append(L)
-            for L in layers:
-                t, l, b, rt = L.rect
-                w, h = max(0, rt - l), max(0, b - t)
-                allowance.charge(w, h, 4, "layer %r" % L.name)
-                if L.mask_rect is not None:
-                    mt, ml, mb, mr = L.mask_rect
-                    allowance.charge(max(0, mr - ml), max(0, mb - mt), 1,
-                                     "the mask of layer %r" % L.name)
-                planes = {}
-                for cid, clen in L.channels:
-                    if cid in (-2, -3) and L.mask_rect is not None:
-                        mt, ml, mb, mr = L.mask_rect
-                        planes[cid] = _channel(r, max(0, mr - ml), max(0, mb - mt), depth, psb, clen)
-                    else:
-                        planes[cid] = _channel(r, w, h, depth, psb, clen)
-                px = np.zeros((h, w, 4), np.uint8)
-                if mode == 1:                       # greyscale
-                    g = planes.get(0, np.zeros((h, w), np.uint8))
-                    px[..., 0] = px[..., 1] = px[..., 2] = g
-                else:
-                    for c in range(3):
-                        if c in planes:
-                            px[..., c] = planes[c]
-                px[..., 3] = planes.get(-1, np.full((h, w), 255, np.uint8))
-                L.pixels = px
-                if -2 in planes and L.mask_rect is not None:
-                    L.mask = planes[-2]
-            r.p = li_end
+            f.layers = _layer_info(r, li_end, depth, mode, psb)
+        r.p = li_end
+        if r.p + 4 <= lm_end:
+            f.global_mask = r.take(r.u32())
+            blocks = _tagged(r, lm_end, psb, 4)
+            # 16- and 32-bit files keep their layers in a document-level
+            # block instead, and leave the layer info above empty.
+            wanted = {16: b"Lr16", 32: b"Lr32"}.get(depth)
+            for key, block, _raw, at in blocks:
+                if key == wanted and not f.layers:
+                    r.p = at
+                    f.layers = _layer_info(r, at + len(block), depth, mode, psb)
+            f.global_blocks = [b[:3] for b in blocks]
     r.p = lm_end
-    composite = _read_composite(r, width, height, nchan, depth, mode, psb)
-    return width, height, layers, composite
+    f.composite = _read_composite(r, width, height, nchan, depth, mode, psb)
+    return f
+
+
+def _layer_info(r, end, depth, mode, psb):
+    """The layer records and their channel data, from r.p to `end`."""
+    layers = []
+    count = abs(r.i16())
+    # Per frame: each layer (and each layer mask, and the composite) may be
+    # as large as one frame, however many layers there are.
+    allowance = budget.Budget(2 * count + 1, "the file")
+    for index in range(count):
+        L = PSDLayer()
+        L.index = index
+        t, l, b, rt = r.i32(), r.i32(), r.i32(), r.i32()
+        L.rect = (t, l, b, rt)
+        nlc = r.u16()
+        if nlc > MAX_CHANNELS:
+            raise ValueError("a PSD layer declares %d channels (at most %d)"
+                             % (nlc, MAX_CHANNELS))
+        for _c in range(nlc):
+            cid = r.i16()
+            clen = r.u64() if psb else r.u32()
+            L.channels.append((cid, clen))
+        if r.take(4) not in SIGNATURES:
+            raise ValueError("bad layer record signature")
+        L.blend_key = r.take(4)
+        L.blend = BLEND_KEYS.get(L.blend_key, "Normal")
+        L.opacity = r.u8()
+        L.clipping = r.u8() == 1
+        flags = r.u8()
+        L.hidden = bool(flags & 2)
+        r.u8()
+        extra = r.u32()
+        extra_end = r.p + extra
+        mlen = r.u32()
+        if mlen >= 20:
+            mt, ml, mb, mr = r.i32(), r.i32(), r.i32(), r.i32()
+            L.mask_default = r.u8()
+            mflags = r.u8()
+            L.mask_disabled = bool(mflags & 2)
+            L.mask_rect = (mt, ml, mb, mr)
+            r.take(mlen - 18)
+        else:
+            r.take(mlen)
+        br = r.u32()                      # blending ranges: Photoshop's Blend If
+        L.ranges = r.take(br)
+        if br >= 8:
+            vals = tuple(L.ranges[:8])
+            # Gray source then destination, each black lo/hi, white lo/hi.
+            if vals != (0, 0, 255, 255, 0, 0, 255, 255):
+                L.blend_if = vals
+        L.name = _pascal(r, 4)
+        for key, data, raw, _at in _tagged(r, extra_end, psb, 2):
+            if key == b"luni" and len(data) >= 4:
+                n = struct.unpack(">I", data[:4])[0]
+                L.name = data[4:4 + n * 2].decode("utf-16-be", "replace")
+            elif key in (b"lsct", b"lsdk") and len(data) >= 4:
+                L.section = struct.unpack(">I", data[:4])[0]
+                # A group's blend mode lives here, after "8BIM"; the record's
+                # own key is often just "norm".
+                if len(data) >= 12 and data[4:8] == b"8BIM" and data[8:12] in BLEND_KEYS:
+                    L.blend_key = data[8:12]
+                    L.blend = BLEND_KEYS[L.blend_key]
+            elif key == b"iOpa" and len(data) >= 1:
+                L.fill = data[0]
+            elif key == b"knko" and len(data) >= 1:
+                L.knockout = data[0] != 0
+            if key not in MODELED:
+                L.blocks.append((key, data, raw))
+        r.p = extra_end
+        layers.append(L)
+    for L in layers:
+        t, l, b, rt = L.rect
+        w, h = max(0, rt - l), max(0, b - t)
+        allowance.charge(w, h, 4, "layer %r" % L.name)
+        if L.mask_rect is not None:
+            mt, ml, mb, mr = L.mask_rect
+            allowance.charge(max(0, mr - ml), max(0, mb - mt), 1,
+                             "the mask of layer %r" % L.name)
+        planes = {}
+        for cid, clen in L.channels:
+            if cid in (-2, -3) and L.mask_rect is not None:
+                mt, ml, mb, mr = L.mask_rect
+                planes[cid] = _channel(r, max(0, mr - ml), max(0, mb - mt), depth, psb, clen)
+            else:
+                planes[cid] = _channel(r, w, h, depth, psb, clen)
+        px = np.zeros((h, w, 4), np.uint8)
+        if mode == 1:                       # greyscale
+            g = planes.get(0, np.zeros((h, w), np.uint8))
+            px[..., 0] = px[..., 1] = px[..., 2] = g
+        else:
+            for c in range(3):
+                if c in planes:
+                    px[..., c] = planes[c]
+        px[..., 3] = planes.get(-1, np.full((h, w), 255, np.uint8))
+        L.pixels = px
+        if -2 in planes and L.mask_rect is not None:
+            L.mask = planes[-2]
+    if r.p > end:
+        raise ValueError("PSD layer data runs past its section")
+    return layers
 
 
 def _read_composite(r, w, h, nchan, depth, mode, psb):
@@ -298,21 +442,17 @@ def _read_composite(r, w, h, nchan, depth, mode, psb):
         comp = r.u16()
     except ValueError:
         return None
-    bpp = depth // 8
-    rowbytes = w * bpp
-    chans = []
+    rowbytes = w * (depth // 8)
+    # Only the colour channels and the merged alpha are kept; any further
+    # (spot or saved selection) channels are passed over.
+    keep = min(nchan, 2 if mode == 1 else 4)
     if comp == 1:
         rows = _rle_rows(r, h * nchan, rowbytes, psb)
-        for c in range(nchan):
-            chans.append(rows[c * h:(c + 1) * h].tobytes())
+        planes = [_narrow(rows[c * h:(c + 1) * h], h, w, depth) for c in range(keep)]
     elif comp == 0:
-        for c in range(nchan):
-            chans.append(r.take(rowbytes * h))
+        planes = [_narrow(r.take(rowbytes * h), h, w, depth) for _c in range(keep)]
     else:
         return None
-    planes = [np.frombuffer(c, np.uint8 if bpp == 1 else ">u2").reshape(h, w) for c in chans]
-    if bpp == 2:
-        planes = [(p >> 8).astype(np.uint8) for p in planes]
     out = np.zeros((h, w, 4), np.uint8)
     if mode == 1:
         out[..., 0] = out[..., 1] = out[..., 2] = planes[0]
@@ -410,8 +550,20 @@ def _load(path, settings=None):
     from ..document import Document
     from ..layer import LayerGroup, LayerMask
     from ..geometry import Rect
-    width, height, layers, composite = read(path)
+    f = parse(path)
+    width, height, layers, composite = f.width, f.height, f.layers, f.composite
     doc = Document(width, height, settings=settings)
+    # Said when the file opens, not discovered later: Ochre works in 8 bits.
+    doc.open_notes = []
+    if f.depth == 16:
+        doc.open_notes.append(
+            "This is a 16-bit PSD; Ochre edits in 8 bits per channel, so it was "
+            "reduced to 8 bits (rounded) on opening, and saving writes an 8-bit PSD.")
+    elif f.depth == 32:
+        doc.open_notes.append(
+            "This is a 32-bit (floating-point) PSD; Ochre edits in 8 bits per channel, "
+            "so it was reduced to 8 bits on opening (values clipped to 0..1, then "
+            "rounded), and saving writes an 8-bit PSD.")
     if not layers:
         layer = doc.add_layer("Background")
         if composite is not None:

@@ -405,7 +405,9 @@ class Gate:
                 self.ctl.open_path(target)
             except Exception as exc:                       # noqa: BLE001
                 raise ControlError("io_error", str(exc)) from exc
-            return self._m_status({}).run()
+            out = self._m_status({}).run()
+            out["notes"] = list(getattr(self.ctl, "open_notes", None) or ())
+            return out
         return _Prepared(run, [(target, False)])
 
     # ---- edit -----------------------------------------------------------------------
