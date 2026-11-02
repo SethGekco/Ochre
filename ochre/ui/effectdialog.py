@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
                                QHBoxLayout, QLabel, QLineEdit, QProgressBar,
                                QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
-from ..engine import accel, proxy
+from ..engine import proxy
 from ..engine.effects import CancelToken, Cancelled
 
 
@@ -471,8 +471,8 @@ class EffectDialog(QDialog):
         layer with its pixel sizes scaled, over what is on screen, and the
         canvas draws that in the layer's place. The layer is not touched."""
         if self._reduced is None or self._reduced[0] != factor:
-            self._reduced = (factor, accel.reduce_box(self._original, factor),
-                             None if self._sel is None else accel.reduce_box(self._sel, factor))
+            self._reduced = (factor, proxy.reduce_box(self._original, factor),
+                             None if self._sel is None else proxy.reduce_box(self._sel, factor))
         _, src, sel = self._reduced
         h, w = src.shape[:2]
         rect = proxy.reduce_rect(self._preview_rect(), factor).clipped_to(w, h)

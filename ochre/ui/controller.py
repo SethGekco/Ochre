@@ -22,7 +22,7 @@ import os
 
 import numpy as np
 
-from ..engine import accel, budget
+from ..engine import accel, budget, parallel
 from ..engine.atomic import atomic_write, save_image
 from ..engine.compositor import Compositor
 from ..engine.document import Document
@@ -44,6 +44,7 @@ class Controller:
             settings = Settings(data_dir)
         self.settings = settings
         budget.configure(settings)              # [Open]: what an opened file may claim
+        parallel.configure(settings)            # [Performance]: compositing threads
         self.db = settings.db if hasattr(settings, "db") else IniDB(data_dir)
         self.tools = ToolRegistry(self.db)
         # Addons are discovered now but nothing of theirs runs until asked;

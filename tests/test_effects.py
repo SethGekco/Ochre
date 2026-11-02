@@ -22,7 +22,8 @@ import numpy as np
 
 from ochre.engine.effects import (AddNoise, BrightnessContrast, Cancelled,
                                   CancelToken, Desaturate, EffectRegistry,
-                                  GaussianBlur, Invert, Levels, Posterize)
+                                  GaussianBlur, Invert, Levels, Posterize,
+                                  Sharpen)
 from ochre.engine.geometry import Rect
 from ochre.engine.ini import IniDB
 from ochre.engine.props import (BoolProperty, ChoiceProperty, ColorProperty,
@@ -244,6 +245,7 @@ def main():
     rng = np.random.default_rng(5)
     noisy = rng.integers(0, 256, (96, 96, 4), dtype=np.uint8)
     for effect, token in ((GaussianBlur(), {"radius": 5}),
+                          (Sharpen(), {"amount": 8}),
                           (BrightnessContrast(), {"brightness": 20, "contrast": 30}),
                           (Desaturate(), {})):
         one_pass = effect.apply(noisy, token=token, tile=0)

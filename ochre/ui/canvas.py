@@ -31,7 +31,7 @@ from PySide6.QtGui import (QBrush, QColor, QImage, QPainter, QPainterPath, QPen,
                            QTransform)
 from PySide6.QtWidgets import QAbstractScrollArea
 
-from ..engine import accel, proxy
+from ..engine import proxy
 from ..engine.geometry import Rect
 from .viewstate import ViewState, format_zoom
 
@@ -284,7 +284,7 @@ class CanvasView(QAbstractScrollArea):
                 or self._reduced_factor != factor:
             # Around the visible part, the picture as last composited.
             buf = np.zeros((comp.height, comp.width, 4), np.uint8) if rk == comp.bounds \
-                else accel.reduce_box(self.ctl.display, factor)
+                else proxy.reduce_box(self.ctl.display, factor)
             self._reduced.attach(buf)
             self._reduced_factor = factor
         comp.overrides = dict(overrides or {})

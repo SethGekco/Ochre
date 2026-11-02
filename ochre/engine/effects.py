@@ -25,6 +25,7 @@ C-speed in numpy, which is why none of them are candidates for the accelerator.
 
 import numpy as np
 
+from . import parallel
 from .geometry import Rect
 from .props import (BoolProperty, ChoiceProperty, ColorProperty, FloatProperty,
                     IntProperty, PropertyCollection)
@@ -74,6 +75,11 @@ class Effect:
     # default, says the effect has not been checked, so its preview stays at
     # full resolution. Pointwise effects need neither.
     proxy_scale = None
+    # True when render_tile only READS what prepare() stored, so tiles may
+    # render on several threads at once (engine/parallel.py); each writes
+    # only its own tile, so the result is the same bytes. Off by default: an
+    # addon's effect is not assumed to keep that promise.
+    parallel_tiles = False
 
     def __init__(self):
         self.props = self.declare()
@@ -126,6 +132,18 @@ class Effect:
         for region in regions:
             tiles.extend(_split(region, tile))
 
+        if (self.parallel_tiles and progress is None and len(tiles) > 2
+                and sum(t.area for t in tiles) >= parallel.MIN_PIXELS
+                and parallel.threads() > 1 and not parallel.in_worker()):
+            # Progress reports go to the UI thread, so only an unreported
+            # render fans out. Cancellation still lands within a tile.
+            def one(rect):
+                if cancel is not None:
+                    cancel.check()
+                self.render_tile(readonly, dst, rect)
+            parallel.run(one, [(rect,) for rect in tiles])
+            return dst
+
         for index, rect in enumerate(tiles):
             if cancel is not None:
                 cancel.check()
@@ -172,6 +190,7 @@ class Adjustment(Effect):
 
     category = "Adjustments"
     pointwise = True
+    parallel_tiles = True
 
     def build_luts(self, token):
         """Return (lut_r, lut_g, lut_b) or a single lut applied to all three."""
@@ -386,6 +405,7 @@ class GaussianBlur(Effect):
     name = "gaussian_blur"
     label = "Gaussian Blur"
     proxy_scale = ("radius",)
+    parallel_tiles = True
 
     def declare(self):
         return PropertyCollection([IntProperty("radius", 4, 0, 200)])
@@ -457,6 +477,7 @@ def _separable(arr, kernel):
 class Sharpen(Effect):
     name = "sharpen"
     label = "Sharpen"
+    parallel_tiles = True
 
     def declare(self):
         return PropertyCollection([IntProperty("amount", 2, 1, 20)])
@@ -486,22 +507,35 @@ class Sharpen(Effect):
 
 
 class _Shifted:
-    """Lets a tile renderer write into an array indexed in document space."""
+    """Lets a tile renderer write into an array indexed in document space.
+
+    The array covers document rect `origin`, so a (rows, cols) key is moved
+    by the origin first. (It once passed keys through unmoved, which worked
+    only for the tile at the image's top-left corner: Sharpen failed on any
+    image wider or taller than one tile.)
+    """
 
     def __init__(self, array, origin):
         self._array = array
         self._origin = origin
 
+    def _local(self, key):
+        rows, cols = key[0], key[1]
+        oy, ox = self._origin.y, self._origin.x
+        return (slice(rows.start - oy, rows.stop - oy),
+                slice(cols.start - ox, cols.stop - ox)) + tuple(key[2:])
+
     def __getitem__(self, key):
-        return self._array[key]
+        return self._array[self._local(key)]
 
     def __setitem__(self, key, value):
-        self._array[key] = value
+        self._array[self._local(key)] = value
 
 
 class AddNoise(Effect):
     name = "add_noise"
     label = "Add Noise"
+    parallel_tiles = True
 
     def declare(self):
         return PropertyCollection([

@@ -46,6 +46,7 @@ class _Point(Effect):
 
     category = "Adjustments"
     pointwise = True
+    parallel_tiles = True
 
     def transform(self, token, rgb):
         raise NotImplementedError

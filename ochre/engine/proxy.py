@@ -40,7 +40,7 @@ previewed reduced -- its preview stays at full resolution, slow but true.
 
 import numpy as np
 
-from . import accel
+from . import accel, parallel
 from .compositor import Compositor, _active_filters, fill_pixels, mask_value
 from .geometry import Rect
 from .layer import FILL, SHAPE, SMART, TEXT
@@ -67,6 +67,22 @@ def factor_for_zoom(zoom):
     return f
 
 
+def reduce_box(img, f):
+    """accel.reduce_box, in row bands on the thread pool for a big image.
+    Bands start on the block grid, so the result is the same bytes."""
+    f = int(f)
+    h, w = img.shape[:2]
+    oh, ow = -(-h // f), -(-w // f)
+    if f == 1 or parallel.bands(Rect(0, 0, w, h), align=f) is None:
+        return accel.reduce_box(img, f)
+    out = np.empty((oh, ow) + img.shape[2:], np.uint8)
+
+    def work(_out, band):
+        out[band.y // f:-(-band.y1 // f)] = accel.reduce_box(img[band.slice()], f)
+    parallel.banded(out, Rect(0, 0, w, h), work, align=f)
+    return out
+
+
 def reduce_rect(rect, f):
     """The level-grid rect covering rect at 1/f (rounded outward)."""
     return Rect.from_bounds(rect.x // f, rect.y // f, -(-rect.x1 // f), -(-rect.y1 // f))
@@ -85,10 +101,10 @@ def reduce_region(img, rect, f, width, height):
     rk = reduce_rect(rect, f)
     full = expand_rect(rk, f, width, height)
     if full == rect:
-        return rk, accel.reduce_box(img, f)
+        return rk, reduce_box(img, f)
     pad = np.zeros((full.h, full.w) + img.shape[2:], np.uint8)
     pad[rect.y - full.y:rect.y1 - full.y, rect.x - full.x:rect.x1 - full.x] = img
-    return rk, accel.reduce_box(pad, f)
+    return rk, reduce_box(pad, f)
 
 
 def scaled_token(effect, f):
@@ -195,12 +211,16 @@ class ProxyCompositor(Compositor):
         hit = self.overrides.get(key[0])
         if hit is not None:
             return hit
+        with self._lock:
+            return self._reduced_cell(key, surface)
+
+    def _reduced_cell(self, key, surface):
         f = self.factor
         plane = surface.pixels
         entry = self._cells.get(key)
         if entry is None or entry[0] != surface.serial or entry[1] != id(plane) \
                 or entry[3] is None:
-            reduced = accel.reduce_box(plane, f)
+            reduced = reduce_box(plane, f)
             self._cells[key] = [surface.serial, id(plane), reduced, []]
             return reduced
         reduced = entry[2]
@@ -217,17 +237,17 @@ class ProxyCompositor(Compositor):
     def _reduced_from(self, kind, ident, source, make):
         """make() reduced once per `source` object -- a cached full-resolution
         render whose identity changes exactly when its content does."""
-        hit = self._derived.get((kind, ident))
-        if hit is not None and hit[0] is source:
-            return hit[1]
-        out = make()
-        self._derived[(kind, ident)] = (source, out)
-        return out
+        with self._lock:
+            hit = self._derived.get((kind, ident))
+            if hit is not None and hit[0] is source:
+                return hit[1]
+            out = make()
+            self._derived[(kind, ident)] = (source, out)
+            return out
 
     def _whole(self, kind, layer_id, img):
         return self._reduced_from(kind, layer_id, img,
-                                  lambda: accel.reduce_box(np.ascontiguousarray(img),
-                                                           self.factor))
+                                  lambda: reduce_box(np.ascontiguousarray(img), self.factor))
 
     # ---- the compositor's sources, on the level grid ---------------------
 
@@ -256,18 +276,23 @@ class ProxyCompositor(Compositor):
             if params.get("type") == "pattern":
                 params = dict(params, scale=float(params.get("scale", 100)) / f)
             return fill_pixels(params, r, self.width, self.height)
-        if kind == TEXT:
-            return self._text(layer)[r.slice()]
-        if kind == SMART:
-            return self._whole("smart", layer.id, self.full._smart_image(layer))[r.slice()]
-        if kind == SHAPE:
-            return self._whole("shape", layer.id, self.full._shape_image(layer))[r.slice()]
-        if layer.params and _active_filters(layer.params):
-            return self._whole("nde", layer.id, self.full._filtered(leaf))[r.slice()]
+        with self.full._lock:
+            if kind == TEXT:
+                return self._text(layer)[r.slice()]
+            if kind == SMART:
+                return self._whole("smart", layer.id, self.full._smart_image(layer))[r.slice()]
+            if kind == SHAPE:
+                return self._whole("shape", layer.id, self.full._shape_image(layer))[r.slice()]
+            if layer.params and _active_filters(layer.params):
+                return self._whole("nde", layer.id, self.full._filtered(leaf))[r.slice()]
         return self.reduced_cell((layer.id, frame.id), leaf.surface)[r.slice()]
 
     def _text(self, layer):
         """A text layer rendered over its own bounds, reduced onto the level."""
+        with self._lock:
+            return self._text_locked(layer)
+
+    def _text_locked(self, layer):
         from . import textlayer
         key = (repr(sorted(layer.params.items())), self.doc.width, self.doc.height)
         hit = self._derived.get(("text", layer.id))
@@ -294,7 +319,9 @@ class ProxyCompositor(Compositor):
                 out = mask_value(self.reduced_cell((m.id, frame.id), cell)[r.slice()])
         vm = getattr(layer, "vector_mask", None)
         if vm is not None and getattr(layer, "vector_mask_enabled", True):
-            cov = self._whole("vmask", id(vm), self.full._vector_coverage(vm))[r.slice()]
+            with self.full._lock:
+                full = self.full._vector_coverage(vm)
+            cov = self._whole("vmask", id(vm), full)[r.slice()]
             out = cov if out is None else accel.spec._mul(
                 out.astype(np.uint32), cov.astype(np.uint32)).astype(np.uint8)
         return out
@@ -304,15 +331,16 @@ class ProxyCompositor(Compositor):
         if hit is None:
             return None
         rect, behind, front = hit
-        cached = self._derived.get(("style", leaf.layer.id))
-        if cached is not None and cached[0][0] is behind and cached[0][1] is front:
-            return cached[1]
-        f, w, h = self.factor, self.doc.width, self.doc.height
-        out = (reduce_rect(rect, f),
-               None if behind is None else reduce_region(behind, rect, f, w, h)[1],
-               None if front is None else reduce_region(front, rect, f, w, h)[1])
-        self._derived[("style", leaf.layer.id)] = ((behind, front), out)
-        return out
+        with self._lock:
+            cached = self._derived.get(("style", leaf.layer.id))
+            if cached is not None and cached[0][0] is behind and cached[0][1] is front:
+                return cached[1]
+            f, w, h = self.factor, self.doc.width, self.doc.height
+            out = (reduce_rect(rect, f),
+                   None if behind is None else reduce_region(behind, rect, f, w, h)[1],
+                   None if front is None else reduce_region(front, rect, f, w, h)[1])
+            self._derived[("style", leaf.layer.id)] = ((behind, front), out)
+            return out
 
     def _effect(self, layer):
         effect = super()._effect(layer)
@@ -321,24 +349,5 @@ class ProxyCompositor(Compositor):
         token = scaled_token(effect, self.factor)
         return _ScaledEffect(effect, token if token is not None else effect.props.token())
 
-    # ---- composites on the level grid --------------------------------------
-
-    def composite_into(self, dst, rect, frame=None):
-        """Flatten over level rect `rect` into dst, a level-sized array."""
-        frame = self.doc.frame if frame is None else frame
-        r = rect.clipped_to(self.width, self.height)
-        if r is None:
-            return None
-        window = dst[r.slice()]
-        window[...] = 0
-        self._run(window, self._visible_leaves(self.doc.root, frame), r, frame)
-        return r
-
-    def composite(self, rect=None, frame=None):
-        """Flatten over a level rect (default: all of it) into a new array."""
-        frame = self.doc.frame if frame is None else frame
-        r = (self.bounds if rect is None else rect).clipped_to(self.width, self.height)
-        if r is None:
-            return None
-        out = np.zeros((r.h, r.w, 4), dtype=np.uint8)
-        return self._run(out, self._visible_leaves(self.doc.root, frame), r, frame)
+    def _extent(self):
+        return self.width, self.height
