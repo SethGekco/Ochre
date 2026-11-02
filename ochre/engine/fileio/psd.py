@@ -27,6 +27,8 @@ import zlib
 
 import numpy as np
 
+from ..atomic import write_bytes
+
 # Photoshop blend keys <-> Ochre blend modes. "pass" is a group's Pass
 # Through; "diss" (dissolve) has no Ochre equivalent and reads as Normal.
 BLEND_KEYS = {
@@ -646,8 +648,7 @@ def save(doc, path, compositor=None):
     body += struct.pack(">H", 1)
     body += b"".join(struct.pack(">H", len(x)) for chan in rows for x in chan)
     body += b"".join(x for chan in rows for x in chan)
-    with open(path, "wb") as fh:
-        fh.write(head + body)
+    write_bytes(path, head + body)
     return warnings
 
 

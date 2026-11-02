@@ -45,6 +45,11 @@ These are invariants, not aspirations. Each one is enforced by a test.
   carry annotated index ranges"; it must never know what any of them mean. The
   test applied throughout: *could a third party ship that addon with no commit
   access to this repository?*
+- **No save truncates the file it replaces.** Every writer, addon savers
+  included, goes through `ochre/engine/atomic.py`: a temporary file beside
+  the target, fsynced, then renamed over it, so a save that fails halfway
+  leaves the previous file byte-identical. Checked by `tests/test_atomicsave.py`,
+  which breaks real saves mid-write and greps for any `open(..., "w")`.
 - **Every accelerated operation is specified in integer arithmetic**, so the
   optional C extension and the pure-numpy fallback agree bit-for-bit by
   construction rather than by luck. `accel/fallback.py` is the normative

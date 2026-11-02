@@ -163,6 +163,5 @@ class ExportDialog(QDialog):
         self.accept()
 
     def write(self, path):
-        with open(path, "wb") as fh:
-            fh.write(self.data)
-        return path
+        from ..engine.atomic import write_bytes
+        return write_bytes(path, self.data)

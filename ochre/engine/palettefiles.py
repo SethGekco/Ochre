@@ -23,6 +23,7 @@ import os
 
 import numpy as np
 
+from .atomic import write_bytes
 from .palette import LENGTH, Palette
 
 EXTENSIONS = (".pal", ".gpl", ".act", ".txt", ".hex")
@@ -125,9 +126,7 @@ def write(palette, path):
     else:
         data = ("JASC-PAL\n0100\n%d\n" % len(cols) + "".join(
             "%d %d %d\n" % tuple(c) for c in cols)).encode("ascii")
-    with open(path, "wb") as fh:
-        fh.write(data)
-    return path
+    return write_bytes(path, data)
 
 
 def files_in(folders, recursive=True):

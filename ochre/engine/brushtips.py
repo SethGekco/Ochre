@@ -86,7 +86,8 @@ def save_custom(state_dir, tip):
     from PIL import Image
     p = path_for(state_dir)
     if p:
-        Image.fromarray(tip, "L").save(p)
+        from .atomic import save_image
+        save_image(Image.fromarray(tip, "L"), p)
     set_custom(tip)
 
 

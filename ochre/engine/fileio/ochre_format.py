@@ -40,6 +40,7 @@ import zipfile
 import numpy as np
 from PIL import Image
 
+from ..atomic import atomic_write
 from ..geometry import Rect
 from ..ini import IniDB
 from ..layer import Layer, LayerGroup
@@ -253,7 +254,9 @@ def save(doc, path, selection=None, thumbnail_max=256):
 
     manifest = "\n".join(lines) + "\n"
 
-    with zipfile.ZipFile(path, "w") as zf:
+    # Atomic: written beside the target and renamed over it, so a save that
+    # fails halfway leaves the previous file exactly as it was.
+    with atomic_write(path) as fh, zipfile.ZipFile(fh, "w") as zf:
         # The manifest compresses well and is tiny; the PNGs are already
         # compressed, so deflating them again costs CPU for nothing.
         zf.writestr(MANIFEST, manifest, zipfile.ZIP_DEFLATED)

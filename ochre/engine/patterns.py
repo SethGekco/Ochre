@@ -68,7 +68,8 @@ def save_user(state_dir, name, rgba):
     os.makedirs(d, exist_ok=True)
     safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name).strip() or "pattern"
     path = os.path.join(d, safe + ".png")
-    Image.fromarray(np.ascontiguousarray(rgba, np.uint8), "RGBA").save(path)
+    from .atomic import save_image
+    save_image(Image.fromarray(np.ascontiguousarray(rgba, np.uint8), "RGBA"), path)
     return safe
 
 

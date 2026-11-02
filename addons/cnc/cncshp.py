@@ -51,6 +51,7 @@ import weakref
 
 import numpy as np
 
+from ochre.engine.atomic import write_bytes
 from ochre.engine.document import Document
 from ochre.engine.geometry import Rect
 
@@ -602,9 +603,8 @@ class ShpFormat:
                          transparent=0, compress=True,
                          radar_colours=radar, bounds=bounds, source=source,
                          tail=_unhex_tail(document.meta.get("cnc.tail")))
-        with open(path, "wb") as f:
-            f.write(data)
-        return path
+        # Atomic: a failed save leaves the previous file as it was.
+        return write_bytes(path, data)
 
     def _pick_palette(self, path, host):
         """A SHP references no palette, so one has to be chosen for it.

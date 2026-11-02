@@ -59,6 +59,7 @@ import weakref
 
 import numpy as np
 
+from ochre.engine.atomic import write_bytes
 from ochre.engine.document import Document
 from ochre.engine.frame import Frame
 from ochre.engine.geometry import Rect
@@ -490,9 +491,8 @@ class TmpFormat:
                                          origin_x, origin_y, entry))
             tiles.append(entry)
 
-        with open(path, "wb") as f:
-            f.write(build_tmp(header, tiles))
-        return path
+        # Atomic: a failed save leaves the previous file as it was.
+        return write_bytes(path, build_tmp(header, tiles))
 
     @staticmethod
     def _extra_for(document, extra_layer, frame, was, origin_x, origin_y, entry):

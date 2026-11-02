@@ -20,6 +20,8 @@ import zipfile
 import numpy as np
 from PIL import Image
 
+from ..atomic import atomic_write
+
 MIMETYPE = b"image/openraster"
 
 OPS = {
@@ -163,7 +165,7 @@ def save(doc, path, compositor=None):
     thumb.thumbnail((256, 256))
     tb = io.BytesIO()
     thumb.save(tb, "PNG")
-    with zipfile.ZipFile(path, "w") as zf:
+    with atomic_write(path) as fh, zipfile.ZipFile(fh, "w") as zf:
         info = zipfile.ZipInfo("mimetype")
         info.compress_type = zipfile.ZIP_STORED
         zf.writestr(info, MIMETYPE)

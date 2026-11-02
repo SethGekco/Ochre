@@ -165,7 +165,8 @@ class Settings:
                 value = "on" if value else "off"
             cp.set(section, key, str(value))
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
+        from .atomic import atomic_write
+        with atomic_write(path, "w") as fh:
             cp.write(fh)
         return path
 

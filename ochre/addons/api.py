@@ -24,7 +24,8 @@ batch conversion, scripted export and the test suite do not need a display.
 from typing import Protocol, runtime_checkable
 
 #: (major, minor). Major changes break addons; minor additions do not.
-API_VERSION = (1, 0)
+#: 1.1: ochre.engine.atomic (atomic saves) joins the documented surface.
+API_VERSION = (1, 1)
 
 
 def compatible(required):
@@ -49,6 +50,11 @@ class FormatProvider(Protocol):
 
     `sniff` exists because extensions lie. It is handed the first few KB and
     answers whether this provider recognises the content.
+
+    `save` must write through `ochre.engine.atomic` (`write_bytes`, or the
+    `atomic_write` context manager), never a plain open() for writing: that
+    truncates the user's previous file first, so a save that fails halfway
+    would destroy it.
     """
 
     name: str

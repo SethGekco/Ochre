@@ -18,6 +18,7 @@ import os
 import numpy as np
 from PIL import Image
 
+from ..atomic import save_image
 from ..geometry import Rect
 
 DEFAULTS = {
@@ -290,7 +291,7 @@ def export_flat(doc, path, fmt=None, table=None, frame=None, matte=None, options
     img = _prepare(doc, name, spec, frame, matte or options.get("matte"),
                    options.get("scale", 1.0))
     img, extra = _colour_out(doc, name, img, options)
-    img.save(path, format=name, **dict(_save_kwargs(name, spec, options), **extra))
+    save_image(img, path, name, **dict(_save_kwargs(name, spec, options), **extra))
     return path
 
 
@@ -355,6 +356,6 @@ def export_frames(doc, path, table=None, loop=0):
     if not images:
         raise ValueError("nothing to export")
 
-    images[0].save(path, format=name, save_all=True, append_images=images[1:],
-                   duration=durations, loop=loop, disposal=2)
+    save_image(images[0], path, name, save_all=True, append_images=images[1:],
+               duration=durations, loop=loop, disposal=2)
     return path

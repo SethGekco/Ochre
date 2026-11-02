@@ -12,6 +12,8 @@ everything else here -- readable with `cat`, fixable with an editor.
 import configparser
 import os
 
+from ..engine.atomic import atomic_write
+
 
 class Session:
     def __init__(self, state_dir):
@@ -71,7 +73,7 @@ class Session:
             return False
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
+            with atomic_write(self.path, "w") as f:
                 self._cp.write(f)
             return True
         except OSError:
@@ -88,7 +90,7 @@ class Session:
         self._cp.set("Last", "Height", str(int(height)))
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
+            with atomic_write(self.path, "w") as f:
                 self._cp.write(f)
             return True
         except OSError:

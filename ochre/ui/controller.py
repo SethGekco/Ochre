@@ -23,6 +23,7 @@ import os
 import numpy as np
 
 from ..engine import accel
+from ..engine.atomic import atomic_write, save_image
 from ..engine.compositor import Compositor
 from ..engine.document import Document
 from ..engine.fileio import export_flat, import_flat, is_ochre, load, save
@@ -1628,7 +1629,7 @@ class Controller:
         img = Image.fromarray(self.merged(), "RGBA")
         bg = Image.new("RGB", img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[3])
-        bg.save(path, "PDF", resolution=float(dpi))
+        save_image(bg, path, "PDF", resolution=float(dpi))
         return path
 
     # ---- brush presets ------------------------------------------------------------
@@ -1686,7 +1687,7 @@ class Controller:
         opts = {k: v for k, v in self.tool_option_values(tool).items() if k in spec}
         data.setdefault(tool, {})[str(name)] = _plain(opts)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with atomic_write(path, "w") as fh:
             json.dump(data, fh, indent=1)
         self.emit("brushes.changed")
         return True
@@ -1710,7 +1711,7 @@ class Controller:
             data = json.load(fh)
         if data.get(tool, {}).pop(name, None) is None:
             return False
-        with open(path, "w") as fh:
+        with atomic_write(path, "w") as fh:
             json.dump(data, fh, indent=1)
         self.emit("brushes.changed")
         return True
@@ -1759,7 +1760,7 @@ class Controller:
             return False
         import json
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with atomic_write(path, "w") as fh:
             json.dump(self.actions(), fh, indent=1)
         return True
 
@@ -3225,7 +3226,7 @@ class Controller:
                 continue
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name) or "slice"
             target = os.path.join(directory, "%s.%s" % (safe, fmt))
-            Image.fromarray(np.ascontiguousarray(image[y0:y1, x0:x1])).save(target)
+            save_image(Image.fromarray(np.ascontiguousarray(image[y0:y1, x0:x1])), target)
             out.append(target)
         return out
 
@@ -3368,7 +3369,7 @@ class Controller:
                 flat = Image.new("RGB", pic.size, (255, 255, 255))
                 flat.paste(pic, mask=pic.split()[3])
                 pic = flat
-            pic.save(target)
+            save_image(pic, target)
             out.append(target)
         return out
 

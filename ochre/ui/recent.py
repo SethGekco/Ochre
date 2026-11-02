@@ -10,6 +10,8 @@ same reason every other setting in this project is an INI.
 
 import os
 
+from ..engine.atomic import atomic_write
+
 
 class RecentFiles:
     def __init__(self, state_dir, limit=10):
@@ -38,7 +40,7 @@ class RecentFiles:
             return False
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
+            with atomic_write(self.path, "w") as f:
                 f.write("\n".join(self.items) + ("\n" if self.items else ""))
             return True
         except OSError:
