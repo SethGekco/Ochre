@@ -392,7 +392,7 @@ class Controller:
         lower = target.lower()
         self.last_save_warnings = []
         if lower.endswith(".ochre"):
-            save(self.doc, target, selection=self.selection)
+            save(self.doc, target, selection=self.selection, cache=self.save_cache)
             self.path = target
         elif lower.endswith((".psd", ".psb")):
             self.last_save_warnings = psd.save(self.doc, target, self.compositor)
@@ -411,7 +411,8 @@ class Controller:
     _PER_DOC = ("doc", "history", "selection", "compositor", "blends", "display",
                 "path", "dirty_since_save", "_saved_marker", "active_layer",
                 "_pending", "quick_mask", "last_measure", "_history_src",
-                "editing_mask", "smart_link", "snapshots", "guides_locked", "save_convert")
+                "editing_mask", "smart_link", "snapshots", "guides_locked", "save_convert",
+                "save_cache")
 
     def _capture(self):
         return {k: getattr(self, k, None) for k in self._PER_DOC}
@@ -534,6 +535,10 @@ class Controller:
         # A smart object's contents tab: (parent document, layer id).
         self.smart_link = link
         self.save_convert = None       # how Save writes an indexed format
+        # Encoded planes from the last .ochre save: the next one (and every
+        # autosave) encodes only the planes that changed since.
+        from ..engine.fileio.ochre_format import EncodeCache
+        self.save_cache = EncodeCache()
         self.snapshots = []            # History snapshots: [(name, document copy)]
         self.guides_locked = False
         if self.session is not None and link is None:
