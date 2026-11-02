@@ -70,10 +70,13 @@ def _sample(image, rect, ox, oy):
 
 
 _TYPE = O.Opt("type", O.CHOICE, "content_aware", "Type",
-              choices=("content_aware", "smooth"),
-              labels={"content_aware": "Content-aware", "smooth": "Smooth"},
-              tip="Content-aware copies texture from around the spot; smooth "
-                  "blends the colours across it, which suits flat surfaces.")
+              choices=("content_aware", "texture", "smooth"),
+              labels={"content_aware": "Content-aware", "texture": "Create texture",
+                      "smooth": "Smooth"},
+              tip="Content-aware copies texture from around the spot; create "
+                  "texture blends the colours across it and adds grain like "
+                  "the grain around it; smooth blends with no grain, which "
+                  "suits flat surfaces.")
 _DETAIL = O.Opt("patch", O.INT, 7, "Detail", 3, 21, 2, suffix=" px",
                 tip="Patch size the fill copies texture in. Larger keeps "
                     "bigger structure intact; smaller follows fine detail.")

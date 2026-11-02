@@ -146,3 +146,4 @@ that picked them is `docs/KOOKA-COMPARISON-2026-10-31.md`.
 | Ochre | Kooka source | What came across |
 |---|---|---|
 | `engine/refine.py` `decontaminate` | `crates/pictura-select/src/refine.rs` `decontaminate` | Decontaminate Colors: edge colour pulled toward the mean of nearby fully selected pixels by (1 - coverage) * amount. Ochre widens the search step by step instead of a fixed 5x5. Output To's four targets and the "colour needs a new layer" rule are the same. |
+| `engine/inpaint.py` `matched_grain`, Spot Healing's Create Texture | `crates/pictura-paint/src/healing/mod.rs` `add_matched_noise` | A harmonic fill plus fixed-seed noise as strong as the ring's grain. Ochre measures the ring robustly (outliers trimmed, the 4-neighbour residual's 1.25 variance factor divided out) and keeps the channels' covariance, so grey grain stays grey. |
