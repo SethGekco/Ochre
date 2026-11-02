@@ -155,8 +155,9 @@ def run_checks():
     check("runs with Qt unimportable and no display", rc == 0, err)
 
     # ---- no session state written -----------------------------------------------------
-    check("a headless run leaves the user's session alone",
-          not os.path.exists(os.path.join(TMP, "state", "ochre", "session.ini")),
+    check("a headless run leaves the user's session alone (no session.ini, no recovery)",
+          not os.path.exists(os.path.join(TMP, "state", "ochre", "session.ini"))
+          and not os.path.exists(os.path.join(TMP, "state", "ochre", "recovery")),
           str(os.listdir(os.path.join(TMP, "state", "ochre"))
               if os.path.isdir(os.path.join(TMP, "state", "ochre")) else ""))
 
