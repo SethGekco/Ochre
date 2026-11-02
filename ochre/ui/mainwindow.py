@@ -419,6 +419,16 @@ class MainWindow(QMainWindow):
         self._busy(self.ctl.straighten)
         self.canvas.bind(keep_view=True)
 
+    def do_read_watermark(self):
+        found = self.ctl.read_watermark()
+        if found is None:
+            text = "No watermark found in this image."
+        else:
+            kind = "Transaction ID" if found["kind"] == "transaction_id" else "Image ID"
+            text = ("Creator ID: %d\n%s: %d\nDurability: %s"
+                    % (found["creator_id"], kind, found["image_id"], found["durability"].title()))
+        QMessageBox.information(self, "Read Watermark", text)
+
     def do_match_color(self):
         from PySide6.QtWidgets import QInputDialog
         titles = self.ctl.document_titles()
@@ -878,8 +888,8 @@ class MainWindow(QMainWindow):
         self.nde_action.setChecked(bool(getattr(self.ctl, "non_destructive", False)))
         self._act(effects_menu, "Layer &Filters...", self.do_layer_filters)
         effects_menu.addSeparator()
-        order = ["Artistic", "Blurs", "Distort", "Edge & Generic", "Noise", "Photo",
-                 "Render", "Stylize"]
+        order = ["Artistic", "Blurs", "Brush Strokes", "Distort", "Edge & Generic", "Noise",
+                 "Photo", "Render", "Sketch", "Stylize", "Texture", "Video", "Watermark"]
         for category in sorted((c for c in groups if c != "Adjustments"),
                                key=lambda c: (order.index(c) if c in order else 99, c)):
             sub = effects_menu.addMenu(category.replace("&", "&&"))
@@ -893,6 +903,8 @@ class MainWindow(QMainWindow):
                 sub.addSeparator()
                 self._act(sub, "Liquify (Warp tool)...", self.do_liquify)
                 self._act(sub, "Puppet Warp (tool)...", lambda: self.ctl.set_tool("puppet_warp"))
+            if category == "Watermark":
+                self._act(sub, "Read Watermark...", self.do_read_watermark)
 
         image_menu = bar.addMenu("&Image")
         self._act(image_menu, "&Crop to Selection", self.do_crop, "Ctrl+Shift+X")

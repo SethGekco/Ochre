@@ -888,6 +888,12 @@ class Controller:
     def composite_region(self, rect):
         return self.compositor.composite(rect)
 
+    def read_watermark(self):
+        """Effects > Watermark > Read Watermark: what Embed Watermark hid in
+        the visible image, as a dict, or None."""
+        from ..engine.galleryextra import read_watermark
+        return read_watermark(self.compositor.composite(self.doc.bounds))
+
     # ---- layers ----------------------------------------------------------
 
     def layer_rows(self):
