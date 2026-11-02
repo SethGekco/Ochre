@@ -34,6 +34,8 @@ import os
 import sys
 import traceback
 
+from ..engine.atomic import atomic_write
+from ..engine.budget import FileTooLarge
 from .api import API_VERSION, AddonError, Host, compatible
 from .manifest import Manifest
 
@@ -254,7 +256,7 @@ class AddonManager:
         p = self._choices_path()
         if p:
             os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "w", encoding="utf-8") as fh:
+            with atomic_write(p, "w") as fh:
                 json.dump({"skip": skip}, fh, indent=1)
         return skip
 
@@ -430,7 +432,7 @@ class AddonManager:
             return False
         try:
             os.makedirs(self.state_dir, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            with atomic_write(path, "w") as f:
                 json.dump(self._trusted, f, indent=1, sort_keys=True)
             return True
         except OSError:
@@ -474,7 +476,7 @@ class AddonManager:
             return
         try:
             os.makedirs(self.state_dir, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            with atomic_write(path, "w") as f:
                 json.dump({"id": addon.id, "directory": addon.directory}, f)
         except OSError:
             pass
@@ -528,6 +530,11 @@ class _Guard:
 
     def __exit__(self, exc_type, exc, tb):
         if exc is None:
+            return False
+        if isinstance(exc, (FileTooLarge, MemoryError)):
+            # The FILE is at fault (or the machine is full), not the addon:
+            # let the refusal through with its own message, and do not count
+            # it toward disabling an addon that did its job.
             return False
         self.failed = True
         self.manager.note_fault(self.addon_id, exc, self.what)

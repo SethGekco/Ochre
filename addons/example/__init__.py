@@ -19,6 +19,8 @@ import numpy as np
 
 # Only the documented surface. Reaching past this is how an addon breaks on
 # somebody else's refactor.
+from ochre.engine import budget
+from ochre.engine.atomic import atomic_write
 from ochre.engine.document import Document
 from ochre.engine.geometry import Rect
 from ochre.engine.palette import LENGTH, Palette
@@ -49,6 +51,9 @@ class ExampleFormat:
         if not data.startswith(MAGIC):
             raise ValueError("%s is not an example.x1 file" % path)
         w, h = struct.unpack_from("<HH", data, len(MAGIC))
+        # Sizes a file declares are checked before anything that size is
+        # allocated; a refusal reaches the user as a plain message.
+        budget.check_frame(w, h, "the image")
         off = len(MAGIC) + 4
         entries = np.frombuffer(data, np.uint8, LENGTH * 3, off).reshape(LENGTH, 3)
         off += LENGTH * 3
@@ -73,7 +78,9 @@ class ExampleFormat:
             raise ValueError("example.x1 needs an index-locked layer "
                              "and a bound palette")
         cell = document.cell(layer)
-        with open(path, "wb") as f:
+        # Through atomic_write, never open(path, "wb"): that truncates the
+        # old file first, so a save failing halfway would destroy it.
+        with atomic_write(path) as f:
             f.write(MAGIC)
             f.write(struct.pack("<HH", document.width, document.height))
             f.write(document.palette.entries[:, :3].tobytes())

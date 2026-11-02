@@ -42,6 +42,18 @@ DEFAULTS = {
         "CompressLevel": 1,        # zlib; runs on mouse-up where latency shows
         "MaxStrokeBlocks": 512,    # ~32 MB of live checkpoints, then auto-commit
     },
+    "Open": {
+        # The budget an opened file decodes under (engine/budget.py). PER
+        # FRAME: a file with N frames or layers may hold N such frames.
+        "MaxFramePixels": 536870912,   # 2**29 px: 2 GiB as RGBA, 23170 x 23170
+        "MaxSide": 300000,             # either side, px
+        "MaxTextBytes": 67108864,      # a manifest, stack description or palette
+    },
+    "Export": {
+        # What a flat export writes of the source photo's EXIF and XMP.
+        "StripGPS": False,             # drop the location, keep the rest
+        "StripMetadata": False,        # write no EXIF or XMP at all
+    },
     "Frames": {
         "MaxWarmFrames": 8,
         "MaxWarmBytes": 1073741824,
@@ -180,7 +192,8 @@ class Settings:
                 value = "on" if value else "off"
             cp.set(section, key, str(value))
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
+        from .atomic import atomic_write
+        with atomic_write(path, "w") as fh:
             cp.write(fh)
         return path
 

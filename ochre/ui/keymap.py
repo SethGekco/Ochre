@@ -12,6 +12,8 @@ controller can apply tool keys before any widget exists.
 import configparser
 import os
 
+from ..engine.atomic import atomic_write
+
 
 def path_for(state_dir):
     return os.path.join(state_dir, "shortcuts.ini") if state_dir else None
@@ -45,7 +47,7 @@ def save(state_dir, data):
         for k, v in sorted((data.get(section) or {}).items()):
             cp.set(section, k, v or "")
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w", encoding="utf-8") as fh:
+    with atomic_write(p, "w") as fh:
         cp.write(fh)
     return p
 

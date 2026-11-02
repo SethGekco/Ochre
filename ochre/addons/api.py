@@ -24,7 +24,9 @@ batch conversion, scripted export and the test suite do not need a display.
 from typing import Protocol, runtime_checkable
 
 #: (major, minor). Major changes break addons; minor additions do not.
-API_VERSION = (1, 0)
+#: 1.1: ochre.engine.atomic (atomic saves) and ochre.engine.budget (the
+#: open budget) join the documented surface.
+API_VERSION = (1, 1)
 
 
 def compatible(required):
@@ -49,6 +51,17 @@ class FormatProvider(Protocol):
 
     `sniff` exists because extensions lie. It is handed the first few KB and
     answers whether this provider recognises the content.
+
+    `save` must write through `ochre.engine.atomic` (`write_bytes`, or the
+    `atomic_write` context manager), never a plain open() for writing: that
+    truncates the user's previous file first, so a save that fails halfway
+    would destroy it.
+
+    `load` must check every size the file declares with `ochre.engine.budget`
+    (`check_frame`, or a `Budget` of one frame per frame/tile/layer) BEFORE
+    allocating for it, and inflate with `budget.inflate`. The cap is per
+    frame. A `budget.FileTooLarge` raised from `load` reaches the user as
+    the reason the file did not open and is not counted as an addon fault.
     """
 
     name: str

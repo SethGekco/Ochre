@@ -18,6 +18,8 @@ import os
 
 import numpy as np
 
+from . import budget
+
 BUILTIN = ("checker", "stripes", "diagonal", "dots", "bricks", "grid", "noise")
 _CACHE = {}
 
@@ -43,12 +45,11 @@ def builtin_tile(name, size=8, fg=(0, 0, 0, 255), bg=(255, 255, 255, 255)):
 
 
 def load_user(state_dir, name):
-    from PIL import Image
     d = user_dir(state_dir)
     path = os.path.join(d, name + ".png") if d else None
     if not path or not os.path.exists(path):
         return None
-    return np.asarray(Image.open(path).convert("RGBA")).copy()
+    return np.asarray(budget.open_image(path).convert("RGBA")).copy()
 
 
 def tile(name, state_dir=None, size=8, fg=(0, 0, 0, 255), bg=(255, 255, 255, 255)):
@@ -68,7 +69,8 @@ def save_user(state_dir, name, rgba):
     os.makedirs(d, exist_ok=True)
     safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name).strip() or "pattern"
     path = os.path.join(d, safe + ".png")
-    Image.fromarray(np.ascontiguousarray(rgba, np.uint8), "RGBA").save(path)
+    from .atomic import save_image
+    save_image(Image.fromarray(np.ascontiguousarray(rgba, np.uint8), "RGBA"), path)
     return safe
 
 
@@ -86,9 +88,9 @@ def decode_tile(text):
     hit = _CACHE.get(key)
     if hit is not None:
         return hit
-    from PIL import Image
     try:
-        arr = np.asarray(Image.open(io.BytesIO(base64.b64decode(text))).convert("RGBA")).copy()
+        arr = np.asarray(budget.open_image(io.BytesIO(base64.b64decode(text)),
+                                           "an embedded pattern").convert("RGBA")).copy()
     except (ValueError, OSError):
         return None
     if len(_CACHE) > 64:

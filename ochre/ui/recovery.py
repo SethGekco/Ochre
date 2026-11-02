@@ -27,16 +27,16 @@ when something went wrong. (Kooka Pictura's frame_recovery.cpp is where the
 shape of this comes from: the per-instance session, the "-Recovered" tabs,
 and re-snapshotting recovered documents before their orphans are deleted.)
 
-Snapshots are written by one worker thread, atomically: to a temporary
-name in the same folder, then os.replace, so a crash mid-write leaves the
-previous snapshot intact. (A local helper on purpose; a shared atomic-write
-helper is arriving separately and these can fold into it.)
+Snapshots are written by one worker thread, atomically, through the shared
+helper (engine/atomic.py): to a temporary name in the same folder, fsynced,
+then os.replace, so a crash mid-write leaves the previous snapshot intact.
 
 Qt-free, like the controller, so all of it is testable headlessly.
 """
 
 import concurrent.futures
 import configparser
+import io
 import os
 import shutil
 import socket
@@ -48,6 +48,8 @@ try:
     import fcntl
 except ImportError:                     # no flock: recovery stays off
     fcntl = None
+
+from ..engine.atomic import atomic_write
 
 LOCK = "lock"
 UNRECOVERABLE = "unrecoverable"
@@ -65,24 +67,21 @@ def recovered_name(name):
     return "%s-Recovered" % (base or "Untitled")
 
 
+class _Incomplete(Exception):
+    """A writer reported a torn result: abandon the temp file, keep the old."""
+
+
 def _replace_atomically(path, write):
-    """write(tmp_path), then rename over path. A local stand-in for the
-    shared atomic-write helper (temp file in the same folder + os.replace)."""
-    tmp = "%s.tmp-%d-%d" % (path, os.getpid(), threading.get_ident())
+    """write(file object) through the shared atomic-write helper. True once
+    path holds the new bytes; False -- with the previous file untouched --
+    when write reports a torn result by returning False."""
     try:
-        result = write(tmp)
-        if result is False:
-            return False
-        with open(tmp, "rb") as fh:
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-        return True
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+        with atomic_write(path) as fh:
+            if write(fh) is False:
+                raise _Incomplete()
+    except _Incomplete:
+        return False
+    return True
 
 
 def _try_lock(path):
@@ -291,12 +290,13 @@ class RecoveryStore:
         def job():
             ok = _replace_atomically(target, snapshot.write)
             if ok:
-                def write_info(tmp):
+                def write_info(fh):
                     cp = configparser.ConfigParser(interpolation=None)
                     cp["Recovered"] = {"Name": _one_line(name), "Path": _one_line(path or ""),
                                        "Saved": "%.3f" % time.time(), "Tab": str(int(tab))}
-                    with open(tmp, "w", encoding="utf-8") as fh:
-                        cp.write(fh)
+                    text = io.StringIO()
+                    cp.write(text)
+                    fh.write(text.getvalue().encode("utf-8"))
                 ok = _replace_atomically(info, write_info)
             with self._lock:
                 if ok:

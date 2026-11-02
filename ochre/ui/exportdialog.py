@@ -89,6 +89,21 @@ class ExportDialog(QDialog):
             if cs == "CMYK":
                 self.cmyk.addItem("CMYK: " + desc, path)
         form.addRow("Colour", self.cmyk)
+        # A photo's EXIF and XMP: camera, date, copyright -- and where it was
+        # taken. Defaults from Preferences > Export.
+        self.meta = QComboBox()
+        self.meta.addItem("Keep all", "keep")
+        self.meta.addItem("Remove location (GPS)", "nogps")
+        self.meta.addItem("Remove all", "none")
+        settings = getattr(ctl, "settings", None)
+        if settings is not None and settings.get("Export", "StripMetadata"):
+            self.meta.setCurrentIndex(2)
+        elif settings is not None and settings.get("Export", "StripGPS"):
+            self.meta.setCurrentIndex(1)
+        has_meta = any(k in ctl.doc.meta for k in ("exif_data", "xmp_data"))
+        self.meta.setEnabled(has_meta)
+        self.meta.setToolTip("" if has_meta else "This image carries no EXIF or XMP metadata")
+        form.addRow("Metadata", self.meta)
         left.addLayout(form)
         left.addWidget(self._build_indexed())
         info = QFormLayout()
@@ -117,7 +132,8 @@ class ExportDialog(QDialog):
                     self.scale.valueChanged, self.lossless.toggled, self.embed.toggled,
                     self.cmyk.currentIndexChanged, self.palette.currentIndexChanged,
                     self.colours.valueChanged, self.dither.currentIndexChanged,
-                    self.amount.valueChanged, self.transparency.toggled):
+                    self.amount.valueChanged, self.transparency.toggled,
+                    self.meta.currentIndexChanged):
             sig.connect(lambda *_: self._timer.start(150))
         self.refresh()
 
@@ -165,7 +181,9 @@ class ExportDialog(QDialog):
 
     def options(self):
         out = {"quality": self.quality.value(), "scale": self.scale.value() / 100.0,
-               "lossless": self.lossless.isChecked(), "embed_srgb": self.embed.isChecked()}
+               "lossless": self.lossless.isChecked(), "embed_srgb": self.embed.isChecked(),
+               "strip_gps": self.meta.currentData() == "nogps",
+               "strip_metadata": self.meta.currentData() == "none"}
         if self.cmyk.currentData() and self.fmt() in ("JPEG", "TIFF"):
             out["cmyk_profile"] = self.cmyk.currentData()
         if self.fmt() in INDEXED_FORMATS:
@@ -257,6 +275,5 @@ class ExportDialog(QDialog):
         self.accept()
 
     def write(self, path):
-        with open(path, "wb") as fh:
-            fh.write(self.data)
-        return path
+        from ..engine.atomic import write_bytes
+        return write_bytes(path, self.data)

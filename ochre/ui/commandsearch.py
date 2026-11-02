@@ -41,6 +41,8 @@ from PySide6.QtWidgets import (QApplication, QDockWidget, QFrame, QLabel, QLineE
                                QListWidget, QListWidgetItem, QStyle, QStyledItemDelegate,
                                QVBoxLayout)
 
+from ..engine.atomic import atomic_write
+
 RUNNABLE_ROLE = Qt.UserRole + 1
 SHORTCUT_ROLE = Qt.UserRole + 2
 MAX_VISIBLE_ROWS = 12
@@ -227,7 +229,7 @@ class RecentCommands:
         if self.path:
             try:
                 os.makedirs(os.path.dirname(self.path), exist_ok=True)
-                with open(self.path, "w", encoding="utf-8") as f:
+                with atomic_write(self.path, "w") as f:
                     f.write("\n".join(self.items) + "\n")
             except OSError:
                 pass

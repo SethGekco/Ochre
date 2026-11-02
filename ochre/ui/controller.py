@@ -22,7 +22,8 @@ import os
 
 import numpy as np
 
-from ..engine import accel
+from ..engine import accel, budget
+from ..engine.atomic import atomic_write, save_image
 from ..engine.compositor import Compositor
 from ..engine.document import Document
 from ..engine.fileio import export_flat, import_flat, import_indexed, is_ochre, load, save
@@ -42,6 +43,7 @@ class Controller:
         if settings is None:
             settings = Settings(data_dir)
         self.settings = settings
+        budget.configure(settings)              # [Open]: what an opened file may claim
         self.db = settings.db if hasattr(settings, "db") else IniDB(data_dir)
         self.tools = ToolRegistry(self.db)
         # Addons are discovered now but nothing of theirs runs until asked;
@@ -180,7 +182,17 @@ class Controller:
         return candidates[0]
 
     def open_path(self, path):
-        doc = self._open_path(path)
+        try:
+            doc = self._open_path(path)
+        except budget.FileTooLarge as exc:
+            # The file's own fault, stated plainly -- not "no format handles
+            # it", and not an addon fault.
+            raise budget.FileTooLarge("cannot open %s: %s" % (os.path.basename(path), exc)) from exc
+        except MemoryError as exc:
+            # Within the budget, but more than this machine has free now.
+            raise budget.FileTooLarge(
+                "cannot open %s: not enough free memory to hold it. Close other "
+                "documents or programs and try again." % os.path.basename(path)) from exc
         self.indexed_note = None
         if self.is_indexed_document():
             self._palette_for_opened_indexed(path)
@@ -271,6 +283,8 @@ class Controller:
             # back, as Photoshop and GIMP do, rather than demanding Save As.
             try:
                 doc = psd.load(path, settings=self.settings)
+            except (budget.FileTooLarge, MemoryError):
+                raise
             except Exception as exc:
                 raise self._unopenable(path, exc) from exc
             self._adopt(doc, path=path)
@@ -282,6 +296,8 @@ class Controller:
                 # A paletted PNG or GIF opens index-locked, so its exact
                 # indices survive; anything else comes in as full colour.
                 doc = import_indexed(path, settings=self.settings)
+            except (budget.FileTooLarge, MemoryError):
+                raise
             except Exception as exc:
                 raise self._unopenable(path, exc) from exc
             self._adopt(doc, path=None)   # imported, not "the same file"
@@ -1457,8 +1473,7 @@ class Controller:
         from ..engine.commands import StructureDelta
         from ..engine.layer import SMART, SmartSource
         if isinstance(path_or_rgba, str):
-            from PIL import Image
-            rgba = np.asarray(Image.open(path_or_rgba).convert("RGBA"))
+            rgba = np.asarray(budget.open_image(path_or_rgba).convert("RGBA"))
             name = name or os.path.splitext(os.path.basename(path_or_rgba))[0]
         else:
             rgba = np.asarray(path_or_rgba, np.uint8)
@@ -1649,8 +1664,7 @@ class Controller:
         if target is None or getattr(target, "kind", "raster") != "smart":
             return False
         if isinstance(path_or_rgba, str):
-            from PIL import Image
-            rgba = np.asarray(Image.open(path_or_rgba).convert("RGBA"))
+            rgba = np.asarray(budget.open_image(path_or_rgba).convert("RGBA"))
         else:
             rgba = np.asarray(path_or_rgba, np.uint8)
         label = "Replace Contents"
@@ -1805,7 +1819,7 @@ class Controller:
         img = Image.fromarray(self.merged(), "RGBA")
         bg = Image.new("RGB", img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[3])
-        bg.save(path, "PDF", resolution=float(dpi))
+        save_image(bg, path, "PDF", resolution=float(dpi))
         return path
 
     # ---- brush presets ------------------------------------------------------------
@@ -1863,7 +1877,7 @@ class Controller:
         opts = {k: v for k, v in self.tool_option_values(tool).items() if k in spec}
         data.setdefault(tool, {})[str(name)] = _plain(opts)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with atomic_write(path, "w") as fh:
             json.dump(data, fh, indent=1)
         self.emit("brushes.changed")
         return True
@@ -1887,7 +1901,7 @@ class Controller:
             data = json.load(fh)
         if data.get(tool, {}).pop(name, None) is None:
             return False
-        with open(path, "w") as fh:
+        with atomic_write(path, "w") as fh:
             json.dump(data, fh, indent=1)
         self.emit("brushes.changed")
         return True
@@ -1936,7 +1950,7 @@ class Controller:
             return False
         import json
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with atomic_write(path, "w") as fh:
             json.dump(self.actions(), fh, indent=1)
         return True
 
@@ -3402,7 +3416,7 @@ class Controller:
                 continue
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name) or "slice"
             target = os.path.join(directory, "%s.%s" % (safe, fmt))
-            Image.fromarray(np.ascontiguousarray(image[y0:y1, x0:x1])).save(target)
+            save_image(Image.fromarray(np.ascontiguousarray(image[y0:y1, x0:x1])), target)
             out.append(target)
         return out
 
@@ -3545,7 +3559,7 @@ class Controller:
                 flat = Image.new("RGB", pic.size, (255, 255, 255))
                 flat.paste(pic, mask=pic.split()[3])
                 pic = flat
-            pic.save(target)
+            save_image(pic, target)
             out.append(target)
         return out
 
@@ -3954,8 +3968,7 @@ class Controller:
     @staticmethod
     def _read_rgba(item):
         if isinstance(item, str):
-            from PIL import Image
-            return np.asarray(Image.open(item).convert("RGBA")).copy(), \
+            return np.asarray(budget.open_image(item).convert("RGBA")).copy(), \
                 os.path.splitext(os.path.basename(item))[0]
         return np.ascontiguousarray(item, np.uint8), None
 

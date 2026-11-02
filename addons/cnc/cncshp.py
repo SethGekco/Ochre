@@ -51,6 +51,8 @@ import weakref
 
 import numpy as np
 
+from ochre.engine import budget
+from ochre.engine.atomic import write_bytes
 from ochre.engine.document import Document
 from ochre.engine.geometry import Rect
 
@@ -167,14 +169,25 @@ def is_shp(data):
 
 def read_frames(data):
     """Parse into (width, height, [frame dicts]) with decoded index planes."""
+    if len(data) < HEADER.size:
+        raise ValueError("not a TS/RA2 SHP (%d bytes is shorter than its header)" % len(data))
     zero, width, height, count = HEADER.unpack_from(data, 0)
     if zero != 0:
         raise ValueError("not a TS/RA2 SHP (leading word is %d, not 0)" % zero)
+    if len(data) < HEADER.size + FRAME.size * count:
+        raise ValueError("SHP is truncated: %d frames declared, the file ends inside "
+                         "their headers" % count)
+    # Every document frame is canvas-sized, so the canvas is checked first,
+    # before anything is allocated. Then each frame against the budget:
+    # PER FRAME, so a sprite with many frames is never refused for that.
+    budget.check_frame(width, height, "the sprite canvas")
+    allowance = budget.Budget(count, "the sprite")
 
     frames = []
     for i in range(count):
         off = HEADER.size + FRAME.size * i
         x, y, w, h, flags, radar, reserved, data_off = FRAME.unpack_from(data, off)
+        allowance.charge(w, h, 1, "frame %d" % (i + 1))
         entry = {"x": x, "y": y, "w": w, "h": h, "flags": flags,
                  "radar": radar, "offset": data_off, "plane": None,
                  "payload": b"", "pad": b"",
@@ -602,9 +615,8 @@ class ShpFormat:
                          transparent=0, compress=True,
                          radar_colours=radar, bounds=bounds, source=source,
                          tail=_unhex_tail(document.meta.get("cnc.tail")))
-        with open(path, "wb") as f:
-            f.write(data)
-        return path
+        # Atomic: a failed save leaves the previous file as it was.
+        return write_bytes(path, data)
 
     def _pick_palette(self, path, host):
         """A SHP references no palette, so one has to be chosen for it.

@@ -23,9 +23,11 @@ saver reports them as warnings rather than silently dropping them.
 """
 
 import struct
-import zlib
 
 import numpy as np
+
+from .. import budget
+from ..atomic import write_bytes
 
 # Photoshop blend keys <-> Ochre blend modes. "pass" is a group's Pass
 # Through; "diss" (dissolve) has no Ochre equivalent and reads as Normal.
@@ -39,6 +41,9 @@ BLEND_KEYS = {
     b"colr": "Color", b"lum ": "Luminosity", b"pass": "PassThrough",
 }
 KEY_FOR = {v: k for k, v in BLEND_KEYS.items()}
+
+# The specification's limit on channels, for the file and for one layer.
+MAX_CHANNELS = 56
 
 
 # ---- PackBits ------------------------------------------------------------------------
@@ -150,7 +155,9 @@ def _channel(r, w, h, depth, psb, length):
         counts = [r.u32() if psb else r.u16() for _ in range(h)]
         raw = b"".join(packbits_decode(r.take(c), rowbytes) for c in counts)
     elif comp in (2, 3):
-        raw = zlib.decompress(r.take(length - 2))
+        # Bounded by what the channel can hold: a zip bomb in a channel
+        # stops at rowbytes * h instead of at the end of memory.
+        raw = budget.inflate(r.take(length - 2), rowbytes * h, "a layer channel")
         if comp == 3:
             a = np.frombuffer(raw, np.uint8 if bpp == 1 else ">u2").reshape(h, w).copy()
             a = np.cumsum(a, axis=1, dtype=a.dtype)
@@ -208,6 +215,11 @@ def read(path):
     depth, mode = r.u16(), r.u16()
     if depth not in (8, 16):
         raise ValueError("PSD bit depth %d is not supported (8 and 16 are)" % depth)
+    # Sizes the header declares, checked before anything that size exists.
+    budget.check_frame(width, height, "the image")
+    if not 1 <= nchan <= MAX_CHANNELS:
+        raise ValueError("PSD declares %d channels (the format allows 1 to %d)"
+                         % (nchan, MAX_CHANNELS))
     r.take(r.u32())                       # colour mode data
     r.take(r.u32())                       # image resources
     lm_len = r.u64() if psb else r.u32()
@@ -218,11 +230,18 @@ def read(path):
         li_end = r.p + li_len
         if li_len:
             count = abs(r.i16())
+            # Per frame: each layer (and each layer mask, and the composite)
+            # may be as large as one frame, however many layers there are.
+            allowance = budget.Budget(2 * count + 1, "the file")
             for _ in range(count):
                 L = PSDLayer()
                 t, l, b, rt = r.i32(), r.i32(), r.i32(), r.i32()
                 L.rect = (t, l, b, rt)
-                for _c in range(r.u16()):
+                nlc = r.u16()
+                if nlc > MAX_CHANNELS:
+                    raise ValueError("a PSD layer declares %d channels (at most %d)"
+                                     % (nlc, MAX_CHANNELS))
+                for _c in range(nlc):
                     cid = r.i16()
                     clen = r.u64() if psb else r.u32()
                     L.channels.append((cid, clen))
@@ -281,6 +300,11 @@ def read(path):
             for L in layers:
                 t, l, b, rt = L.rect
                 w, h = max(0, rt - l), max(0, b - t)
+                allowance.charge(w, h, 4, "layer %r" % L.name)
+                if L.mask_rect is not None:
+                    mt, ml, mb, mr = L.mask_rect
+                    allowance.charge(max(0, mr - ml), max(0, mb - mt), 1,
+                                     "the mask of layer %r" % L.name)
                 planes = {}
                 for cid, clen in L.channels:
                     if cid in (-2, -3) and L.mask_rect is not None:
@@ -646,8 +670,7 @@ def save(doc, path, compositor=None):
     body += struct.pack(">H", 1)
     body += b"".join(struct.pack(">H", len(x)) for chan in rows for x in chan)
     body += b"".join(x for chan in rows for x in chan)
-    with open(path, "wb") as fh:
-        fh.write(head + body)
+    write_bytes(path, head + body)
     return warnings
 
 

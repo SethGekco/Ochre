@@ -23,6 +23,8 @@ import os
 
 import numpy as np
 
+from . import budget
+from .atomic import write_bytes
 from .palette import LENGTH, Palette
 
 EXTENSIONS = (".pal", ".gpl", ".act", ".txt", ".hex")
@@ -53,8 +55,7 @@ def colours(palette):
 def read(path):
     """A palette file as a Palette, or ValueError when this module cannot
     tell what it is (a binary .pal is a provider's business)."""
-    with open(path, "rb") as fh:
-        data = fh.read()
+    data = budget.read_file(path, budget.text_bytes())
     name = os.path.splitext(os.path.basename(path))[0]
     ext = os.path.splitext(path)[1].lower()
     text = data[:4096].decode("latin-1")
@@ -125,9 +126,7 @@ def write(palette, path):
     else:
         data = ("JASC-PAL\n0100\n%d\n" % len(cols) + "".join(
             "%d %d %d\n" % tuple(c) for c in cols)).encode("ascii")
-    with open(path, "wb") as fh:
-        fh.write(data)
-    return path
+    return write_bytes(path, data)
 
 
 def files_in(folders, recursive=True):
