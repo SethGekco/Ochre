@@ -40,6 +40,7 @@ import zipfile
 import numpy as np
 from PIL import Image
 
+from .. import budget
 from ..atomic import atomic_write
 from ..geometry import Rect
 from ..ini import IniDB
@@ -70,8 +71,12 @@ def _encode_plane(arr, plane):
     return buf.getvalue()
 
 
-def _decode_plane(data, plane):
-    img = Image.open(io.BytesIO(data))
+def _decode_plane(data, plane, size=None, what="a layer image"):
+    """A plane PNG as an array. `size`, when given, is the (width, height)
+    the plane must have; anything else is refused before it is decoded."""
+    img = budget.open_image(io.BytesIO(data), what)
+    if size is not None and img.size != tuple(size):
+        return None
     img.load()
     want = "RGBA" if plane_channels(plane) == 4 else "L"
     if img.mode != want:
@@ -302,16 +307,30 @@ def load(path, settings=None):
         if MANIFEST not in names:
             raise ValueError("%s is not an Ochre document (no manifest)" % path)
         db = IniDB()
-        db.load_string(zf.read(MANIFEST).decode("utf-8"), source=path)
+        db.load_string(budget.read_member(zf, MANIFEST, budget.text_bytes(),
+                                          "the manifest").decode("utf-8"), source=path)
 
         width = db.getint("Document", "Width", 0)
         height = db.getint("Document", "Height", 0)
         if width <= 0 or height <= 0:
             raise ValueError("%s has no usable canvas size" % path)
+        # Every cell is canvas-sized, so the canvas is the frame the budget
+        # is about. Checked before anything that size exists.
+        budget.check_frame(width, height, "the canvas")
+        # Each plane image the manifest lists is a frame: N of them may hold
+        # N frames' worth, however many there are.
+        planes = sum(1 for key in db.sections("Cell") for opt in db.keys("Cell:" + key)
+                     if opt.startswith("Plane."))
+        cells = budget.Budget(planes, os.path.basename(path))
+        member_cap = budget.encoded_frame_bytes()
 
         palette = None
         if db.has("Palette") and PALETTE in names:
-            entries = _decode_plane(zf.read(PALETTE), "rgba").reshape(LENGTH, 4)
+            entries = _decode_plane(budget.read_member(zf, PALETTE, member_cap), "rgba",
+                                    (LENGTH, 1), "the palette")
+            if entries is None:
+                raise ValueError("%s has a damaged palette" % path)
+            entries = entries.reshape(LENGTH, 4)
             palette = Palette(entries, db.get("Palette", "Name", "palette"))
             transparent = db.get("Palette", "Transparent")
             if transparent is not None:
@@ -430,6 +449,11 @@ def load(path, settings=None):
 
         # Cells. Derived planes are deliberately skipped and rebuilt.
         frame_by_index = {i: f for i, f in enumerate(doc.frames)}
+        # Each plane image is decoded for ONE cell. A manifest pointing many
+        # cells at the same small entry would multiply it without the file
+        # paying for it in bytes, which is exactly what a budget counted per
+        # frame must not allow.
+        used = set()
         for key in db.sections("Cell"):
             if "@" not in key:
                 continue
@@ -449,9 +473,14 @@ def load(path, settings=None):
                 if plane not in surface.planes or surface.is_derived(plane):
                     continue
                 rel = db.get(section, opt)
-                if rel not in names:
+                if rel not in names or rel in used:
                     continue
-                arr = _decode_plane(zf.read(rel), plane)
+                used.add(rel)
+                cells.charge(width, height, plane_channels(plane), "layer image %s" % rel)
+                arr = _decode_plane(budget.read_member(zf, rel, member_cap), plane,
+                                    (width, height), "layer image %s" % rel)
+                if arr is None:
+                    continue
                 target = surface.plane(plane)
                 if arr.shape != target.shape:
                     continue
@@ -512,7 +541,8 @@ def load(path, settings=None):
 
         selection_mask = None
         if SELECTION in names:
-            selection_mask = _decode_plane(zf.read(SELECTION), "mask")
+            selection_mask = _decode_plane(budget.read_member(zf, SELECTION, member_cap),
+                                           "mask", (width, height), "the selection")
 
     return doc, selection_mask
 

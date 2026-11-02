@@ -24,6 +24,7 @@ import os
 
 import numpy as np
 
+from ochre.engine import budget
 from ochre.engine.palette import LENGTH, Palette
 
 PAL_BYTES = LENGTH * 3
@@ -94,8 +95,10 @@ def write_pal(palette):
 
 
 def load_pal_file(path):
-    with open(path, "rb") as f:
-        return read_pal(f.read(), os.path.splitext(os.path.basename(path))[0])
+    # A palette is 768 bytes; the cap only stops a mis-named giant file being
+    # read whole into memory before read_pal looks at it.
+    return read_pal(budget.read_file(path, budget.text_bytes()),
+                    os.path.splitext(os.path.basename(path))[0])
 
 
 def grayscale_fallback(name="cnc-fallback"):

@@ -59,6 +59,7 @@ import weakref
 
 import numpy as np
 
+from ochre.engine import budget
 from ochre.engine.atomic import write_bytes
 from ochre.engine.document import Document
 from ochre.engine.frame import Frame
@@ -165,8 +166,20 @@ def is_tmp(data):
 
 def read_tmp(data):
     """Parse into (header, [tile dicts]). Absent slots yield None."""
+    if len(data) < HEADER.size:
+        raise ValueError("not a TMP (%d bytes is shorter than its header)" % len(data))
     bx, by, cx, cy = HEADER.unpack_from(data, 0)
+    if bx <= 0 or by <= 0 or cx <= 0 or cy <= 0:
+        raise ValueError("not a TMP: it declares %d x %d tiles of %d x %d" % (bx, by, cx, cy))
     count = bx * by
+    if len(data) < HEADER.size + 4 * count:
+        raise ValueError("TMP is truncated: %d tile slots declared, the file ends inside "
+                         "their offsets" % count)
+    # Each tile is a frame, checked before it is allocated; PER FRAME, so a
+    # template with many tiles is never refused for that. A tile is its
+    # diamond, its z-data, and possibly an extra block and its z-data.
+    budget.check_frame(cx, cy, "the tile size")
+    allowance = budget.Budget(count, "the template")
     offsets = struct.unpack_from("<%di" % count, data, HEADER.size)
 
     tiles = []
@@ -176,6 +189,9 @@ def read_tmp(data):
             continue
         (x, y, extra_off, z_off, extra_z_off, ex, ey, ew, eh,
          flags, height, land, ramp, radar_lo, radar_hi) = TILE.unpack_from(data, offset)
+        allowance.charge(cx, cy, 2, "tile %d" % slot)
+        if (flags & FLAG_EXTRA) and extra_off and ew > 0 and eh > 0:
+            allowance.charge(ew, eh, 2, "the extra block of tile %d" % slot)
 
         cb = cx * cy // 2
         image = decode_diamond(data[offset + TILE_HEADER_SIZE:
@@ -358,6 +374,10 @@ class TmpFormat:
         # an extra is art that overflows the tile -- a cliff top, a bridge
         # span -- and is meaningless shown apart from what it overhangs.
         origin_x, origin_y, width, height = extra_bounds(header, tiles)
+        # Every tile's frame is this canvas: the tile plus every extra's
+        # overhang, which the file states as offsets rather than pays for in
+        # bytes -- so it is checked here, before a frame that size exists.
+        budget.check_frame(width, height, "the template canvas")
 
         palette = self._pick_palette(host)
         doc = Document(width, height, palette=palette)

@@ -14,12 +14,14 @@ cannot be expressed, which the saver reports as a warning.
 """
 
 import io
+import os
 import xml.etree.ElementTree as ET
 import zipfile
 
 import numpy as np
 from PIL import Image
 
+from .. import budget
 from ..atomic import atomic_write
 
 MIMETYPE = b"image/openraster"
@@ -39,8 +41,9 @@ OP_FOR = {v: k for k, v in OPS.items()}
 def is_ora(path):
     try:
         with zipfile.ZipFile(path) as zf:
-            return zf.read("mimetype").strip() == MIMETYPE
-    except (OSError, KeyError, zipfile.BadZipFile):
+            # Bounded: this runs on every zip anyone opens, ORA or not.
+            return bytes(budget.read_member(zf, "mimetype", 256)).strip() == MIMETYPE
+    except (OSError, KeyError, zipfile.BadZipFile, budget.FileTooLarge):
         return False
 
 
@@ -49,8 +52,16 @@ def load(path, settings=None):
     from ..geometry import Rect
     from ..layer import LayerGroup
     with zipfile.ZipFile(path) as zf:
-        root = ET.fromstring(zf.read("stack.xml"))
+        root = ET.fromstring(budget.read_member(zf, "stack.xml", budget.text_bytes(),
+                                                "the layer stack"))
         width, height = int(root.get("w")), int(root.get("h"))
+        budget.check_frame(width, height, "the canvas")
+        # One frame per layer image. Each member is decoded for one layer
+        # only: a stack pointing many layers at one small entry would
+        # multiply it without the file paying for it in bytes.
+        layers = budget.Budget(sum(1 for el in root.iter("layer") if el.get("src")),
+                               os.path.basename(path))
+        used = set()
         doc = Document(width, height, settings=settings)
 
         def walk(stack_el, parent):
@@ -71,10 +82,14 @@ def load(path, settings=None):
                     src = el.get("src")
                     node = doc.add_layer(el.get("name", "Layer"), parent=parent)
                     node.visible, node.opacity, node.blend = visible, opacity, blend
-                    if not src:
+                    if not src or src in used:
                         continue
+                    used.add(src)
                     try:
-                        img = Image.open(io.BytesIO(zf.read(src))).convert("RGBA")
+                        img = budget.open_image(io.BytesIO(budget.read_member(
+                            zf, src, budget.encoded_frame_bytes())), "layer %r" % node.name)
+                        layers.charge(img.size[0], img.size[1], 4, "layer %r" % node.name)
+                        img = img.convert("RGBA")
                     except (KeyError, OSError):
                         continue
                     px = np.asarray(img)

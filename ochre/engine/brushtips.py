@@ -15,6 +15,8 @@ import os
 
 import numpy as np
 
+from . import budget
+
 BUILTIN = ("round", "square", "chalk", "spatter", "star", "leaf", "grass")
 CUSTOM = "custom"
 _custom = {"tip": None}
@@ -92,10 +94,9 @@ def save_custom(state_dir, tip):
 
 
 def load_custom(state_dir):
-    from PIL import Image
     p = path_for(state_dir)
     if p and os.path.exists(p):
-        set_custom(np.asarray(Image.open(p).convert("L")))
+        set_custom(np.asarray(budget.open_image(p).convert("L")))
         return True
     return False
 

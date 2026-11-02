@@ -243,8 +243,9 @@ class ColorLookup(_Point):
         self._lut = None
         if path and os.path.exists(path):
             try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    self._lut = parse_cube(fh.read())
+                from . import budget
+                self._lut = parse_cube(budget.read_file(path, budget.text_bytes())
+                                       .decode("utf-8", "replace"))
             except (OSError, ValueError):
                 self._lut = None
         if self._lut is None:
@@ -826,7 +827,8 @@ class Displace(_Filter):
         if path and os.path.exists(path):
             try:
                 from PIL import Image
-                im = Image.open(path).convert("RGB")
+                from . import budget
+                im = budget.open_image(path).convert("RGB")
                 if t["fit"] == "stretch":
                     dmap = np.asarray(im.resize((w, h), Image.BILINEAR), np.float64)
                 else:

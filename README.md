@@ -50,6 +50,14 @@ These are invariants, not aspirations. Each one is enforced by a test.
   the target, fsynced, then renamed over it, so a save that fails halfway
   leaves the previous file byte-identical. Checked by `tests/test_atomicsave.py`,
   which breaks real saves mid-write and greps for any `open(..., "w")`.
+- **An opened file is budgeted before it is allocated.** Every reader,
+  addon readers included, checks the sizes a file declares against
+  `ochre/engine/budget.py` and inflates compressed data only up to what it
+  can hold, so a damaged or malicious file is refused with a message, not a
+  MemoryError. The cap is PER FRAME (2^29 px, [Open] in `data/engine.ini`):
+  a file with N frames, layers or tiles may hold N such frames. Checked by
+  `tests/test_openbudget.py`; `tests/test_bigsprite.py` opens the real
+  136-frame stress sprite when it is present.
 - **Every accelerated operation is specified in integer arithmetic**, so the
   optional C extension and the pure-numpy fallback agree bit-for-bit by
   construction rather than by luck. `accel/fallback.py` is the normative

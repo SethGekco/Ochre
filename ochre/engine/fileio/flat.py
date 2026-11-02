@@ -18,6 +18,7 @@ import os
 import numpy as np
 from PIL import Image
 
+from .. import budget
 from ..atomic import save_image
 from ..geometry import Rect
 
@@ -108,9 +109,12 @@ def import_flat(path, settings=None):
     from ..document import Document
     from ..frame import Frame
 
-    img = Image.open(path)
+    # The declared size is checked before a pixel is decoded, frame by frame:
+    # an animation of N frames may hold N frames each up to the cap.
+    img = budget.open_image(path)
     img.load()
     count = max(1, int(getattr(img, "n_frames", 1)))
+    allowance = budget.Budget(count, os.path.basename(path))
     icc = img.info.get("icc_profile")
     if img.mode == "CMYK" and count == 1:
         # Through its profile (or the system's CMYK default), not Pillow's
@@ -123,6 +127,8 @@ def import_flat(path, settings=None):
     for index in range(count):
         if count > 1:
             img.seek(index)
+        allowance.charge(img.size[0], img.size[1], 4,
+                         "frame %d of %s" % (index + 1, os.path.basename(path)))
         frame_img = img if img.mode == "RGBA" else img.convert("RGBA")
         arr = np.asarray(frame_img, dtype=np.uint8)
         h, w = arr.shape[:2]
@@ -191,7 +197,7 @@ def import_indexed(path, settings=None):
     from ..document import Document
     from ..palette import LENGTH, Palette
 
-    img = Image.open(path)
+    img = budget.open_image(path)
     img.load()
     if img.mode != "P":
         return import_flat(path, settings)

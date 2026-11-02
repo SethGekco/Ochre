@@ -35,6 +35,7 @@ import sys
 import traceback
 
 from ..engine.atomic import atomic_write
+from ..engine.budget import FileTooLarge
 from .api import API_VERSION, AddonError, Host, compatible
 from .manifest import Manifest
 
@@ -529,6 +530,11 @@ class _Guard:
 
     def __exit__(self, exc_type, exc, tb):
         if exc is None:
+            return False
+        if isinstance(exc, (FileTooLarge, MemoryError)):
+            # The FILE is at fault (or the machine is full), not the addon:
+            # let the refusal through with its own message, and do not count
+            # it toward disabling an addon that did its job.
             return False
         self.failed = True
         self.manager.note_fault(self.addon_id, exc, self.what)

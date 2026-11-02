@@ -22,7 +22,7 @@ import os
 
 import numpy as np
 
-from ..engine import accel
+from ..engine import accel, budget
 from ..engine.atomic import atomic_write, save_image
 from ..engine.compositor import Compositor
 from ..engine.document import Document
@@ -43,6 +43,7 @@ class Controller:
         if settings is None:
             settings = Settings(data_dir)
         self.settings = settings
+        budget.configure(settings)              # [Open]: what an opened file may claim
         self.db = settings.db if hasattr(settings, "db") else IniDB(data_dir)
         self.tools = ToolRegistry(self.db)
         # Addons are discovered now but nothing of theirs runs until asked;
@@ -178,7 +179,17 @@ class Controller:
         return candidates[0]
 
     def open_path(self, path):
-        doc = self._open_path(path)
+        try:
+            doc = self._open_path(path)
+        except budget.FileTooLarge as exc:
+            # The file's own fault, stated plainly -- not "no format handles
+            # it", and not an addon fault.
+            raise budget.FileTooLarge("cannot open %s: %s" % (os.path.basename(path), exc)) from exc
+        except MemoryError as exc:
+            # Within the budget, but more than this machine has free now.
+            raise budget.FileTooLarge(
+                "cannot open %s: not enough free memory to hold it. Close other "
+                "documents or programs and try again." % os.path.basename(path)) from exc
         self.indexed_note = None
         if self.is_indexed_document():
             self._palette_for_opened_indexed(path)
@@ -269,6 +280,8 @@ class Controller:
             # back, as Photoshop and GIMP do, rather than demanding Save As.
             try:
                 doc = psd.load(path, settings=self.settings)
+            except (budget.FileTooLarge, MemoryError):
+                raise
             except Exception as exc:
                 raise self._unopenable(path, exc) from exc
             self._adopt(doc, path=path)
@@ -278,6 +291,8 @@ class Controller:
         else:
             try:
                 doc = import_flat(path, settings=self.settings)
+            except (budget.FileTooLarge, MemoryError):
+                raise
             except Exception as exc:
                 raise self._unopenable(path, exc) from exc
             self._adopt(doc, path=None)   # imported, not "the same file"
@@ -1281,8 +1296,7 @@ class Controller:
         from ..engine.commands import StructureDelta
         from ..engine.layer import SMART, SmartSource
         if isinstance(path_or_rgba, str):
-            from PIL import Image
-            rgba = np.asarray(Image.open(path_or_rgba).convert("RGBA"))
+            rgba = np.asarray(budget.open_image(path_or_rgba).convert("RGBA"))
             name = name or os.path.splitext(os.path.basename(path_or_rgba))[0]
         else:
             rgba = np.asarray(path_or_rgba, np.uint8)
@@ -1473,8 +1487,7 @@ class Controller:
         if target is None or getattr(target, "kind", "raster") != "smart":
             return False
         if isinstance(path_or_rgba, str):
-            from PIL import Image
-            rgba = np.asarray(Image.open(path_or_rgba).convert("RGBA"))
+            rgba = np.asarray(budget.open_image(path_or_rgba).convert("RGBA"))
         else:
             rgba = np.asarray(path_or_rgba, np.uint8)
         label = "Replace Contents"
@@ -3778,8 +3791,7 @@ class Controller:
     @staticmethod
     def _read_rgba(item):
         if isinstance(item, str):
-            from PIL import Image
-            return np.asarray(Image.open(item).convert("RGBA")).copy(), \
+            return np.asarray(budget.open_image(item).convert("RGBA")).copy(), \
                 os.path.splitext(os.path.basename(item))[0]
         return np.ascontiguousarray(item, np.uint8), None
 

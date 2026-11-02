@@ -42,6 +42,13 @@ DEFAULTS = {
         "CompressLevel": 1,        # zlib; runs on mouse-up where latency shows
         "MaxStrokeBlocks": 512,    # ~32 MB of live checkpoints, then auto-commit
     },
+    "Open": {
+        # The budget an opened file decodes under (engine/budget.py). PER
+        # FRAME: a file with N frames or layers may hold N such frames.
+        "MaxFramePixels": 536870912,   # 2**29 px: 2 GiB as RGBA, 23170 x 23170
+        "MaxSide": 300000,             # either side, px
+        "MaxTextBytes": 67108864,      # a manifest, stack description or palette
+    },
     "Frames": {
         "MaxWarmFrames": 8,
         "MaxWarmBytes": 1073741824,
