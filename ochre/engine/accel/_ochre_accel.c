@@ -344,6 +344,118 @@ static PyObject *py_blend_rect(PyObject *self, PyObject *args, PyObject *kwds)
     return (PyObject *)out;
 }
 
+/* ---- reduce_box ----------------------------------------------------------- */
+
+#define MAX_REDUCE 64      /* must match fallback.MAX_REDUCE */
+
+/* Box-average down by an integer factor. Mirrors fallback.reduce_box: RGBA
+ * premultiplied (colour weighted by alpha, divided by summed alpha), alpha
+ * and single-channel planes the plain mean, halves rounding up, edge blocks
+ * averaging only the pixels they have. One output row of accumulators is
+ * all the state there is, so a band of rows is independent of every other
+ * band -- which is what lets the caller split one call across threads. */
+static PyObject *py_reduce_box(PyObject *self, PyObject *args)
+{
+    PyObject *srco;
+    int factor;
+    if (!PyArg_ParseTuple(args, "Oi", &srco, &factor))
+        return NULL;
+    if (factor < 1 || factor > MAX_REDUCE) {
+        PyErr_Format(PyExc_ValueError, "reduce_box factor must be 1..%d, got %d",
+                     MAX_REDUCE, factor);
+        return NULL;
+    }
+    PyArrayObject *src = (PyArrayObject *)PyArray_FROMANY(srco, NPY_UINT8, 2, 3, 0);
+    if (!src) return NULL;
+    const int nd = PyArray_NDIM(src);
+    const int channels = nd == 3 ? (int)PyArray_DIM(src, 2) : 1;
+    plane_t ps;
+    if ((nd == 3 && channels != 4) || !plane_of(src, channels, &ps)) {
+        Py_DECREF(src);
+        PyErr_SetString(PyExc_ValueError,
+                        "reduce_box needs (H, W, 4) with adjacent channels, or (H, W) uint8");
+        return NULL;
+    }
+    if (factor == 1) {
+        /* An exact copy, as the specification returns: no averaging means
+         * no premultiply, so colour under zero alpha is kept. */
+        PyObject *copy = PyArray_NewCopy(src, NPY_CORDER);
+        Py_DECREF(src);
+        return copy;
+    }
+    const npy_intp h = PyArray_DIM(src, 0), w = PyArray_DIM(src, 1);
+    const npy_intp f = factor;
+    const npy_intp oh = (h + f - 1) / f, ow = (w + f - 1) / f;
+    npy_intp dims[3] = {oh, ow, 4};
+    PyArrayObject *out = (PyArrayObject *)PyArray_SimpleNew(nd, dims, NPY_UINT8);
+    if (!out) { Py_DECREF(src); return NULL; }
+    plane_t po = {NULL, 0, 0};
+    plane_of(out, channels, &po);
+
+    uint32_t *acc = (uint32_t *)PyMem_Malloc((size_t)(ow > 0 ? ow : 1) * 4 * sizeof(uint32_t));
+    if (!acc) { Py_DECREF(src); Py_DECREF(out); return PyErr_NoMemory(); }
+
+    Py_BEGIN_ALLOW_THREADS
+
+    for (npy_intp oy = 0; oy < oh; ++oy) {
+        const npy_intp y0 = oy * f;
+        const npy_intp y1 = y0 + f < h ? y0 + f : h;
+        const uint32_t rows = (uint32_t)(y1 - y0);
+        memset(acc, 0, (size_t)ow * (size_t)channels * sizeof(uint32_t));
+        for (npy_intp y = y0; y < y1; ++y) {
+            const uint8_t *rs = ps.data + y * ps.row;
+            npy_intp x = 0;
+            for (npy_intp ox = 0; ox < ow; ++ox) {
+                const npy_intp xe = x + f < w ? x + f : w;
+                if (channels == 4) {
+                    uint32_t *a = acc + ox * 4;
+                    uint32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+                    for (; x < xe; ++x) {
+                        const uint8_t *s = rs + x * ps.col;
+                        const uint32_t al = s[3];
+                        s0 += al * s[0];
+                        s1 += al * s[1];
+                        s2 += al * s[2];
+                        s3 += al;
+                    }
+                    a[0] += s0; a[1] += s1; a[2] += s2; a[3] += s3;
+                } else {
+                    uint32_t sum = 0;
+                    for (; x < xe; ++x)
+                        sum += rs[x * ps.col];
+                    acc[ox] += sum;
+                }
+            }
+        }
+        uint8_t *ro = po.data + oy * po.row;
+        for (npy_intp ox = 0; ox < ow; ++ox) {
+            const uint32_t cols = (uint32_t)(ox * f + f <= w ? f : w - ox * f);
+            const uint32_t n = rows * cols;
+            uint8_t *o = ro + ox * po.col;
+            if (channels == 4) {
+                const uint32_t *a = acc + ox * 4;
+                const uint32_t sa = a[3];
+                o[3] = (uint8_t)((sa + n / 2u) / n);
+                if (sa == 0u) {
+                    o[0] = o[1] = o[2] = 0u;
+                } else {
+                    o[0] = (uint8_t)((a[0] + sa / 2u) / sa);
+                    o[1] = (uint8_t)((a[1] + sa / 2u) / sa);
+                    o[2] = (uint8_t)((a[2] + sa / 2u) / sa);
+                }
+            } else {
+                o[0] = (uint8_t)((acc[ox] + n / 2u) / n);
+            }
+        }
+    }
+
+    Py_END_ALLOW_THREADS
+
+    PyMem_Free(acc);
+    Py_DECREF(src);
+    return (PyObject *)out;
+}
+
 /* ---- module ------------------------------------------------------------- */
 
 static PyMethodDef methods[] = {
@@ -352,6 +464,8 @@ static PyMethodDef methods[] = {
     {"blend_rect", (PyCFunction)(void (*)(void))py_blend_rect,
      METH_VARARGS | METH_KEYWORDS,
      "blend_rect(dst, src, mode=0, opacity=255, mask=None, out=None)"},
+    {"reduce_box", py_reduce_box, METH_VARARGS,
+     "reduce_box(src, factor) -> the box-averaged array"},
     {NULL, NULL, 0, NULL}
 };
 

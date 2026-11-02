@@ -323,18 +323,22 @@ class Document:
     def invalidate(self, rect, frame=None):
         (self.frame if frame is None else frame).dirty.add(rect)
 
-    def take_dirty(self, frame=None):
+    def take_dirty(self, frame=None, on_cell=None):
         """Drain the frame's dirty rects, merged with its cells' own.
 
         Cells accumulate dirt as tools write; the frame is where it is
         collected. Draining both here keeps a single source of truth for
         "what needs recompositing" without the cells needing to know that a
-        frame exists.
+        frame exists. on_cell(key, rects), if given, hears which cell each
+        rect came from -- what keeps a reduced preview's cache current.
         """
         frame_obj = self.frame if frame is None else frame
         region = frame_obj.dirty
-        for (_, frame_id), surface in self.cells.items():
-            if frame_id == frame_obj.id:
-                for r in surface.dirty.take():
+        for key, surface in self.cells.items():
+            if key[1] == frame_obj.id:
+                rects = surface.dirty.take()
+                for r in rects:
                     region.add(r)
+                if rects and on_cell is not None:
+                    on_cell(key, rects)
         return region.take()

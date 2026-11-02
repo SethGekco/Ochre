@@ -275,6 +275,12 @@ class HistogramDock(QDockWidget):
     def sync(self, **_):
         if not self.isVisible() or self.ctl.doc is None:
             return
+        canvas = getattr(self.parent(), "canvas", None)
+        if getattr(canvas, "showing_reduced", False):
+            # Reading the image would composite it at full resolution in the
+            # middle of a scrub: wait until the canvas has settled.
+            self._timer.start(250)
+            return
         data = self.ctl.histogram(self.source.currentData())
         self.view.data = data
         self.view.channel = self.channel.currentData()
@@ -373,6 +379,9 @@ class NavigatorDock(QDockWidget):
 
     def sync(self, **_):
         if not self.isVisible() or self.ctl.doc is None:
+            return
+        if getattr(self.canvas, "showing_reduced", False):
+            self._timer.start(300)          # as the Histogram: after the scrub
             return
         img = self.ctl.merged()
         h, w = img.shape[:2]

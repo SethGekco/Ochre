@@ -33,6 +33,15 @@ UI_DEFAULTS = {
         # Text caret blink. 530 ms is the long-standing platform
         # default; 0 disables blinking, which some users need.
         "CaretBlinkMs": 530,
+        # Zoomed out on a big canvas, live previews (filter dialogs, layer
+        # opacity and blend scrubbing, large redraws) are computed on a
+        # reduced copy matching the zoom; full resolution follows on OK,
+        # mouse release, or once the canvas has been still for SettleMs.
+        # Documents and redraws under ReducedPreviewsAbove pixels are always
+        # full resolution -- there a full composite is already quick.
+        "ReducedPreviews": True,
+        "ReducedPreviewsAbove": 2097152,
+        "SettleMs": 200,
     },
     "Tools": {
         "DefaultTool": "brush",

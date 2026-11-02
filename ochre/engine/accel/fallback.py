@@ -333,6 +333,71 @@ def composite_stack(layers, shape, out=None):
     return out
 
 
+#: The largest reduction reduce_box accepts. 64 x 64 opaque pixels of 255
+#: sum to 266 million, comfortably inside uint32 in both backends.
+MAX_REDUCE = 64
+
+
+def reduce_box(src, factor):
+    """Box-average src down by an integer factor: each output pixel is the
+    mean of a factor x factor block, the blocks on the right and bottom edges
+    as many pixels as remain.
+
+    RGBA is averaged PREMULTIPLIED -- colour weighted by alpha, divided by the
+    summed alpha -- for the same reason as every other average in Ochre: a
+    straight mean drags transparent black into the colour of every edge.
+    Alpha itself is the plain mean. A single-channel plane (a mask, a
+    selection) is the plain mean. All of it in integers, rounding halves up:
+
+        a  = (sum(a)      + n/2) / n
+        c  = (sum(a * c)  + A/2) / A       A = sum(a); 0 where A == 0
+
+    This is what the reduced-resolution previews are made of. It is a preview
+    filter, not a resampler for document pixels -- nothing committed passes
+    through it.
+    """
+    src = np.asarray(src, dtype=np.uint8)
+    f = int(factor)
+    if not 1 <= f <= MAX_REDUCE:
+        raise ValueError("reduce_box factor must be 1..%d, got %r" % (MAX_REDUCE, factor))
+    rgba = src.ndim == 3
+    if not (src.ndim == 2 or (rgba and src.shape[2] == 4)):
+        raise ValueError("reduce_box needs (H, W, 4) or (H, W) uint8, got %s" % (src.shape,))
+    h, w = src.shape[:2]
+    oh, ow = -(-h // f), -(-w // f)
+    out = np.empty((oh, ow) + src.shape[2:], dtype=np.uint8)
+    if f == 1:
+        out[...] = src
+        return out
+    # Pixels in each output column's block: f, except a short last column.
+    cols = np.full(ow, f, dtype=np.uint32)
+    cols[-1] = w - (ow - 1) * f
+    # Bands of output rows, so the uint32 working copy stays a few tens of MB
+    # however large the source is.
+    step = max(1, (1 << 22) // (ow * f * f))
+    for oy in range(0, oh, step):
+        oy1 = min(oh, oy + step)
+        y0, y1 = oy * f, min(h, oy1 * f)
+        nr = oy1 - oy
+        work = np.zeros((nr * f, ow * f) + src.shape[2:], dtype=np.uint32)
+        work[:y1 - y0, :w] = src[y0:y1]
+        rows = np.full(nr, f, dtype=np.uint32)
+        rows[-1] = (y1 - y0) - (nr - 1) * f
+        n = rows[:, None] * cols[None, :]
+        if rgba:
+            work[..., :3] *= work[..., 3:4]
+            sums = work.reshape(nr, f, ow, f, 4).sum(axis=(1, 3), dtype=np.uint32)
+            sa = sums[..., 3]
+            out[oy:oy1, :, 3] = (sa + n // 2) // n
+            safe = np.where(sa == 0, 1, sa)[..., None]
+            rgb = (sums[..., :3] + safe // 2) // safe
+            out[oy:oy1, :, :3] = np.where(sa[..., None] == 0, 0, rgb)
+        else:
+            sums = work.reshape(nr, f, ow, f).sum(axis=(1, 3), dtype=np.uint32)
+            out[oy:oy1] = (sums + n // 2) // n
+    return out
+
+
 def flood_fill(plane, x, y, tolerance, connectivity=4, mask=None):
     """Scanline flood fill returning a bool stencil.
 

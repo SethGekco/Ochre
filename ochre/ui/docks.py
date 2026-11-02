@@ -226,6 +226,10 @@ class LayersDock(QDockWidget):
         self.opacity.setRange(0, 255)
         self.opacity.setValue(255)
         self.opacity.valueChanged.connect(self._opacity_changed)
+        # Dragging the slider is a live scrub: zoomed out on a big canvas the
+        # canvas shows it reduced, and full resolution follows the release.
+        self.opacity.sliderPressed.connect(lambda: self._scrub(True))
+        self.opacity.sliderReleased.connect(lambda: self._scrub(False))
 
         form = QFormLayout()
         form.addRow("Blend", self.blend)
@@ -331,6 +335,15 @@ class LayersDock(QDockWidget):
         wanted = item.checkState() == Qt.Checked
         if node.visible != wanted:
             self.ctl.set_layer_property(node, "visible", wanted)
+
+    def _scrub(self, held):
+        canvas = getattr(self.parent(), "canvas", None)
+        if canvas is None:
+            return
+        if held:
+            canvas.begin_reduced()
+        else:
+            canvas.end_reduced()
 
     def _opacity_changed(self, value):
         if self._syncing or self.ctl.active_layer is None:

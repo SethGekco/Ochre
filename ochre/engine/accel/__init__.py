@@ -27,7 +27,7 @@ from . import fallback as _fallback
 
 # Everything the backend may provide. Anything absent from the extension
 # falls back silently.
-OPS = ("blend_channel", "blend_rect", "composite_stack", "flood_fill")
+OPS = ("blend_channel", "blend_rect", "composite_stack", "flood_fill", "reduce_box")
 
 _forced = os.environ.get("OCHRE_ACCEL", "").strip().lower()
 _disabled = _forced in ("0", "off", "false", "no")
@@ -67,6 +67,7 @@ if _bound["blend_rect"][1] == "c":
         return _c_blend_channel(mode, a, b)
 composite_stack = _bound["composite_stack"][0]
 flood_fill = _bound["flood_fill"][0]
+reduce_box = _bound["reduce_box"][0]
 
 #: Which backend actually serves each operation.
 BACKENDS = {name: where for name, (_fn, where) in _bound.items()}
@@ -78,7 +79,7 @@ BACKEND = "c" if HAVE_NATIVE and all(v == "c" for v in BACKENDS.values()) else (
 from .fallback import (OPCODES, NORMAL, MULTIPLY, ADDITIVE, COLORBURN,      # noqa: E402
                        COLORDODGE, REFLECT, GLOW, OVERLAY, DIFFERENCE,
                        NEGATION, LIGHTEN, DARKEN, SCREEN, XOR, NATIVE_OPCODES,
-                       NONSEPARABLE)
+                       NONSEPARABLE, MAX_REDUCE)
 
 #: The specification is always importable by name, so the parity test can
 #: compare the two directly rather than through this selector.
@@ -96,4 +97,4 @@ def describe():
 
 __all__ = ["BACKEND", "BACKENDS", "HAVE_NATIVE", "spec", "native", "OPCODES",
            "OPS", "describe", "blend_channel", "blend_rect", "composite_stack",
-           "flood_fill"]
+           "flood_fill", "reduce_box", "MAX_REDUCE"]

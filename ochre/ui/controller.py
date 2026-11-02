@@ -58,6 +58,7 @@ class Controller:
         self.history = None
         self.selection = None
         self.display = None
+        self._proxy = None              # the reduced-preview compositor, when one is in use
         self.clip = None
         from .session import Session
         self.state_dir = state_dir
@@ -435,7 +436,7 @@ class Controller:
                 "path", "dirty_since_save", "_saved_marker", "active_layer",
                 "_pending", "quick_mask", "last_measure", "_history_src",
                 "editing_mask", "smart_link", "snapshots", "guides_locked", "save_convert",
-                "save_cache", "recovery_token", "display_name", "recovered_from")
+                "save_cache", "recovery_token", "display_name", "recovered_from", "_proxy")
 
     def _capture(self):
         return {k: getattr(self, k, None) for k in self._PER_DOC}
@@ -554,6 +555,7 @@ class Controller:
         self.history = HistoryStack(self.settings)
         self.selection = Selection(doc.width, doc.height)
         self.compositor = Compositor(doc)
+        self._proxy = None
         self.blends = self.compositor.blends
         self.display = np.zeros((doc.height, doc.width, 4), dtype=np.uint8)
         self.path = path
@@ -853,8 +855,7 @@ class Controller:
         """
         if self.doc is None:
             return []
-        for rect in self.doc.take_dirty():
-            self._pending.append(rect)
+        self._drain_dirty()
         if not self._pending:
             return []
 
@@ -874,6 +875,12 @@ class Controller:
                 merged.append(clipped)
         if not merged:
             return []
+        # Rects inside another are composited by it already. A reduced
+        # preview holds redraws back, so several full-canvas invalidations
+        # (one per slider tick) can be waiting here at once.
+        merged = [r for i, r in enumerate(merged)
+                  if not any(_covers(q, r) and (q != r or j < i)
+                             for j, q in enumerate(merged) if j != i)]
 
         for rect in merged:
             if self.active_layer is not None and self.compositor.cache_valid:
@@ -881,6 +888,37 @@ class Controller:
             else:
                 self.compositor.composite_into(self.display, rect)
         return merged
+
+    def _drain_dirty(self):
+        """Move the document's dirty rects into the pending list, telling the
+        reduced-preview cache which cells they came from."""
+        proxy = self._proxy
+        touch = None if proxy is None or proxy.doc is not self.doc else proxy.touch
+        self._pending.extend(self.doc.take_dirty(on_cell=touch))
+
+    def pending_area(self):
+        """Pixels the next flush() would composite (before any style growth).
+        Lets the canvas decide between a full flush and a reduced preview
+        without doing either."""
+        if self.doc is None:
+            return 0
+        self._drain_dirty()
+        rects = [r for r in (p.clipped_to(self.doc.width, self.doc.height)
+                             for p in self._pending) if r is not None]
+        if any(r == self.doc.bounds for r in rects):
+            return self.doc.bounds.area
+        return sum(r.area for r in rects)
+
+    def reduced_compositor(self, factor):
+        """The compositor for previews at 1/factor (engine/proxy.py). One is
+        kept, with its cache of reduced layers, until the document, its size
+        or the factor changes -- so the second scrub costs only compositing."""
+        from ..engine.proxy import ProxyCompositor
+        proxy = self._proxy
+        if proxy is None or proxy.full is not self.compositor \
+                or not proxy.fits(self.doc, factor):
+            proxy = self._proxy = ProxyCompositor(self.compositor, factor)
+        return proxy
 
     def composite_region(self, rect):
         return self.compositor.composite(rect)
@@ -4885,3 +4923,9 @@ class NeedsIndexed(ValueError):
         super().__init__("%s stores palette indices; convert the image to a palette to save it"
                          % label)
         self.label = label
+
+
+def _covers(outer, inner):
+    """Does rect `outer` contain all of rect `inner`?"""
+    return (outer.x <= inner.x and outer.y <= inner.y
+            and outer.x1 >= inner.x1 and outer.y1 >= inner.y1)

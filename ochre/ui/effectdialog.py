@@ -18,6 +18,12 @@ the part you are looking at is milliseconds.
 A slider moving cancels the in-flight render rather than queueing another.
 Without that, dragging a slider builds a backlog and the preview lags further
 behind the further you drag.
+
+Zoomed out on a big canvas the visible region is the whole layer, so there
+the preview runs on a REDUCED copy of it instead (engine/proxy.py), with the
+effect's pixel sizes scaled to match, and the canvas draws the result in the
+layer's place without the layer being written at all. OK renders the whole
+layer at full resolution from the original, exactly as it always did.
 """
 
 import numpy as np
@@ -28,6 +34,7 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
                                QHBoxLayout, QLabel, QLineEdit, QProgressBar,
                                QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
+from ..engine import accel, proxy
 from ..engine.effects import CancelToken, Cancelled
 
 
@@ -381,6 +388,17 @@ class EffectDialog(QDialog):
         sel = getattr(controller, "selection", None)
         self._sel = None if sel is None or sel.mask is None else sel.mask
         self._original = None if cell is None else cell.pixels.copy()
+        # A reduced preview: (factor, reduced original, reduced selection).
+        self._reduced = None
+        # Whether a full-resolution preview has written into the layer, which
+        # then needs putting back.
+        self._wrote = False
+        # While the dialog is open the canvas does not settle to full
+        # resolution by itself; OK or Cancel settles it.
+        canvas = self._canvas()
+        self._held = canvas is not None and canvas.reduction_factor() > 1
+        if self._held:
+            canvas.begin_reduced()
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -399,9 +417,17 @@ class EffectDialog(QDialog):
             self._cancel.cancel()
         self._timer.start(self._debounce)
 
+    def _canvas(self):
+        return getattr(self.parent(), "canvas", None)
+
+    def _end_reduced(self):
+        if self._held:
+            self._held = False
+            self._canvas().end_reduced()
+
     def _preview_rect(self):
         """Only what is on screen, inflated by the effect's halo."""
-        canvas = getattr(self.parent(), "canvas", None)
+        canvas = self._canvas()
         if canvas is None:
             return self.ctl.doc.bounds
         vp = canvas.viewport()
@@ -419,6 +445,12 @@ class EffectDialog(QDialog):
     def _render_preview(self):
         if self._cell is None or self._original is None:
             return
+        canvas = self._canvas()
+        factor = canvas.reduction_factor() if canvas is not None else 1
+        token = proxy.scaled_token(self.effect, factor) if factor > 1 else None
+        if token is not None:
+            self._render_reduced(canvas, factor, token)
+            return
         rect = self._preview_rect()
         self._cancel = CancelToken()
         try:
@@ -427,12 +459,33 @@ class EffectDialog(QDialog):
         except Cancelled:
             return
         self._cell.plane("rgba")[rect.slice()] = self._fenced(result, rect)
+        self._wrote = True
         self._cell.dirty.add(rect)
         self.ctl.invalidate(rect)
-        canvas = getattr(self.parent(), "canvas", None)
         if canvas is not None:
             canvas.refresh()
             canvas.viewport().update()
+
+    def _render_reduced(self, canvas, factor, token):
+        """The preview at 1/factor: the effect runs on a reduced copy of the
+        layer with its pixel sizes scaled, over what is on screen, and the
+        canvas draws that in the layer's place. The layer is not touched."""
+        if self._reduced is None or self._reduced[0] != factor:
+            self._reduced = (factor, accel.reduce_box(self._original, factor),
+                             None if self._sel is None else accel.reduce_box(self._sel, factor))
+        _, src, sel = self._reduced
+        h, w = src.shape[:2]
+        rect = proxy.reduce_rect(self._preview_rect(), factor).clipped_to(w, h)
+        if rect is None:
+            return
+        self._cancel = CancelToken()
+        try:
+            result = self.effect.apply(src, [rect], token=token, cancel=self._cancel)
+        except Cancelled:
+            return
+        if sel is not None:
+            result[rect.slice()] = self._fenced(result, rect, src, sel)
+        canvas.show_reduced({self._target.id: result})
 
     # ---- commit / abandon ------------------------------------------------
 
@@ -451,8 +504,10 @@ class EffectDialog(QDialog):
 
         # Restore first, so the undo entry captures the true "before", then
         # apply through the controller: one undo step, the selection and the
-        # paint target honoured -- and recordable in an Action.
-        self._cell.plane("rgba")[...] = self._original
+        # paint target honoured -- and recordable in an Action. A reduced
+        # preview never wrote to the layer, so there is nothing to restore.
+        if self._wrote:
+            self._cell.plane("rgba")[...] = self._original
         if hasattr(self.ctl, "apply_effect"):
             self.ctl.apply_effect(self.effect.name, dict(self.effect.props.token()))
         else:                                              # a bare controller (tests)
@@ -467,28 +522,33 @@ class EffectDialog(QDialog):
         self.ctl.dirty_since_save = True
         self.ctl.emit("history.changed")
         self._committed = True
+        self._end_reduced()                 # the full-resolution composite, now
         super().accept()
 
-    def _fenced(self, result, rect):
+    def _fenced(self, result, rect, original=None, sel=None):
         """result over rect, limited to the selection (for the preview)."""
+        original = self._original if original is None else original
+        sel = self._sel if sel is None else sel
         win = result[rect.slice()]
-        if self._sel is None:
+        if sel is None:
             return win
-        orig = self._original[rect.slice()].astype(np.float32)
-        k = self._sel[rect.slice()].astype(np.float32)[..., None] / 255.0
+        orig = original[rect.slice()].astype(np.float32)
+        k = sel[rect.slice()].astype(np.float32)[..., None] / 255.0
         return np.clip(np.rint(orig + (win.astype(np.float32) - orig) * k), 0, 255).astype(np.uint8)
 
     def reject(self):
         if self._cancel is not None:
             self._cancel.cancel()
-        if self._cell is not None and self._original is not None and not self._committed:
+        if self._cell is not None and self._original is not None and not self._committed \
+                and self._wrote:
             self._cell.plane("rgba")[...] = self._original
             self._cell.dirty.add(self.ctl.doc.bounds)
             self.ctl.invalidate()
-            canvas = getattr(self.parent(), "canvas", None)
-            if canvas is not None:
-                canvas.refresh()
-                canvas.viewport().update()
+        self._end_reduced()
+        canvas = self._canvas()
+        if canvas is not None and not self._committed:
+            canvas.refresh()
+            canvas.viewport().update()
         super().reject()
 
 

@@ -68,6 +68,12 @@ class Effect:
     # levels, equalize). Such an effect cannot be an adjustment layer, where
     # it would be handed one tile at a time.
     global_stats = False
+    # For a preview on a reduced copy of the image (engine/proxy.py): the
+    # settings that are lengths in pixels, divided by the reduction. An
+    # empty tuple says nothing needs scaling (percentages, angles); None, the
+    # default, says the effect has not been checked, so its preview stays at
+    # full resolution. Pointwise effects need neither.
+    proxy_scale = None
 
     def __init__(self):
         self.props = self.declare()
@@ -379,6 +385,7 @@ class GaussianBlur(Effect):
 
     name = "gaussian_blur"
     label = "Gaussian Blur"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return PropertyCollection([IntProperty("radius", 4, 0, 200)])

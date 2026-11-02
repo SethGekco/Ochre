@@ -176,6 +176,32 @@ def main():
     except ValueError:
         check("C rejects a mask of the wrong size", True)
 
+    # ---- reduce_box: the reduced-resolution preview filter --------------
+    # Every factor the previews use and some they do not, on sizes that leave
+    # short edge blocks, with alpha at both extremes and in between.
+    miss = []
+    for h, w in ((1, 1), (7, 5), (17, 33), (64, 64), (100, 3), (129, 257)):
+        for f in (1, 2, 3, 4, 8, 16, spec.MAX_REDUCE):
+            rgba = rng.integers(0, 256, (h, w, 4), dtype=np.uint8)
+            rgba[..., 3][rng.random((h, w)) < 0.3] = 0
+            rgba[..., 3][rng.random((h, w)) < 0.3] = 255
+            grey = rgba[..., 0].copy()
+            for src in (rgba, grey, rgba[::-1, ::-1]):
+                if not np.array_equal(spec.reduce_box(src, f), native.reduce_box(src, f)):
+                    miss.append((h, w, f, src.ndim))
+    check("reduce_box matches on RGBA, single planes and reversed views",
+          not miss, "-- %r" % miss[:5])
+    opaque = np.full((64, 64, 4), 255, np.uint8)
+    check("reduce_box keeps opaque white exact at the largest factor",
+          np.array_equal(native.reduce_box(opaque, spec.MAX_REDUCE),
+                         np.full((1, 1, 4), 255, np.uint8)))
+    for bad in (0, spec.MAX_REDUCE + 1):
+        try:
+            native.reduce_box(opaque, bad)
+            check("C rejects reduce factor %d" % bad, False, "-- no error")
+        except ValueError:
+            check("C rejects reduce factor %d" % bad, True)
+
     # ---- the selector reports honestly ----------------------------------
     check("selector routes blend_rect to C", accel.BACKENDS["blend_rect"] == "c")
     check("selector admits what is still numpy",
@@ -183,6 +209,7 @@ def main():
           "-- an unimplemented op must fall back, not silently vanish")
     check("describe() names the accelerated ops",
           "blend_rect" in accel.describe())
+    check("selector routes reduce_box to C", accel.BACKENDS["reduce_box"] == "c")
 
     # ---- and it should actually be faster -------------------------------
     d = rng.integers(0, 256, (512, 512, 4), dtype=np.uint8)
