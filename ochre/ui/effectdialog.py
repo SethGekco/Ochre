@@ -26,7 +26,8 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFormLayout,
                                QHBoxLayout, QLabel, QLineEdit, QProgressBar,
-                               QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QSlider, QSpinBox, QTabWidget,
+                               QVBoxLayout, QWidget)
 
 from ..engine.effects import CancelToken, Cancelled
 
@@ -352,12 +353,27 @@ class EffectDialog(QDialog):
         if panel is not None:
             self.panel = panel(effect, self._on_changed)
             layout.addWidget(self.panel)
-        for prop in effect.props:
-            if prop.name in hidden:
-                continue
+        # Props tagged with a section (Camera Raw's panels) go on tabs, the
+        # untagged ones on the first; otherwise one plain form.
+        shown = [p for p in effect.props if p.name not in hidden]
+        sections = {}
+        if any(p.ui.get("section") for p in shown):
+            tabs = QTabWidget()
+            for prop in shown:
+                name = prop.ui.get("section") or "Basic"
+                if name not in sections:
+                    page = QWidget()
+                    sections[name] = QFormLayout(page)
+                    scroll = QScrollArea()
+                    scroll.setWidgetResizable(True)
+                    scroll.setWidget(page)
+                    tabs.addTab(scroll, name)
+            layout.addWidget(tabs)
+        for prop in shown:
             row = _Row(prop)
             row.changed.connect(self._on_changed)
-            form.addRow(prop.ui.get("label", prop.name), row)
+            target = sections.get(prop.ui.get("section") or "Basic", form)
+            target.addRow(prop.ui.get("label", prop.name), row)
             self.rows.append(row)
         layout.addLayout(form)
 

@@ -35,6 +35,7 @@ from .effects import Effect
 from .props import (ChoiceProperty, FloatProperty, IntProperty, PropertyCollection,
                     TextProperty)
 from .warp import warp_field
+from . import rawpanels
 
 
 def _props(*items):
@@ -129,7 +130,9 @@ def dehaze(rgb, amount, radius=7):
 # ---- Camera Raw ---------------------------------------------------------------------
 
 class CameraRaw(_Whole):
-    """Photoshop's Camera Raw Filter, Basic panel (plus vignette and grain)."""
+    """Photoshop's Camera Raw Filter: the Basic panel here, Tone Curve,
+    Detail, HSL / Grayscale, Split Toning and Camera Calibration in
+    rawpanels.py, and Effects (vignette and grain) at the end of compute."""
 
     name, label, category = "camera_raw", "Camera Raw Filter", "Photo"
 
@@ -143,8 +146,29 @@ class CameraRaw(_Whole):
             IntProperty("texture", 0, -100, 100), IntProperty("clarity", 0, -100, 100),
             IntProperty("dehaze", 0, -100, 100),
             IntProperty("vibrance", 0, -100, 100), IntProperty("saturation", 0, -100, 100),
-            IntProperty("vignette", 0, -100, 100, label="Post-crop vignette"),
-            IntProperty("grain", 0, 0, 100))
+            *rawpanels.props(),
+            # Effects. The extra sliders follow Kooka Pictura's pictura_raw
+            # (GPL-3.0) and Camera Raw's ranges; at their defaults the
+            # vignette and grain are what they always were.
+            IntProperty("vignette", 0, -100, 100, label="Post-crop Vignetting", section="Effects"),
+            ChoiceProperty("vignette_style", "highlight_priority",
+                           ["highlight_priority", "color_priority"],
+                           labels={"highlight_priority": "Highlight Priority",
+                                   "color_priority": "Color Priority"},
+                           label="Vignette Style", section="Effects"),
+            IntProperty("vignette_midpoint", 50, 0, 100, label="Vignette Midpoint",
+                        section="Effects"),
+            IntProperty("vignette_roundness", 0, -100, 100, label="Vignette Roundness",
+                        section="Effects"),
+            IntProperty("vignette_feather", 50, 0, 100, label="Vignette Feather",
+                        section="Effects"),
+            IntProperty("vignette_highlights", 0, 0, 100, label="Vignette Highlights",
+                        section="Effects"),
+            IntProperty("grain", 0, 0, 100, label="Grain Amount", section="Effects"),
+            IntProperty("grain_size", 25, 0, 100, label="Grain Size", section="Effects"),
+            IntProperty("grain_roughness", 50, 0, 100, label="Grain Roughness",
+                        section="Effects"),
+            *rawpanels.calibration_props())
 
     def compute(self, t, src):
         h, w = src.shape[:2]
@@ -202,21 +226,55 @@ class CameraRaw(_Whole):
             k = t["saturation"] / 100.0 + t["vibrance"] / 100.0 * (1 - sat) ** 2 * 1.2
             x = grey + (y - grey) * (1 + k)
 
+        if rawpanels.active(t):
+            x = rawpanels.apply(x, t)
+
         if t["vignette"]:
-            ys, xs = np.mgrid[0:h, 0:w].astype(np.float64)
-            r = np.hypot((xs + 0.5 - w / 2.0) / (w / 2.0), (ys + 0.5 - h / 2.0) / (h / 2.0)) / math.sqrt(2)
-            fall = np.clip((r - 0.35) / 0.65, 0, 1) ** 2
-            v = t["vignette"] / 100.0
-            x = x * (1 + v * fall)[..., None] if v < 0 else x + (1 - x) * (v * fall)[..., None]
+            x = _vignette(x, t)
 
         if t["grain"]:
             rng = np.random.default_rng(12345)
-            noise = _blur(rng.standard_normal((h, w)), 0.6)
-            x = x + (noise * (t["grain"] / 100.0) * 0.08)[..., None]
+            size = t["grain_size"]
+            sigma = 0.6 if size == 25 else 0.6 * (0.2 + 0.8 * size / 25.0)
+            noise = _blur(rng.standard_normal((h, w)), sigma)
+            rough = 0.5 + t["grain_roughness"] / 100.0
+            x = x + (noise * (t["grain"] / 100.0) * 0.08 * rough)[..., None]
+
+        x = rawpanels.calibrate(x, t)
 
         out = src.copy()
         out[..., :3] = np.clip(np.rint(x * 255.0), 0, 255).astype(np.uint8)
         return out
+
+
+def _vignette(x, t):
+    """Post-crop vignetting: darken (or lighten) toward the corners.
+    Midpoint moves where the fall starts, Feather how fast it comes,
+    Roundness pulls the oval toward a circle (+) or a rounded rectangle
+    (-), and under Highlight Priority, Highlights spares the bright
+    parts from darkening."""
+    h, w = x.shape[:2]
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float64)
+    ax, ay = w / 2.0, h / 2.0
+    round_ = t["vignette_roundness"] / 100.0
+    if round_ > 0:
+        a = min(ax, ay)
+        ax, ay = ax + (a - ax) * round_, ay + (a - ay) * round_
+    u, v = np.abs(xs + 0.5 - w / 2.0) / ax, np.abs(ys + 0.5 - h / 2.0) / ay
+    if round_ < 0:
+        p = 2.0 * (1.0 - 1.5 * round_)                    # up to 5: nearly square
+        r = (u ** p + v ** p) ** (1.0 / p) / 2.0 ** (1.0 / p)
+    else:
+        r = np.hypot(u, v) / math.sqrt(2)
+    start = min(0.35 * t["vignette_midpoint"] / 50.0, 0.95)
+    fall = np.clip((r - start) / (0.65 if start == 0.35 else 1 - start), 0, 1)
+    if t["vignette_feather"] != 50:
+        fall = np.minimum(fall * (0.5 + t["vignette_feather"] / 100.0), 1.0)
+    fall = fall ** 2
+    if t["vignette_style"] == "highlight_priority" and t["vignette_highlights"]:
+        fall = fall * (1 - t["vignette_highlights"] / 100.0 * np.clip(_lum(np.clip(x, 0, 1)), 0, 1))
+    k = t["vignette"] / 100.0
+    return x * (1 + k * fall)[..., None] if k < 0 else x + (1 - x) * (k * fall)[..., None]
 
 
 # ---- Lens Correction ----------------------------------------------------------------
