@@ -24,9 +24,17 @@ groups, opacity, blend modes, visibility, clipping, layer masks, Unicode
 names, and the flattened composite (which is what non-layer readers show).
 Adjustment layers and live layer styles have no portable form here, so the
 saver reports them as warnings rather than silently dropping them.
+
+KEPT: what an opened PSD holds that Ochre does not model -- unknown image
+resources, a layer's tagged blocks (type, smart objects, Photoshop's own
+effects, adjustments, IDs, ...), document-level tagged blocks and the global
+layer mask info -- is written back as it was read, so open-then-save loses
+nothing nobody touched. The few kinds an edit can make false follow the
+rules beside CONTENT, below.
 """
 
 import struct
+import zlib
 
 import numpy as np
 
@@ -248,6 +256,7 @@ class PSDLayer:
         self.opacity = 255
         self.clipping = False
         self.hidden = False
+        self.flags = 0                    # the record's flag byte, as stored
         self.mask_rect = None
         self.mask_default = 255
         self.mask_disabled = False
@@ -363,7 +372,7 @@ def _layer_info(r, end, depth, mode, psb):
         L.blend = BLEND_KEYS.get(L.blend_key, "Normal")
         L.opacity = r.u8()
         L.clipping = r.u8() == 1
-        flags = r.u8()
+        L.flags = flags = r.u8()
         L.hidden = bool(flags & 2)
         r.u8()
         extra = r.u32()
@@ -540,6 +549,10 @@ def load(path, settings=None):
             prof = colormanage.open_profile(icc)
             if not colormanage.is_srgb(prof):
                 colormanage.set_doc_profile(doc, prof)
+            else:
+                # sRGB is Ochre's default and is not stored on the document,
+                # so "no profile" at save time still means this one.
+                doc.psd_source.icc_is_default = True
         except Exception:                                   # noqa: BLE001
             pass
     return doc
@@ -564,6 +577,7 @@ def _load(path, settings=None):
             "This is a 32-bit (floating-point) PSD; Ochre edits in 8 bits per channel, "
             "so it was reduced to 8 bits on opening (values clipped to 0..1, then "
             "rounded), and saving writes an 8-bit PSD.")
+    doc.psd_source = PSDSource(f)
     if not layers:
         layer = doc.add_layer("Background")
         if composite is not None:
@@ -574,6 +588,7 @@ def _load(path, settings=None):
     for L in layers:                       # bottom-first in the file
         if L.section == 3:                 # the hidden marker that OPENS a group, bottom-up
             group = LayerGroup(name="Group")
+            group.psd_source = {"divider": L.index, "divider_blocks": L.blocks}
             stack[-1].add(group)
             stack.append(group)
             continue
@@ -583,8 +598,10 @@ def _load(path, settings=None):
             group.opacity = L.opacity
             group.visible = not L.hidden
             group.blend = L.blend
+            group.psd_source = dict(getattr(group, "psd_source", None) or {}, **_kept(L))
             continue
         node = doc.add_layer(L.name or "Layer", parent=stack[-1])
+        node.psd_source = _kept(L)
         node.opacity = L.opacity
         node.visible = not L.hidden
         node.blend = L.blend
@@ -613,7 +630,164 @@ def _load(path, settings=None):
                 for c in range(3):
                     mpx[mrect.slice() + (c,)] = sub
             mcell._touched(doc.bounds)
+    # What every layer looks like as opened, to tell at save time whether it
+    # (and the whole document) was changed since.
+    for node in doc.root.walk():
+        src = getattr(node, "psd_source", None)
+        if src is not None and node is not doc.root:
+            src["state"] = _state(doc, node, doc.frame)
     return doc
+
+# ---- what Ochre keeps without understanding it ----------------------------------------
+#
+# Kooka Pictura's rule, "preserve, don't model": what a PSD holds that Ochre
+# has no model for -- image resources, a layer's tagged blocks, document-
+# level tagged blocks, the global layer mask info -- is kept as it was read
+# and written back as it was, so open-then-save loses nothing nobody
+# touched. Blocks Ochre DOES model are always written from Ochre's state
+# instead (MODELED). A few kinds describe something an edit can make
+# false, and those follow the rules below; everything else is copied
+# verbatim, in its original order, whatever was edited. The bytes live on
+# the document and its layers as `psd_source` attributes, not in `meta`:
+# meta goes into an .ochre file's one-line INI manifest, and an embedded
+# smart object's data (megabytes) does not belong there. So they last as
+# long as the opened document; Save As .ochre and reopening drops them.
+
+# Layer blocks Photoshop RENDERS the layer from: type, placed and smart
+# objects, fill layers, shape content and stroke, adjustments. Kept only
+# while the layer's pixels are exactly as opened; after a pixel edit
+# Photoshop would redraw the layer from them and silently undo the edit,
+# so they are dropped and the layer becomes the plain pixels Ochre saved.
+CONTENT = frozenset((b"TySh", b"tySh", b"SoLd", b"SoLE", b"PlLd", b"plLd", b"SoCo", b"GdFl",
+                     b"PtFl", b"vscg", b"vstk", b"CgEd", b"levl", b"curv", b"brit", b"blnc",
+                     b"hue2", b"hue ", b"selc", b"mixr", b"grdm", b"phfl", b"expA", b"vibA",
+                     b"nvrt", b"thrs", b"post", b"clrL", b"blwh"))
+# Photoshop's own layer effects: kept unless the layer has Ochre layer
+# styles, which the saver bakes into the pixels -- both would be drawn.
+EFFECTS = frozenset((b"lfx2", b"lrFX", b"lmfx"))
+# A vector mask: kept unless the layer has an Ochre vector mask, which the
+# saver applies to the pixels (and which may differ from the old one).
+VECTOR_MASK = frozenset((b"vmsk", b"vsms"))
+# Document-level blocks that ARE the source depth's layers or merged
+# transparency. The layers are rewritten as 8-bit layer info, so these are
+# never copied.
+DEPTH_BLOCKS = frozenset((b"Lr16", b"Lr32", b"Layr", b"Mt16", b"Mt32"))
+# Image resources with rules of their own (all others are copied):
+ICC_PROFILE = 1039                  # written from the document's profile
+THUMBNAILS = (1033, 1036)           # a picture of the image: only if nothing changed
+LAYER_INDEXED = (1024, 1026, 1069, 1072)    # per-record arrays: only if the
+#                                     records are the same ones in the same order
+CHANNEL_RESOURCES = (1006, 1007, 1045, 1053, 1077)  # alpha-channel names and display:
+#                                     only if no extra channel was dropped
+CHANNEL_BLOCKS = frozenset((b"Alph",))
+
+
+class PSDSource:
+    """The parts of an opened PSD that Ochre keeps without modeling."""
+
+    def __init__(self, f):
+        self.width, self.height = f.width, f.height
+        self.psb = f.psb
+        self.records = len(f.layers)
+        self.resources = list(f.resources)
+        self.resources_tail = f.resources_tail
+        self.global_mask = f.global_mask
+        self.global_blocks = [b for b in f.global_blocks if b[0] not in DEPTH_BLOCKS]
+        # Spot or saved-selection channels beyond colour and one alpha are
+        # not read, so what describes them goes stale when saved without them.
+        self.extra_channels = f.nchan > (1 if f.mode == 1 else 3) + 1
+        self.icc_is_default = False
+
+
+def _kept(L):
+    """A layer record's unmodeled parts, for its node's psd_source."""
+    return {"index": L.index, "blocks": L.blocks, "ranges": L.ranges, "blend_if": L.blend_if,
+            "blend_key": L.blend_key, "flags": L.flags}
+
+
+def _plane_crc(doc, node, frame):
+    cell = doc.cells.get((node.id, frame.id)) if node is not None else None
+    arr = cell.planes.get("rgba") if cell is not None else None
+    if arr is None or not arr.any():
+        return 0
+    return zlib.crc32(np.ascontiguousarray(arr))
+
+
+def _state(doc, node, frame):
+    """(everything that decides how the layer looks, its pixels' CRC)."""
+    props = (node.name, node.opacity, node.visible, node.blend, node.is_group)
+    if node.is_group:
+        return props, 0
+    mask = getattr(node, "mask", None)
+    props += (getattr(node, "clip", False), getattr(node, "fill_opacity", 255),
+              getattr(node, "knockout", "none"), getattr(node, "blend_if", None),
+              getattr(node, "kind", "raster"), repr(getattr(node, "params", None)),
+              repr(getattr(node, "styles", None)), getattr(node, "vector_mask", None) is None,
+              getattr(node, "mask_enabled", True), _plane_crc(doc, mask, frame))
+    return props, _plane_crc(doc, node, frame)
+
+
+def _reframe(key, data, raw, psb, pad):
+    """A kept tagged block as this writer stores it. A PSD's block is its
+    original bytes; a PSB's is re-framed with a 4-byte length."""
+    if not psb:
+        return raw
+    return b"8BIM" + key + struct.pack(">I", len(data)) + data + bytes((-len(data)) % pad)
+
+
+def _kept_blocks(src, psb, node=None, pixels_same=True):
+    """The node's kept tagged blocks, after the rules above."""
+    out = b""
+    for key, data, raw in src or ():
+        if key in CONTENT and not pixels_same:
+            continue
+        if key in EFFECTS and node is not None and getattr(node, "styles", None):
+            continue
+        if key in VECTOR_MASK and node is not None and getattr(node, "vector_mask", None) is not None:
+            continue
+        out += _reframe(key, data, raw, psb, 2)
+    return out
+
+
+def _resource_payload(raw):
+    """The data of one raw image-resource block."""
+    n = raw[6]
+    at = 7 + n + ((n + 1) % 2)
+    size = struct.unpack(">I", raw[at:at + 4])[0]
+    return raw[at + 4:at + 4 + size]
+
+
+def _resources_out(doc, src, untouched, same_records):
+    """The image resources section to write."""
+    icc = _icc_resource(doc)
+    if src is None:
+        return icc
+    out = b""
+    wrote_icc = False
+    for rid, raw in src.resources:
+        if rid == ICC_PROFILE:
+            if wrote_icc:
+                continue
+            wrote_icc = True
+            if not icc:
+                # No profile on the document: the original stays only when it
+                # was the sRGB that "no profile" means.
+                out += raw if src.icc_is_default else b""
+            elif _resource_payload(icc) == _resource_payload(raw):
+                out += raw
+            else:
+                out += icc                  # replaced where it was
+            continue
+        if rid in THUMBNAILS and not untouched:
+            continue
+        if rid in LAYER_INDEXED and not same_records:
+            continue
+        if rid in CHANNEL_RESOURCES and src.extra_channels:
+            continue
+        out += raw
+    if icc and not wrote_icc:
+        out += icc
+    return out + src.resources_tail
 
 
 # ---- writing ---------------------------------------------------------------------------
@@ -648,9 +822,28 @@ def save(doc, path, compositor=None):
     frame = doc.frame
     warnings = []
     records = []      # (record bytes, channel data bytes), bottom-first
+    source = getattr(doc, "psd_source", None)
+    psb = source is not None and source.psb
+    order = []        # each record's index in the opened file (None: new), as written
+    untouched = [source is not None and (doc.width, doc.height) == (source.width, source.height)]
+
+    def kept(node, index_key="index"):
+        """The node's psd_source, or None when it has none or another node
+        already used it (a copy carries no claim to the original's blocks)."""
+        src = getattr(node, "psd_source", None)
+        index = src.get(index_key) if src else None
+        if index is None or index in order:
+            order.append(None)
+            untouched[0] = False
+            return None
+        order.append(index)
+        if index_key == "index" and src.get("state") != _state(doc, node, frame):
+            untouched[0] = False
+        return src
 
     def layer_record(name, rect, chans, blend, opacity, clip, hidden, section=None, mask=None,
-                     blend_if=None, fill=255, knockout=False):
+                     blend_if=None, fill=255, knockout=False, src=None, blocks=b"",
+                     pixels_same=True):
         t, l, b, r = rect
         rec = struct.pack(">iiii", t, l, b, r)
         rec += struct.pack(">H", len(chans))
@@ -662,8 +855,19 @@ def save(doc, path, compositor=None):
             lengths.append((cid, len(enc)))
         for cid, n in lengths:
             rec += struct.pack(">hI", cid, n)
-        rec += b"8BIM" + KEY_FOR.get(blend, b"norm")
-        rec += struct.pack(">BBBB", opacity, 1 if clip else 0, (2 if hidden else 0) | 8, 0)
+        key = KEY_FOR.get(blend, b"norm")
+        if src and src["blend_key"] not in BLEND_KEYS and blend == "Normal":
+            # A mode Ochre does not know (Dissolve, say) read as Normal; while
+            # it still is Normal, the original key is the truth.
+            key = src["blend_key"]
+        rec += b"8BIM" + key
+        # Flag bits other than visibility (the transparency lock, "pixel
+        # data irrelevant") are kept -- the last one not once the pixels were
+        # edited, when they are all there is.
+        flags = (src["flags"] & 0x19) if src else 0
+        if not pixels_same:
+            flags &= ~0x10
+        rec += struct.pack(">BBBB", opacity, 1 if clip else 0, flags | (2 if hidden else 0) | 8, 0)
         extra = b""
         if mask is not None:
             mt, ml, mb, mr, default, disabled = mask
@@ -671,7 +875,10 @@ def save(doc, path, compositor=None):
                                                           2 if disabled else 0) + b"\x00\x00"
         else:
             extra += struct.pack(">I", 0)
-        if blend_if:
+        if src and src["blend_if"] == (tuple(blend_if) if blend_if else None):
+            # Unchanged Blend If: the ranges as stored, per-channel ones too.
+            extra += struct.pack(">I", len(src["ranges"])) + src["ranges"]
+        elif blend_if:
             extra += struct.pack(">I", 8) + bytes(int(v) & 255 for v in blend_if[:8])
         else:
             extra += struct.pack(">I", 0)
@@ -679,11 +886,15 @@ def save(doc, path, compositor=None):
         uni = name.encode("utf-16-be")
         extra += _block(b"luni", struct.pack(">I", len(name)) + uni)
         if section is not None:
-            extra += _block(b"lsct", struct.pack(">I", section))
+            # A group's blend mode belongs here too: Photoshop reads it from
+            # the section divider, not from the record.
+            extra += _block(b"lsct", struct.pack(">I", section)
+                            + (b"8BIM" + KEY_FOR.get(blend, b"norm") if section != 3 else b""))
         if fill != 255:
             extra += _block(b"iOpa", struct.pack(">B3x", fill))
         if knockout:
             extra += _block(b"knko", struct.pack(">B3x", 1))
+        extra += blocks
         rec += struct.pack(">I", len(extra)) + extra
         return rec, data
 
@@ -695,12 +906,16 @@ def save(doc, path, compositor=None):
             if node.is_group:
                 empty = np.zeros((0, 0), np.uint8)
                 chans = [(-1, empty), (0, empty), (1, empty), (2, empty)]
+                src = kept(node, "divider")
                 records.append(layer_record("</Layer group>", (0, 0, 0, 0), chans, "Normal", 255,
-                                            False, False, section=3))
+                                            False, False, section=3,
+                                            blocks=_kept_blocks(src and src["divider_blocks"], psb)))
                 emit(node)
+                src = kept(node)
                 records.append(layer_record(node.name or "Group", (0, 0, 0, 0), chans,
                                             node.blend, node.opacity, False, not node.visible,
-                                            section=1))
+                                            section=1, src=src,
+                                            blocks=_kept_blocks(src and src["blocks"], psb, node)))
                 continue
             kind = getattr(node, "kind", "raster")
             if kind == "smart":
@@ -715,6 +930,7 @@ def save(doc, path, compositor=None):
             if kind == "adjustment":
                 warnings.append("adjustment layer %r is not kept in PSD" % node.name)
                 continue
+            src = kept(node)
             if getattr(node, "styles", None):
                 warnings.append("layer styles on %r are flattened into its pixels" % node.name)
             if getattr(node, "vector_mask", None) is not None:
@@ -755,27 +971,38 @@ def save(doc, path, compositor=None):
                 if mcell is not None and not mcell.is_empty():
                     chans.append((-2, mask_value(mcell.plane("rgba"))))
                     mask = (0, 0, height, width, 255, not node.mask_enabled)
+            same = src is not None and src["state"][1] == _plane_crc(doc, node, frame)
             records.append(layer_record(node.name or "Layer", (t, l, b, r), chans, node.blend,
                                         node.opacity, getattr(node, "clip", False),
                                         not node.visible, mask=mask,
                                         blend_if=getattr(node, "blend_if", None),
                                         fill=255 if getattr(node, "styles", None)
                                         else getattr(node, "fill_opacity", 255),
-                                        knockout=getattr(node, "knockout", "none") != "none"))
+                                        knockout=getattr(node, "knockout", "none") != "none",
+                                        src=src, blocks=_kept_blocks(src and src["blocks"], psb,
+                                                                     node, same),
+                                        pixels_same=same))
             if getattr(node, "knockout", "none") == "deep":
                 warnings.append("deep knockout on %r is saved as shallow (PSD keeps one flag)"
                                 % node.name)
     emit(doc.root)
 
+    same_records = source is not None and order == list(range(source.records))
+    untouched = untouched[0] and same_records
     head = b"8BPS" + struct.pack(">H6xHIIHH", 1, 4, height, width, 8, 3)
-    res = _icc_resource(doc)                                  # the colour profile, if any
+    res = _resources_out(doc, source, untouched, same_records)
     body = struct.pack(">I", 0) + struct.pack(">I", len(res)) + res
     info = struct.pack(">h", -len(records))                   # negative: merged alpha present
     info += b"".join(rec for rec, _ in records) + b"".join(dat for _, dat in records)
     if len(info) % 2:
         info += b"\x00"
     layer_info = struct.pack(">I", len(info)) + info
-    lm = layer_info + struct.pack(">I", 0)                    # no global mask info
+    if source is None:
+        lm = layer_info + struct.pack(">I", 0)                # no global mask info
+    else:
+        lm = layer_info + struct.pack(">I", len(source.global_mask)) + source.global_mask
+        lm += b"".join(_reframe(k, d, raw, psb, 4) for k, d, raw in source.global_blocks
+                       if not (k in CHANNEL_BLOCKS and source.extra_channels))
     body += struct.pack(">I", len(lm)) + lm
     merged = _matte(comp.composite(doc.bounds, frame))
     # All four channels' rows in one table, then all their data.

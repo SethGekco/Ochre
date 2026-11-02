@@ -2,7 +2,8 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
 # Licensed under the GNU General Public License v3 or later. See LICENSE.
-"""PSD fidelity: deep files read at 8 bits, rounded and said so.
+"""PSD fidelity: what Ochre does not understand survives a round trip, and
+deep files read at 8 bits, rounded and said so.
 
 Every file here is built byte by byte in the test (no PSD library, nothing
 from outside the repository), small, and opened and saved through the
@@ -84,7 +85,7 @@ def block(key, data, pad=2):
 
 
 def layer(name, rect, chans, blend=b"norm", opacity=255, clip=0, flags=0, blocks=b"",
-          ranges=b""):
+          ranges=b"", mask=b""):
     """(record, channel data) for one layer. chans: [(id, channel bytes)]."""
     t, l, b, r = rect
     rec = struct.pack(">iiiiH", t, l, b, r, len(chans))
@@ -93,7 +94,8 @@ def layer(name, rect, chans, blend=b"norm", opacity=255, clip=0, flags=0, blocks
     raw = name.encode("latin-1")
     pascal = bytes((len(raw),)) + raw
     pascal += bytes((-len(pascal)) % 4)
-    extra = struct.pack(">I", 0) + struct.pack(">I", len(ranges)) + ranges + pascal + blocks
+    extra = (struct.pack(">I", len(mask)) + mask + struct.pack(">I", len(ranges)) + ranges
+             + pascal + blocks)
     rec += b"8BIM" + blend + bytes((opacity, clip, flags, 0)) + struct.pack(">I", len(extra))
     return rec + extra, b"".join(data for _cid, data in chans)
 
@@ -215,8 +217,176 @@ def test_deep():
     check("...and opening says so", "32-bit" in notes and "8 bits" in notes, repr(ctl.open_notes))
 
 
+# ---- keeping what Ochre does not model -------------------------------------------------
+
+def resource(rid, data, name=b""):
+    pascal = bytes((len(name),)) + name
+    pascal += bytes(len(pascal) % 2)
+    return b"8BIM" + struct.pack(">H", rid) + pascal + struct.pack(">I", len(data)) + data \
+        + bytes(len(data) % 2)
+
+
+def sections(path):
+    """(image resources section, global layer mask info + global tagged
+    blocks) of a PSD, as stored."""
+    with open(path, "rb") as fh:
+        d = fh.read()
+    p = 26
+    p += 4 + struct.unpack(">I", d[p:p + 4])[0]
+    n = struct.unpack(">I", d[p:p + 4])[0]
+    res = d[p + 4:p + 4 + n]
+    p += 4 + n
+    lm_end = p + 4 + struct.unpack(">I", d[p:p + 4])[0]
+    p += 4
+    p += 4 + struct.unpack(">I", d[p:p + 4])[0]
+    return res, d[p:lm_end]
+
+
+def kept_blocks(path):
+    """{layer name: [raw tagged blocks Ochre does not model]} of a PSD."""
+    return {L.name: [raw for _k, _d, raw in L.blocks] for L in psd.parse(path).layers}
+
+
+def test_keeping():
+    w, h = 8, 4
+    n = w * h
+    red, clear, opaque = [200] * n, [0] * n, [255] * n
+
+    def rgba(r, g, b, a=opaque):
+        return [(-1, raw_channel(a, 8)), (0, raw_channel(r, 8)), (1, raw_channel(g, 8)),
+                (2, raw_channel(b, 8))]
+    # Blocks Ochre has no model for, framed as Photoshop frames them -- one
+    # with an odd length (padded), one unknown to everybody.
+    lyid = [block(b"lyid", struct.pack(">I", 100 + i)) for i in range(6)]
+    unknown = block(b"zzzz", b"\x01\x02\x03\x04\x05")
+    effects = block(b"lfx2", b"\x00\x00\x00\x00fake effects descriptor")
+    shmd = block(b"shmd", b"\x00\x00\x00\x01metadata")
+    tysh = block(b"TySh", b"\x00\x01type layer data, rendered by Photoshop")
+    levels = block(b"levl", b"\x00\x02" + bytes(40))
+    # Per-channel blending ranges (gray default, red narrowed): 40 bytes that
+    # Ochre's eight-value Blend If cannot represent.
+    ranges = bytes((0, 0, 255, 255) * 2) + bytes((10, 20, 255, 255, 0, 0, 255, 255)) + bytes(24)
+    mask = struct.pack(">iiiiBB", 0, 0, 4, 4, 0, 0) + b"\x00\x00"
+    layers = [
+        (("Base", (0, 0, h, w), rgba(red, red, red)),
+         {"blocks": lyid[0] + unknown + effects + shmd, "ranges": ranges}),
+        (("Type", (0, 0, h, w), rgba(clear, red, clear)),
+         {"blocks": lyid[1] + tysh + unknown, "opacity": 128}),
+        (("</Layer group>", (0, 0, 0, 0), []),
+         {"blocks": block(b"lsct", struct.pack(">I", 3)) + lyid[2]}),
+        (("Inner", (0, 0, h, w), rgba(red, clear, clear) + [(-2, raw_channel([255] * 16, 8))]),
+         {"blend": b"diss", "clip": 1, "blocks": lyid[3], "mask": mask}),
+        (("Group", (0, 0, 0, 0), []),
+         {"blocks": block(b"lsct", struct.pack(">I", 1) + b"8BIMpass") + lyid[4],
+          "flags": 0x18 | 2}),
+        (("Adjust", (0, 0, 0, 0), []), {"blocks": lyid[5] + levels, "flags": 0x18}),
+    ]
+    resources = (resource(1005, struct.pack(">IHHIHH", 72 << 16, 1, 1, 72 << 16, 1, 1))
+                 + resource(1036, b"\x00\x00\x00\x01 stale thumbnail")
+                 + resource(1026, bytes(12))
+                 + resource(4000, b"plug-in data!", b"Plug")
+                 + b"MXYZ unparsed trailing bytes")
+    globals_ = block(b"Patt", b"pattern bytes", 4) + block(b"zGlb", b"global", 4)
+    gmask = bytes(range(14))
+    data = build(w, h, 8, layers, [red, red, red, opaque], resources, globals_,
+                 global_mask=gmask)
+    path = put("keep.psd", data)
+    original = kept_blocks(path)
+    check("the fixture parses: every unmodeled block is seen",
+          original["Base"] == [lyid[0], unknown, effects, shmd]
+          and original["Type"] == [lyid[1], tysh, unknown]
+          and original["Adjust"] == [lyid[5], levels], str(original))
+
+    # 1. Open and save, touching nothing: every byte Ochre does not model
+    #    comes back as it was.
+    ctl = controller()
+    ctl.open_path(path)
+    names = [l.name for l in ctl.doc.layers()]
+    check("the document opens with its layers", names == ["Base", "Type", "Inner", "Adjust"],
+          str(names))
+    out = os.path.join(TMP, "keep-untouched.psd")
+    ctl.save_path(out)
+    res, tail = sections(out)
+    check("untouched: the image resources come back byte for byte (unknown ones, the "
+          "thumbnail, the per-layer ones and the unparsed tail included)",
+          res == resources, "%r\n%r" % (res, resources))
+    check("untouched: the global layer mask info and global tagged blocks byte for byte",
+          tail == struct.pack(">I", len(gmask)) + gmask + globals_, repr(tail))
+    saved = kept_blocks(out)
+    check("untouched: every layer's unmodeled tagged blocks byte for byte, group "
+          "records and the group divider included", saved == original,
+          "%r\n%r" % (saved, original))
+    by = {L.name: L for L in psd.parse(out).layers}
+    check("...the per-channel blending ranges as stored", by["Base"].ranges == ranges)
+    check("...a blend mode Ochre lacks (Dissolve) keeps its key",
+          by["Inner"].blend_key == b"diss")
+    check("...and the adjustment layer is still one (its block, its 'pixels "
+          "irrelevant' flag)", by["Adjust"].flags & 0x10 and saved["Adjust"][1] == levels)
+    check("...the group's Pass Through rides in its section divider, as Photoshop reads it",
+          by["Group"].blend == "PassThrough")
+    ctl.open_path(out)
+    doc = ctl.doc
+    lay = {l.name: l for l in doc.layers()}
+    groups = [g for g in doc.root.walk() if g.is_group]
+    check("names, opacity, blend, clipping, masks, groups and visibility round-trip",
+          lay["Type"].opacity == 128 and lay["Inner"].clip and lay["Inner"].mask is not None
+          and len(groups) == 1 and groups[0].name == "Group" and not groups[0].visible
+          and lay["Inner"].parent is groups[0] and groups[0].blend == "PassThrough",
+          str([(l.name, l.opacity, l.blend, getattr(l, "clip", None)) for l in doc.layers()]))
+
+    # 2. Edit the type layer's pixels and rename the base: the type data
+    #    would make Photoshop redraw the layer and lose the edit, so it goes;
+    #    the unknown block stays; the thumbnail is now a picture of a
+    #    different image, so it goes; the record-indexed resource stays (the
+    #    records are the same ones in the same order).
+    ctl.open_path(path)
+    lay = {l.name: l for l in ctl.doc.layers()}
+    ctl.set_active_layer(lay["Type"])
+    ctl.apply_effect("invert")
+    ctl.set_layer_property(lay["Base"], "name", "Base renamed")
+    out = os.path.join(TMP, "keep-edited.psd")
+    ctl.save_path(out)
+    saved = kept_blocks(out)
+    check("a pixel edit drops the blocks Photoshop renders the layer from (TySh), and "
+          "keeps the rest", saved["Type"] == [lyid[1], unknown], str(saved["Type"]))
+    check("a rename keeps the layer's blocks (the name is Ochre's to write)",
+          saved["Base renamed"] == original["Base"], str(saved.get("Base renamed")))
+    check("...untouched layers keep theirs", saved["Adjust"] == original["Adjust"])
+    res, tail = sections(out)
+    rids = [rid for rid, _raw in psd._resources(res)[0]]
+    check("after an edit the stale thumbnail is dropped, the rest kept in order",
+          rids == [1005, 1026, 4000] and res.endswith(b"MXYZ unparsed trailing bytes"), str(rids))
+
+    # 3. A new layer changes the records: what Photoshop indexes by record
+    #    position (1026 here) goes too.
+    ctl.open_path(path)
+    ctl.add_layer("New")
+    out = os.path.join(TMP, "keep-added.psd")
+    ctl.save_path(out)
+    res, tail = sections(out)
+    rids = [rid for rid, _raw in psd._resources(res)[0]]
+    check("a new layer drops the per-record resources and the thumbnail, keeps the rest",
+          rids == [1005, 4000], str(rids))
+    saved = kept_blocks(out)
+    check("...and the new layer carries no one else's blocks", saved["New"] == [],
+          str(saved["New"]))
+    check("...while the global blocks stay", tail.endswith(globals_))
+
+    # 4. Layer styles made in Ochre are baked into the saved pixels, so
+    #    Photoshop's own effects block on that layer would draw them twice.
+    ctl.open_path(path)
+    base = next(l for l in ctl.doc.layers() if l.name == "Base")
+    ctl.set_layer_styles(base, {"stroke": {"enabled": True, "size": 1}})
+    out = os.path.join(TMP, "keep-styled.psd")
+    ctl.save_path(out)
+    saved = kept_blocks(out)
+    check("Ochre layer styles drop the layer's Photoshop effects block (lfx2), and only that",
+          saved["Base"] == [lyid[0], unknown, shmd], str(saved["Base"]))
+
+
 def main():
     try:
+        test_keeping()
         test_deep()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
