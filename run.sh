@@ -22,10 +22,10 @@ if [[ ! -x "$python" ]]; then
     fi
 fi
 
-# The windowless mode is a command whatever the terminal: its output is the
-# point, so it must never go to the log.
+# The windowless modes are commands whatever the terminal: their output is
+# the point (--mcp speaks on stdout), so it must never go to the log.
 for arg in "$@"; do
-    if [[ "$arg" == "--headless" ]]; then
+    if [[ "$arg" == "--headless" || "$arg" == "--mcp" ]]; then
         exec "$python" -m ochre.ui "$@"
     fi
 done

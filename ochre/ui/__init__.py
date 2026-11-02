@@ -9,7 +9,7 @@ whole application can be driven headlessly, scripted, or tested without a
 display. Only `app`, `canvas`, `docks` and `mainwindow` touch PySide6.
 
 `main` is therefore resolved LAZILY, and it is launch.main, which picks the
-window or a windowless mode (--headless) before anything imports Qt.
+window or a windowless mode (--headless, --mcp) before anything imports Qt.
 A plain `from .app import main` here would import Qt the moment anyone
 touched any module in this package, which would quietly destroy that
 property -- and the failure would look like an unrelated ImportError on a

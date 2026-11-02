@@ -98,6 +98,16 @@ asking. In the window, a request beyond those limits puts up an approval bar
 (Allow arms after half a second; no answer in a minute is a no); headless,
 it is refused.
 
+`--mcp` serves the Model Context Protocol on stdio so an AI agent can drive
+Ochre (`ochre/ui/mcp.py`; hand-written JSON-RPC, no dependency). Either it
+bridges to a running `--control` socket (`--mcp --connect`), or it runs a
+private headless Ochre (`--mcp --control-tier edit --control-root DIR`). The
+bridge enforces nothing itself; the control server's checks apply either way.
+An MCP client entry looks like:
+
+    {"command": "/path/to/ochre/run.sh",
+     "args": ["--mcp", "--control-tier", "save", "--control-root", "/home/me/agent-work"]}
+
 ## Running the tests
 
 ```sh
