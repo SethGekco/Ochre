@@ -69,6 +69,20 @@ Build the optional accelerator (never required):
 
     python setup.py build_ext --inplace
 
+## Without a window
+
+`--headless` opens a file, runs commands and writes the result, with no
+display and no Qt (`ochre/ui/headless.py`):
+
+    ./run.sh --headless in.png --run "image.resize width=100" --export out.png
+    ./run.sh --headless --list            # every command and effect
+
+The commands are the controller's `RECORDABLE` list -- the same whitelist
+that makes an actions file safe to replay -- under dotted names
+(`image.resize`, `select.grow`, `filter.gaussian_blur radius=2`; see
+`ochre/ui/scripting.py`). Steps run in the order given; the first failure
+prints one line and exits 1 with nothing written after it.
+
 ## Running the tests
 
 ```sh

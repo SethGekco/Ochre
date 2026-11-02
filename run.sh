@@ -22,6 +22,14 @@ if [[ ! -x "$python" ]]; then
     fi
 fi
 
+# The windowless mode is a command whatever the terminal: its output is the
+# point, so it must never go to the log.
+for arg in "$@"; do
+    if [[ "$arg" == "--headless" ]]; then
+        exec "$python" -m ochre.ui "$@"
+    fi
+done
+
 # From a terminal, behave like a normal command. From a desktop icon there
 # is nowhere for a traceback to go, so keep one -- appended, because the
 # interesting run is usually not the last one.

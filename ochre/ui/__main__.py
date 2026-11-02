@@ -1,12 +1,12 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
 # Licensed under the GNU General Public License v3 or later. See LICENSE.
-"""Run the GUI with:  python -m ochre.ui"""
+"""Run the GUI with:  python -m ochre.ui   (or --headless; see headless.py)"""
 
 import os
 import sys
 
-from .app import main
+from .launch import main
 
 code = main()
 # Leave without running interpreter finalisation. Shiboken and Qt then

@@ -8,10 +8,12 @@ incidental: `viewstate`, `controller`, `bus` and `config` are Qt-free so the
 whole application can be driven headlessly, scripted, or tested without a
 display. Only `app`, `canvas`, `docks` and `mainwindow` touch PySide6.
 
-`main` is therefore resolved LAZILY. A plain `from .app import main` here
-would import Qt the moment anyone touched any module in this package, which
-would quietly destroy that property -- and the failure would look like an
-unrelated ImportError on a machine without Qt installed.
+`main` is therefore resolved LAZILY, and it is launch.main, which picks the
+window or a windowless mode (--headless) before anything imports Qt.
+A plain `from .app import main` here would import Qt the moment anyone
+touched any module in this package, which would quietly destroy that
+property -- and the failure would look like an unrelated ImportError on a
+machine without Qt installed.
 """
 
 __all__ = ["main"]
@@ -21,7 +23,7 @@ def __getattr__(name):
     # PEP 562. Keeps `from ochre.ui import main` working while leaving
     # `import ochre.ui.viewstate` free of Qt.
     if name == "main":
-        from .app import main as _main
+        from .launch import main as _main
         return _main
     raise AttributeError("module %r has no attribute %r" % (__name__, name))
 
