@@ -194,6 +194,9 @@ class Controller:
                 "cannot open %s: not enough free memory to hold it. Close other "
                 "documents or programs and try again." % os.path.basename(path)) from exc
         self.indexed_note = None
+        # What the format could not bring in as it was (a 16-bit PSD read at
+        # 8 bits, say): the window shows it, the headless CLI prints it.
+        self.open_notes = list(getattr(doc, "open_notes", None) or ())
         if self.is_indexed_document():
             self._palette_for_opened_indexed(path)
         return doc

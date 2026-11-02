@@ -27,7 +27,8 @@ from . import fallback as _fallback
 
 # Everything the backend may provide. Anything absent from the extension
 # falls back silently.
-OPS = ("blend_channel", "blend_rect", "composite_stack", "flood_fill")
+OPS = ("blend_channel", "blend_rect", "composite_stack", "flood_fill",
+       "packbits_decode", "packbits_encode")
 
 _forced = os.environ.get("OCHRE_ACCEL", "").strip().lower()
 _disabled = _forced in ("0", "off", "false", "no")
@@ -67,6 +68,8 @@ if _bound["blend_rect"][1] == "c":
         return _c_blend_channel(mode, a, b)
 composite_stack = _bound["composite_stack"][0]
 flood_fill = _bound["flood_fill"][0]
+packbits_decode = _bound["packbits_decode"][0]
+packbits_encode = _bound["packbits_encode"][0]
 
 #: Which backend actually serves each operation.
 BACKENDS = {name: where for name, (_fn, where) in _bound.items()}
@@ -96,4 +99,4 @@ def describe():
 
 __all__ = ["BACKEND", "BACKENDS", "HAVE_NATIVE", "spec", "native", "OPCODES",
            "OPS", "describe", "blend_channel", "blend_rect", "composite_stack",
-           "flood_fill"]
+           "flood_fill", "packbits_decode", "packbits_encode"]

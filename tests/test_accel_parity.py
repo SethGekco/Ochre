@@ -176,13 +176,71 @@ def main():
     except ValueError:
         check("C rejects a mask of the wrong size", True)
 
+    # ---- PackBits: decode and encode, malformed rows included ----------
+    # Random rows are mostly malformed (truncated literals, runs with no
+    # byte, 128 no-ops, overruns, short rows): exactly where two decoders
+    # drift apart unless both follow the spec's rules.
+    prng = np.random.default_rng(7)
+    mismatch = None
+    for trial in range(3000):
+        rows = [prng.integers(0, 256, int(prng.integers(0, 70)), dtype=np.uint8).tobytes()
+                for _ in range(int(prng.integers(1, 30)))]
+        rowbytes = int(prng.integers(0, 90))
+        data = b"".join(rows) + bytes(int(prng.integers(0, 3)))
+        counts = np.array([len(r) for r in rows], np.uint16)
+        want = spec.packbits_decode(data, counts, rowbytes)
+        got = native.packbits_decode(data, counts, rowbytes)
+        if got.shape != want.shape or got.dtype != want.dtype or not np.array_equal(got, want):
+            mismatch = (trial, rowbytes, data)
+            break
+    check("PackBits decode: C == spec on 3000 random (mostly malformed) streams",
+          mismatch is None, str(mismatch))
+    for label, counts in (("rows past the end", [4, 9]), ("a negative row", [-1])):
+        refused = []
+        for impl in (spec, native):
+            try:
+                impl.packbits_decode(b"\x02abc\x00d", counts, 4)
+                refused.append(False)
+            except ValueError:
+                refused.append(True)
+        check("PackBits decode: both refuse %s" % label, refused == [True, True], str(refused))
+    mismatch = None
+    for trial in range(1500):
+        h, w = int(prng.integers(0, 6)), int(prng.integers(0, 600))
+        # Runs of every length around the 2/3 and 128/129/130 boundaries.
+        lens = prng.integers(1, 300 if trial % 2 else 5, w + 1)
+        plane = np.repeat(prng.integers(0, 3, (h, w + 1), dtype=np.uint8), lens, axis=1)[:, :w]
+        plane = np.ascontiguousarray(plane)
+        cs, ds = spec.packbits_encode(plane)
+        cc, dc = native.packbits_encode(plane)
+        back = native.packbits_decode(dc, cc, w)
+        if ds != dc or not np.array_equal(cs, cc) or cs.dtype != cc.dtype \
+                or not np.array_equal(back, plane):
+            mismatch = (trial, h, w)
+            break
+    check("PackBits encode: C == spec byte for byte, and decodes back exactly",
+          mismatch is None, str(mismatch))
+    big = np.repeat(prng.integers(0, 4, (256, 400), dtype=np.uint8), 5, axis=1)
+    big[::3] = prng.integers(0, 256, (big[::3].shape), dtype=np.uint8)
+    counts, data = native.packbits_encode(big)
+    t0 = time.perf_counter()
+    spec.packbits_decode(data, counts, big.shape[1])
+    t_spec = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    native.packbits_decode(data, counts, big.shape[1])
+    t_c = time.perf_counter() - t0
+    check("PackBits decode is faster in C", t_c < t_spec,
+          "-- C %.1f ms vs spec %.1f ms" % (t_c * 1000, t_spec * 1000))
+    print("    (PackBits decode, 256 x 2000: spec %.1f ms -> C %.2f ms)"
+          % (t_spec * 1000, t_c * 1000))
+
     # ---- the selector reports honestly ----------------------------------
     check("selector routes blend_rect to C", accel.BACKENDS["blend_rect"] == "c")
     check("selector admits what is still numpy",
           accel.BACKENDS["flood_fill"] == "numpy",
           "-- an unimplemented op must fall back, not silently vanish")
     check("describe() names the accelerated ops",
-          "blend_rect" in accel.describe())
+          "blend_rect" in accel.describe() and "packbits_decode" in accel.describe())
 
     # ---- and it should actually be faster -------------------------------
     d = rng.integers(0, 256, (512, 512, 4), dtype=np.uint8)

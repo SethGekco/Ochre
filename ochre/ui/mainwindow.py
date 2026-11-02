@@ -2198,8 +2198,11 @@ class MainWindow(QMainWindow):
             self._rebuild_recent()
         self.canvas.bind()
         self._sync_all()
+        notes = list(getattr(self.ctl, "open_notes", None) or ())
         if getattr(self.ctl, "indexed_note", None):
-            self.statusBar().showMessage(self.ctl.indexed_note, 15000)
+            notes.append(self.ctl.indexed_note)
+        if notes:
+            self.statusBar().showMessage("  ".join(notes), 15000)
         changed = [l.name for l, st in self.ctl.linked_status() if st != "ok"]
         if changed:
             self.statusBar().showMessage(
