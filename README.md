@@ -83,6 +83,21 @@ that makes an actions file safe to replay -- under dotted names
 `ochre/ui/scripting.py`). Steps run in the order given; the first failure
 prints one line and exits 1 with nothing written after it.
 
+`--control` (off unless given; with the window or with `--headless`) lets
+another program drive Ochre over a Unix socket -- never TCP -- one JSON
+object per line, with Kooka Pictura's permission model
+(`ochre/ui/control.py`):
+
+    ./run.sh --control --control-tier edit --control-root ~/agent-work
+
+A random per-session token is written to `<socket>.token` (mode 0600) and
+every request must carry it. Tiers are read < edit < save; `--control-root`
+folders confine every file a client opens or writes (symlinks resolved
+first), and a file the client did not create is never overwritten without
+asking. In the window, a request beyond those limits puts up an approval bar
+(Allow arms after half a second; no answer in a minute is a no); headless,
+it is refused.
+
 ## Running the tests
 
 ```sh

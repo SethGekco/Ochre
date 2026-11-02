@@ -70,6 +70,10 @@ def _ask_trust(addon, digest):
 
 def main(argv=None):
     argv = sys.argv if argv is None else argv
+    # The control flags come out first: a folder given to --control-root
+    # exists, and the loop below opens the first argument that does.
+    from .controlbar import take_flags
+    control_opts, argv = take_flags(list(argv))
     app = QApplication(argv)
     app.setApplicationName("Ochre")
     app.setOrganizationName("Ochre")
@@ -111,8 +115,27 @@ def main(argv=None):
     if os.environ.get("OCHRE_SELFTEST"):
         return _selftest(window, controller)
 
+    # Agent control (controlbar.py): opt-in, never on by default.
+    control = None
+    if control_opts is not None:
+        from .controlbar import start
+        control = start(window, controller, control_opts, _state_dir())
+    if control is not None:
+        # SIGTERM quits properly, so the socket and the token file go with
+        # the window. Python runs a signal handler only between bytecodes,
+        # and an idle event loop runs none: hence the tick.
+        import signal
+
+        from PySide6.QtCore import QTimer
+        signal.signal(signal.SIGTERM, lambda *_: app.quit())
+        tick = QTimer()
+        tick.timeout.connect(lambda: None)
+        tick.start(250)
+
     window.show()
     code = app.exec()
+    if control is not None:
+        control.close()
     # Tear the window down while the QApplication still exists, rather than
     # leaving the order to interpreter shutdown.
     window.shutdown()

@@ -6,6 +6,7 @@
     ochre --headless in.png --run "image.resize width=100 height=80" --export out.png
     ochre --headless --new 64x64 --run "filter.noise" --save noise.ochre
     ochre --headless --list
+    ochre --headless --control --control-tier edit --control-root ~/agent in.png
 
 Options run in the order given, so `--run A --export a.png --run B
 --export b.png` writes both stages. The first failure stops everything,
@@ -16,6 +17,10 @@ mistake exits 2.
 The commands are the controller's RECORDABLE list (see scripting.py): the
 same whitelist that makes an actions file safe to replay. Nothing here
 imports Qt, so this runs on a server with no display and no PySide6.
+
+With --control it then stays up as a control server (control.py) until
+SIGINT or SIGTERM, with nobody to ask: whatever a person would be asked
+about in the window is refused here.
 """
 
 import os
@@ -34,6 +39,12 @@ Run Ochre without a window. Options run in the order given.
                    (.ochre, .psd, .ora, addon formats, or a flat image)
   --export PATH    write the merged image as a flat file (.png, .jpg, ...)
   --list           list the commands and effects, then exit
+  --control        after the steps, serve the control socket until stopped
+  --control-tier T read (default), edit or save: what a client may do
+  --control-root D a folder clients may open from and write new files to
+                   (repeatable; without one, no file access at all)
+  --control-socket P  the socket (default $XDG_RUNTIME_DIR/ochre-control.sock;
+                   the token is P.token, mode 0600)
   -q, --quiet      print nothing on success
   -h, --help       this text
 
@@ -58,8 +69,12 @@ def _size(text):
 
 def parse_args(argv):
     """[(step, value)] in order, plus flags. Raises Usage."""
-    steps, flags = [], {"quiet": False, "list": False, "help": False}
+    steps = []
+    flags = {"quiet": False, "list": False, "help": False, "control": False,
+             "tier": "read", "roots": [], "socket": None}
     takes = {"--new": "new", "--run": "run", "--save": "save", "--export": "export"}
+    settings = {"--control-tier": "tier", "--control-root": "roots",
+                "--control-socket": "socket"}
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -71,6 +86,17 @@ def parse_args(argv):
             flags["quiet"] = True
         elif arg == "--list":
             flags["list"] = True
+        elif arg == "--control":
+            flags["control"] = True
+        elif arg in settings:
+            if i + 1 >= len(argv):
+                raise Usage("%s needs a value" % arg)
+            i += 1
+            key = settings[arg]
+            if key == "roots":
+                flags["roots"].append(argv[i])
+            else:
+                flags[key] = argv[i]
         elif arg in takes:
             if i + 1 >= len(argv):
                 raise Usage("%s needs a value" % arg)
@@ -82,6 +108,10 @@ def parse_args(argv):
         else:
             steps.append(("open", arg))
         i += 1
+    if flags["tier"] not in ("read", "edit", "save"):
+        raise Usage("--control-tier is read, edit or save, not %r" % flags["tier"])
+    if not flags["control"] and (flags["roots"] or flags["socket"]):
+        raise Usage("--control-root and --control-socket go with --control")
     return steps, flags
 
 
@@ -151,7 +181,7 @@ def main(argv=None):
     if flags["help"]:
         sys.stdout.write(USAGE)
         return 0
-    if not steps and not flags["list"]:
+    if not steps and not flags["list"] and not flags["control"]:
         sys.stderr.write(USAGE)
         return 2
 
@@ -165,4 +195,36 @@ def main(argv=None):
     except CommandError as exc:
         print("ochre: error: %s" % exc, file=sys.stderr)
         return 1
+    if flags["control"]:
+        return serve(ctl, flags)
+    return 0
+
+
+def serve(ctl, flags):
+    """Serve the control socket until SIGINT or SIGTERM."""
+    import signal
+
+    from . import control
+    from .scripting import default_paths
+    try:
+        policy = control.Policy(flags["tier"], flags["roots"],
+                                denied=[default_paths()["state"]], live=False)
+        server = control.ControlServer(control.Gate(ctl, policy), flags["socket"]).listen()
+    except (ValueError, OSError) as exc:
+        print("ochre: error: control: %s" % (exc.strerror if isinstance(exc, OSError)
+                                              and exc.strerror else exc), file=sys.stderr)
+        return 1
+    stop = []
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.append(True))
+    # stderr, flushed: a parent waiting for the socket reads these lines.
+    print("ochre control: %s" % server.socket_path, file=sys.stderr)
+    print("ochre control token: %s" % server.token_path, file=sys.stderr)
+    print("ochre control tier: %s; roots: %s"
+          % (policy.tier, ", ".join(policy.roots) or "none (no file access)"), file=sys.stderr)
+    sys.stderr.flush()
+    try:
+        server.serve_forever(lambda: bool(stop))
+    finally:
+        server.close()
     return 0

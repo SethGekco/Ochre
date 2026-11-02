@@ -233,7 +233,8 @@ def file_targets(ctl, op, args, kwargs):
     stack. The control server judges each against its folders."""
     if op != "apply_effect":
         return []
-    return _effect_files(ctl, args[0], kwargs.get("params") or {}, depth=0)
+    named = inspect.signature(getattr(ctl, op)).bind(*args, **kwargs).arguments
+    return _effect_files(ctl, named["name"], named.get("params") or {}, depth=0)
 
 
 def _effect_files(ctl, effect, params, depth):
