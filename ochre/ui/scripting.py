@@ -97,7 +97,7 @@ MAX_SCALE = 64.0
 # fails on a new one, so a new file-reading parameter cannot slip past the
 # control server's folder check unnoticed.
 FILE_PROPS = frozenset(("file",))
-NOT_FILES = frozenset(("ranges", "pins", "stack"))
+NOT_FILES = frozenset(("ranges", "pins", "stack", "profile", "profile_model"))
 
 _COLOR = re.compile(r"^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?$")
 

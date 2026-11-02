@@ -16,7 +16,9 @@ and Adaptive Wide Angle, done with classical image processing.
                  aberration (red/cyan and blue/yellow fringes, by scaling
                  those channels radially), lens vignetting, and the
                  Transform section: vertical / horizontal perspective, angle
-                 and scale.
+                 and scale. With lensfun's database installed, the same
+                 three corrections can come from a measured lens profile
+                 (lensprofile.py), matched from the photo's EXIF.
   adaptive_wide_angle  re-project a wide shot: fisheye to rectilinear, or a
                  rectilinear wide angle to cylindrical / stereographic,
                  which un-stretches people at the edges. Photoshop also takes
@@ -32,7 +34,8 @@ import math
 import numpy as np
 
 from .effects import Effect
-from .props import (ChoiceProperty, FloatProperty, IntProperty, PropertyCollection,
+from .props import (BoolProperty, ChoiceProperty, FloatProperty, IntProperty,
+                    PropertyCollection,
                     TextProperty)
 from .warp import warp_field
 
@@ -222,12 +225,29 @@ class CameraRaw(_Whole):
 # ---- Lens Correction ----------------------------------------------------------------
 
 class LensCorrection(_Whole):
-    """Photoshop's Filter > Lens Correction, Custom tab."""
+    """Photoshop's Filter > Lens Correction: the Custom tab's sliders, and a
+    lens profile (the dialog's Profile tab) applied before them.
+
+    The profile travels as its resolved coefficients (`profile_model`, JSON
+    in lensprofile's form), not as a name to look up, so an Action or a
+    smart filter replays the same correction on a machine without the
+    database. The three check boxes switch its parts off, as CS6's
+    Correction boxes do; Auto scale zooms so the profile's distortion
+    leaves no blank edge."""
 
     name, label, category = "lens_correction", "Lens Correction", "Photo"
+    ui_panel = "lens_correction"
+    ui_hidden = ("profile", "profile_model", "profile_distortion", "profile_ca",
+                 "profile_vignette", "auto_scale")
 
     def declare(self):
         return _props(
+            TextProperty("profile", "", label="Lens profile"),
+            TextProperty("profile_model", "", label="Profile coefficients"),
+            BoolProperty("profile_distortion", True, label="Geometric distortion"),
+            BoolProperty("profile_ca", True, label="Chromatic aberration"),
+            BoolProperty("profile_vignette", True, label="Vignetting"),
+            BoolProperty("auto_scale", True, label="Auto scale image"),
             IntProperty("distortion", 0, -100, 100, label="Remove distortion"),
             IntProperty("red_cyan", 0, -100, 100, label="Fix red/cyan fringe"),
             IntProperty("blue_yellow", 0, -100, 100, label="Fix blue/yellow fringe"),
@@ -240,10 +260,71 @@ class LensCorrection(_Whole):
             ChoiceProperty("edges", "transparent", ["transparent", "edge"],
                            labels={"transparent": "Transparency", "edge": "Edge extension"}))
 
-    def _source_coords(self, t, h, w):
+    @staticmethod
+    def _profile(t):
+        """The profile's model, its parts gated by the check boxes; None
+        when there is no profile or nothing of it is switched on."""
+        from .lensprofile import NO_MODEL, model_from_json
+        model = model_from_json(t.get("profile_model", ""))
+        if model is None:
+            return None
+        if not t.get("profile_distortion", True):
+            model["distortion"] = list(NO_MODEL["distortion"])
+        if not t.get("profile_ca", True):
+            model["ca"] = [list(r) for r in NO_MODEL["ca"]]
+        if not t.get("profile_vignette", True):
+            model["vignette"] = list(NO_MODEL["vignette"])
+        return None if model == NO_MODEL else model
+
+    @staticmethod
+    def _radial(c, r):
+        """1 + c1 r + c2 r^2 + ... + c6 r^6."""
+        g = 0.0
+        for k in reversed(c):
+            g = (g + k) * r
+        return 1.0 + g
+
+    def _auto_zoom(self, c, half_w, half_h):
+        """The smallest zoom (0.5..2) at which the profile's distortion maps
+        every point of the frame's edge (half_w, half_h from the centre, in
+        half-diagonals) inside it -- so there is
+        no blank border and as little cropped as that allows. Kooka
+        Pictura's bisection on edge samples, plus a check that the radial
+        map still rises over the zoomed frame (past its turning point a
+        polynomial folds back, and "inside" means nothing)."""
+        n = 64
+        t = np.linspace(-1.0, 1.0, n + 1)
+        eu = np.concatenate([t * half_w, t * half_w, np.full(n + 1, -half_w), np.full(n + 1, half_w)])
+        ev = np.concatenate([np.full(n + 1, -half_h), np.full(n + 1, half_h), t * half_h, t * half_h])
+        corner = math.hypot(half_w, half_h)
+
+        def fits(z):
+            radii = np.linspace(0.0, corner / z, 65)
+            mapped = radii * self._radial(c, radii)
+            if np.any(np.diff(mapped) <= 0):
+                return False
+            g = self._radial(c, np.hypot(eu, ev) / z) / z
+            return bool(np.all(np.abs(eu * g) <= half_w + 1e-9)
+                        and np.all(np.abs(ev * g) <= half_h + 1e-9))
+
+        lo, hi = 0.5, 2.0
+        if fits(lo):
+            return lo
+        if not fits(hi):
+            return 1.0
+        for _ in range(40):
+            mid = 0.5 * (lo + hi)
+            if fits(mid):
+                hi = mid
+            else:
+                lo = mid
+        return hi
+
+    def _source_coords(self, t, h, w, model=None):
         """For each output pixel, where it comes from (before the per-channel
-        fringe scaling): inverse of scale, rotation, perspective and the
-        distortion removal, in that order."""
+        fringe scaling): inverse of scale, rotation, perspective, the
+        distortion removal and then the profile's distortion, in that
+        order."""
         ys, xs = np.mgrid[0:h, 0:w].astype(np.float64)
         cx, cy = w / 2.0, h / 2.0
         norm = math.hypot(cx, cy)
@@ -264,12 +345,23 @@ class LensCorrection(_Whole):
         k = -t["distortion"] / 100.0 * 0.35
         r2 = u * u + v * v
         f = 1 + k * r2
-        return u * f, v * f, cx, cy, norm
+        u, v = u * f, v * f
+        if model is not None and any(model["distortion"]):
+            # Fitted on the outermost pixel CENTRES, so even they sample
+            # whole pixels and no edge comes out half transparent.
+            z = self._auto_zoom(model["distortion"], (cx - 0.5) / norm, (cy - 0.5) / norm) \
+                if t.get("auto_scale", True) else 1.0
+            u, v = u / z, v / z
+            g = self._radial(model["distortion"], np.hypot(u, v))
+            u, v = u * g, v * g
+        return u, v, cx, cy, norm
 
     def compute(self, t, src):
         h, w = src.shape[:2]
-        u, v, cx, cy, norm = self._source_coords(t, h, w)
+        model = self._profile(t)
+        u, v, cx, cy, norm = self._source_coords(t, h, w, model)
         edge = t["edges"]
+        r_src = np.hypot(u, v) if model is not None else None
 
         def sample(scale):
             sx, sy = cx + u * scale * norm, cy + v * scale * norm
@@ -277,18 +369,36 @@ class LensCorrection(_Whole):
                 sx, sy = np.clip(sx, 0.5, w - 0.5), np.clip(sy, 0.5, h - 0.5)
             return warp_field(src, sx, sy)
 
+        def fringe(channel, slider):
+            # The slider's radial scale times the profile's v + c r + b r^2.
+            scale = 1.0 + slider / 100.0 * 0.01
+            if model is not None and model["ca"][channel] != [1.0, 0.0, 0.0]:
+                cv, cc, cb = model["ca"][channel]
+                scale = scale * (cv + r_src * (cc + r_src * cb))
+            return scale
+
         green = sample(1.0)
         out = green.copy()
-        if t["red_cyan"]:
-            out[..., 0] = sample(1.0 + t["red_cyan"] / 100.0 * 0.01)[..., 0]
-        if t["blue_yellow"]:
-            out[..., 2] = sample(1.0 + t["blue_yellow"] / 100.0 * 0.01)[..., 2]
+        for channel, slider in ((0, t["red_cyan"]), (2, t["blue_yellow"])):
+            scale = fringe(channel, slider)
+            if not (np.isscalar(scale) and scale == 1.0):
+                out[..., channel] = sample(scale)[..., channel]
+        gain = None
         if t["vignette"]:
             ys, xs = np.mgrid[0:h, 0:w].astype(np.float64)
             r = np.hypot(xs + 0.5 - cx, ys + 0.5 - cy) / norm
             mid = t["midpoint"] / 100.0
             fall = np.clip((r - mid * 0.7) / max(1e-3, 1 - mid * 0.7), 0, 1) ** 2
             gain = 1 + t["vignette"] / 100.0 * fall
+        if model is not None and any(model["vignette"]):
+            # The lens dimmed the picture by 1 + k1 r^2 + k2 r^4 + k3 r^6 at
+            # the point this pixel came from; divide it back out.
+            k1, k2, k3 = model["vignette"]
+            q = r_src * r_src
+            falloff = 1.0 + q * (k1 + q * (k2 + q * k3))
+            lens = 1.0 / np.maximum(falloff, 1e-3)
+            gain = lens if gain is None else gain * lens
+        if gain is not None:
             rgb = out[..., :3].astype(np.float64) / 255.0
             rgb = to_srgb(to_linear(rgb) * gain[..., None])
             out[..., :3] = np.clip(np.rint(rgb * 255), 0, 255).astype(np.uint8)

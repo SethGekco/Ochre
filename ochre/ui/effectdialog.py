@@ -26,7 +26,8 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFormLayout,
                                QHBoxLayout, QLabel, QLineEdit, QProgressBar,
-                               QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
+                               QPushButton, QSlider, QSpinBox, QTabWidget,
+                               QVBoxLayout, QWidget)
 
 from ..engine.effects import CancelToken, Cancelled
 
@@ -347,11 +348,12 @@ class EffectDialog(QDialog):
         self.rows = []
         # An effect may bring its own panel for settings a plain row cannot
         # show (Selective Color's nine ranges); those props are then hidden.
+        # A panel with a tab_title gets a tab of its own beside the rows'
+        # "Custom" tab, as Lens Correction's Profile tab does.
         panel = PANELS.get(getattr(effect, "ui_panel", None))
         hidden = set(getattr(effect, "ui_hidden", ())) if panel else set()
         if panel is not None:
-            self.panel = panel(effect, self._on_changed)
-            layout.addWidget(self.panel)
+            self.panel = panel(effect, self._on_changed, controller)
         for prop in effect.props:
             if prop.name in hidden:
                 continue
@@ -359,7 +361,18 @@ class EffectDialog(QDialog):
             row.changed.connect(self._on_changed)
             form.addRow(prop.ui.get("label", prop.name), row)
             self.rows.append(row)
-        layout.addLayout(form)
+        self.tabs = None
+        if panel is not None and getattr(self.panel, "tab_title", None):
+            self.tabs = QTabWidget()
+            self.tabs.addTab(self.panel, self.panel.tab_title)
+            custom = QWidget()
+            custom.setLayout(form)
+            self.tabs.addTab(custom, "Custom")
+            layout.addWidget(self.tabs)
+        else:
+            if panel is not None:
+                layout.addWidget(self.panel)
+            layout.addLayout(form)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -498,7 +511,7 @@ class SelectiveColorPanel(QWidget):
     """Photoshop's Selective Color face: pick a colour range, set its four
     inks; every range is kept, and all apply together."""
 
-    def __init__(self, effect, on_change, parent=None):
+    def __init__(self, effect, on_change, controller=None, parent=None):
         import json
         from ..engine.morefilters import RANGES
         super().__init__(parent)
@@ -543,4 +556,141 @@ class SelectiveColorPanel(QWidget):
         self.on_change()
 
 
-PANELS = {"selective_color": SelectiveColorPanel}
+class LensProfilePanel(QWidget):
+    """Lens Correction's Profile tab (CS6's Auto Correction): a lens from
+    lensfun's database, matched from the photo's EXIF where it can be,
+    at the shot's focal length, aperture and focus distance, and which
+    of its corrections to apply. With no database installed it says so
+    and changes nothing; the Custom tab still works."""
+
+    tab_title = "Profile"
+
+    def __init__(self, effect, on_change, controller=None, parent=None):
+        from ..engine import lensprofile, metadata
+        super().__init__(parent)
+        self.effect, self.on_change = effect, on_change
+        self.db = lensprofile.installed()
+        layout = QVBoxLayout(self)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        if not self.db:
+            self.status.setText(
+                "No lens database found. Lens profiles come from lensfun's database "
+                "(the lensfun-data package, or lensfun-update-data), which Ochre reads "
+                "where it is installed. Looked in: %s. The Custom tab works without it."
+                % ", ".join(lensprofile.search_roots()))
+            layout.addWidget(self.status)
+            layout.addStretch(1)
+            return
+        meta = getattr(getattr(controller, "doc", None), "meta", None)
+        self.exif = metadata.lens_exif(meta)
+        form = QFormLayout()
+        self.camera = QComboBox()
+        self.camera.addItem("(Any camera)", None)
+        for i, cam in sorted(enumerate(self.db.cameras), key=lambda p: p[1].name.lower()):
+            self.camera.addItem("%s (crop %g)" % (cam.name, cam.crop), i)
+        self.lens = QComboBox()
+        self.lens.addItem("(No profile)", "")
+        for name in sorted({l.name for l in self.db.lenses}, key=str.lower):
+            self.lens.addItem(name, name)
+        self.focal = self._spin(1.0, 2000.0, " mm", 1)
+        self.aperture = self._spin(0.5, 64.0, "", 1, prefix="f/")
+        self.distance = self._spin(0.01, 1000.0, " m", 2)
+        form.addRow("Camera", self.camera)
+        form.addRow("Lens", self.lens)
+        form.addRow("Focal length", self.focal)
+        form.addRow("Aperture", self.aperture)
+        form.addRow("Focus distance", self.distance)
+        self.checks = {}
+        for name in ("profile_distortion", "profile_ca", "profile_vignette", "auto_scale"):
+            box = QCheckBox(effect.props[name].ui.get("label", name))
+            box.setChecked(bool(effect.props.get(name)))
+            box.toggled.connect(lambda on, n=name: self._toggle(n, on))
+            form.addRow("" if name != "profile_distortion" else "Correction", box)
+            self.checks[name] = box
+        layout.addLayout(form)
+        layout.addWidget(self.status)
+        self._loading = True
+        self._prefill()
+        self._loading = False
+        for w in (self.camera, self.lens):
+            w.currentIndexChanged.connect(self._changed)
+        for w in (self.focal, self.aperture, self.distance):
+            w.valueChanged.connect(self._changed)
+        # Set the profile now; the dialog renders its first preview itself.
+        self._changed(notify=False)
+
+    @staticmethod
+    def _spin(lo, hi, suffix, decimals, prefix=""):
+        spin = QDoubleSpinBox()
+        spin.setRange(lo, hi)
+        spin.setDecimals(decimals)
+        spin.setSuffix(suffix)
+        spin.setPrefix(prefix)
+        return spin
+
+    def _prefill(self):
+        """The camera, lens and shot settings the photo's EXIF names -- or,
+        for a lens profile already chosen (a smart filter reopened), that."""
+        from ..engine.lensprofile import AUTO_MATCH
+        ex = self.exif
+        cam = self.db.find_camera(ex["make"], ex["model"])
+        if cam is not None:
+            self.camera.setCurrentIndex(self.camera.findData(self.db.cameras.index(cam)))
+        chosen = self.effect.props.get("profile") or ""
+        if not chosen:
+            matches = self.db.match_lenses(ex["lens"], ex["lens_make"] or ex["make"], cam)
+            if matches and matches[0][0] >= AUTO_MATCH:
+                chosen = matches[0][1].name
+                self.matched = True
+        index = self.lens.findData(chosen)
+        self.lens.setCurrentIndex(max(0, index))
+        lens = self.db.lens_by_name(chosen) if chosen else None
+        self.focal.setValue(ex["focal"] or (lens.min_focal if lens else 50.0) or 50.0)
+        self.aperture.setValue(ex["aperture"] or 8.0)
+        self.distance.setValue(ex["distance"] or 1000.0)
+
+    matched = False
+
+    def _crop(self):
+        """The camera's crop factor: the chosen body's, else the EXIF's
+        35 mm equivalent over the real focal length, else unknown."""
+        index = self.camera.currentData()
+        if index is not None:
+            return self.db.cameras[index].crop
+        ex = self.exif
+        if ex["focal"] and ex["focal35"]:
+            return ex["focal35"] / ex["focal"]
+        return None
+
+    def _toggle(self, name, on):
+        self.effect.props.set(name, on)
+        self.on_change()
+
+    def _changed(self, *_, notify=True):
+        if self._loading:
+            return
+        from ..engine import lensprofile
+        lens = self.db.lens_by_name(self.lens.currentData() or "")
+        if lens is None:
+            self.effect.props.set("profile", "")
+            self.effect.props.set("profile_model", "")
+            self.status.setText("No profile: only the Custom tab's corrections apply." if not
+                                self.exif["lens"] else
+                                "The lens in this photo's EXIF (%s) is not in the lens "
+                                "database; pick one, or use the Custom tab." % self.exif["lens"])
+        else:
+            model = lensprofile.lens_model(lens, self.focal.value(), self.aperture.value(),
+                                           self.distance.value(), self._crop())
+            self.effect.props.set("profile", lens.name)
+            self.effect.props.set("profile_model", lensprofile.model_json(model))
+            has = [n for n, on in zip(("distortion", "chromatic aberration", "vignetting"),
+                                      lens.corrects()) if on]
+            self.status.setText("%s%s: lensfun calibrates %s." % (
+                lens.name, " (matched from the photo's EXIF)" if self.matched else "",
+                ", ".join(has)))
+        if notify:
+            self.on_change()
+
+
+PANELS = {"selective_color": SelectiveColorPanel, "lens_correction": LensProfilePanel}

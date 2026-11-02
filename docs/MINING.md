@@ -147,3 +147,11 @@ that picked them is `docs/KOOKA-COMPARISON-2026-10-31.md`.
 |---|---|---|
 | `engine/refine.py` `decontaminate` | `crates/pictura-select/src/refine.rs` `decontaminate` | Decontaminate Colors: edge colour pulled toward the mean of nearby fully selected pixels by (1 - coverage) * amount. Ochre widens the search step by step instead of a fixed 5x5. Output To's four targets and the "colour needs a new layer" rule are the same. |
 | `engine/inpaint.py` `matched_grain`, Spot Healing's Create Texture | `crates/pictura-paint/src/healing/mod.rs` `add_matched_noise` | A harmonic fill plus fixed-seed noise as strong as the ring's grain. Ochre measures the ring robustly (outliers trimmed, the 4-neighbour residual's 1.25 variance factor divided out) and keeps the channels' covariance, so grey grain stays grey. |
+| `engine/lensprofile.py`, Lens Correction's Profile tab | `crates/pictura-filters/src/distort/lens_correction/lensfun.rs`, `profile.rs`, `map.rs`; `crates/pictura-app/src/cxxqt_object/filter_tools/lens_profiles.rs` | Reading lensfun's XML at run time from the system and user folders, the exact conversion of ptlens / poly3 / poly5 distortion, linear / poly3 TCA and pa vignetting to the half-diagonal, crop-factor rescaling, and Auto Scale's bisection on edge samples. Kooka picks the nearest calibration; Ochre interpolates (linear in focal length for distortion and TCA, lensfun's inverse-distance weighting for vignetting). |
+
+lensfun's database is CC BY-SA 3.0 and **none of it is in this repository**:
+Ochre reads the copy the user or the system installed, and the tests write
+an invented one. Kooka's camera and lens catalogues (`cameras.tsv`, MIT but
+of unstated origin; `lenses.tsv`, names from lensfun's lens list) were not
+copied either. Crop factors come from the installed database's `<camera>`
+entries, or from the photo's own EXIF 35 mm equivalent.
