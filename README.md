@@ -82,6 +82,45 @@ Build the optional accelerator (never required):
 
     python setup.py build_ext --inplace
 
+## Without a window
+
+`--headless` opens a file, runs commands and writes the result, with no
+display and no Qt (`ochre/ui/headless.py`):
+
+    ./run.sh --headless in.png --run "image.resize width=100" --export out.png
+    ./run.sh --headless --list            # every command and effect
+
+The commands are the controller's `RECORDABLE` list -- the same whitelist
+that makes an actions file safe to replay -- under dotted names
+(`image.resize`, `select.grow`, `filter.gaussian_blur radius=2`; see
+`ochre/ui/scripting.py`). Steps run in the order given; the first failure
+prints one line and exits 1 with nothing written after it.
+
+`--control` (off unless given; with the window or with `--headless`) lets
+another program drive Ochre over a Unix socket -- never TCP -- one JSON
+object per line, with Kooka Pictura's permission model
+(`ochre/ui/control.py`):
+
+    ./run.sh --control --control-tier edit --control-root ~/agent-work
+
+A random per-session token is written to `<socket>.token` (mode 0600) and
+every request must carry it. Tiers are read < edit < save; `--control-root`
+folders confine every file a client opens or writes (symlinks resolved
+first), and a file the client did not create is never overwritten without
+asking. In the window, a request beyond those limits puts up an approval bar
+(Allow arms after half a second; no answer in a minute is a no); headless,
+it is refused.
+
+`--mcp` serves the Model Context Protocol on stdio so an AI agent can drive
+Ochre (`ochre/ui/mcp.py`; hand-written JSON-RPC, no dependency). Either it
+bridges to a running `--control` socket (`--mcp --connect`), or it runs a
+private headless Ochre (`--mcp --control-tier edit --control-root DIR`). The
+bridge enforces nothing itself; the control server's checks apply either way.
+An MCP client entry looks like:
+
+    {"command": "/path/to/ochre/run.sh",
+     "args": ["--mcp", "--control-tier", "save", "--control-root", "/home/me/agent-work"]}
+
 ## Running the tests
 
 ```sh
