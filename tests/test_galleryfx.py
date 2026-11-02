@@ -125,8 +125,15 @@ def main():
                     bad.append(over)
             check("%s: every slider end and every choice renders" % n, not bad, str(bad))
             if "seed" in REG.create(n).props:
-                c = REG.create(n, seed=7).apply(img)
-                check("%s: the seed re-rolls the pattern" % n, not np.array_equal(a, c))
+                # Some settings draw no noise at all (Paint Daubs' Simple
+                # brush); then some choice must.
+                rerolls = []
+                for over in [{}] + [o for o in extremes(REG.create(n)) if len(o) == 1]:
+                    rerolls.append(not np.array_equal(REG.create(n, **over).apply(img),
+                                                      REG.create(n, seed=7, **over).apply(img)))
+                    if rerolls[-1]:
+                        break
+                check("%s: the seed re-rolls the pattern" % n, rerolls[-1])
 
     # ---- the UI lists them ---------------------------------------------------
     from ochre.ui import gallery
