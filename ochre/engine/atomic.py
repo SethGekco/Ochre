@@ -39,7 +39,7 @@ import stat
 import tempfile
 
 # Temporary files are hidden and say what they are, so one orphaned by a
-# power cut is recognisable for what it is: ".<name>.<random>.ochre-tmp".
+# power cut is recognizable for what it is: ".<name>.<random>.ochre-tmp".
 TEMP_SUFFIX = ".ochre-tmp"
 
 

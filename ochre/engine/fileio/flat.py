@@ -18,7 +18,7 @@ import os
 import numpy as np
 from PIL import Image
 
-from .. import budget
+from .. import budget, metadata
 from ..atomic import save_image
 from ..geometry import Rect
 
@@ -115,6 +115,11 @@ def import_flat(path, settings=None):
     img.load()
     count = max(1, int(getattr(img, "n_frames", 1)))
     allowance = budget.Budget(count, os.path.basename(path))
+    # EXIF orientation is applied to the pixels, so a phone photo opens
+    # upright; the metadata kept says Orientation 1 from then on, which is
+    # what stops a re-export being turned a second time.
+    turn = metadata.orientation(img)
+    kept = metadata.capture(img)
     icc = img.info.get("icc_profile")
     if img.mode == "CMYK" and count == 1:
         # Through its profile (or the system's CMYK default), not Pillow's
@@ -130,6 +135,7 @@ def import_flat(path, settings=None):
         allowance.charge(img.size[0], img.size[1], 4,
                          "frame %d of %s" % (index + 1, os.path.basename(path)))
         frame_img = img if img.mode == "RGBA" else img.convert("RGBA")
+        frame_img = metadata.upright(frame_img, turn)
         arr = np.asarray(frame_img, dtype=np.uint8)
         h, w = arr.shape[:2]
 
@@ -156,6 +162,7 @@ def import_flat(path, settings=None):
 
     doc.current = 0
     doc.meta["source"] = os.path.basename(path)
+    doc.meta.update(kept)
     if icc:
         # The numbers stay as they are; the profile says what they mean
         # (Photoshop's "use the embedded profile").
@@ -201,6 +208,7 @@ def import_indexed(path, settings=None):
     img.load()
     if img.mode != "P":
         return import_flat(path, settings)
+    kept = metadata.capture(img)
 
     raw = img.getpalette() or []
     entries = np.zeros((LENGTH, 4), dtype=np.uint8)
@@ -213,7 +221,7 @@ def import_indexed(path, settings=None):
     if isinstance(transparency, int):
         palette.set_transparent(transparency)
 
-    idx = np.asarray(img, dtype=np.uint8)
+    idx = np.asarray(metadata.upright(img, metadata.orientation(img)), dtype=np.uint8)
     h, w = idx.shape[:2]
     doc = Document(w, h, palette=palette, settings=settings)
     layer = doc.add_layer(os.path.splitext(os.path.basename(path))[0] or "Layer",
@@ -223,6 +231,7 @@ def import_indexed(path, settings=None):
     cell.content_bbox = doc.bounds
     cell.refresh_derived()
     doc.meta["source"] = os.path.basename(path)
+    doc.meta.update(kept)
     return doc
 
 
@@ -278,6 +287,7 @@ def encode_flat(doc, fmt, options=None, table=None, flat=None):
     img = _prepare(doc, name, spec, options.get("frame"), options.get("matte"),
                    options.get("scale", 1.0), flat)
     img, extra = _colour_out(doc, name, img, options)
+    extra.update(_metadata_out(doc, name, img, options))
     buf = io.BytesIO()
     img.save(buf, format=name, **dict(_save_kwargs(name, spec, options), **extra))
     return buf.getvalue()
@@ -297,6 +307,7 @@ def export_flat(doc, path, fmt=None, table=None, frame=None, matte=None, options
     img = _prepare(doc, name, spec, frame, matte or options.get("matte"),
                    options.get("scale", 1.0))
     img, extra = _colour_out(doc, name, img, options)
+    extra.update(_metadata_out(doc, name, img, options))
     save_image(img, path, name, **dict(_save_kwargs(name, spec, options), **extra))
     return path
 
@@ -322,6 +333,21 @@ def _colour_out(doc, name, img, options):
         prof = prof or colormanage.open_profile(None)
         return img, {"icc_profile": colormanage.profile_bytes(prof)}
     return img, {}
+
+
+def _metadata_out(doc, name, img, options):
+    """EXIF and XMP save kwargs for the exported image: what the source file
+    carried (see engine/metadata.py), at the exported size, with location
+    or everything stripped when the options -- or, failing them, the
+    [Export] settings -- say so."""
+    def choice(key, setting):
+        if key in options:
+            return bool(options[key])
+        getter = getattr(doc, "_setting", None)
+        return bool(getter("Export", setting, False)) if getter else False
+    return metadata.export_kwargs(getattr(doc, "meta", None), name, img.size,
+                                  strip_gps=choice("strip_gps", "StripGPS"),
+                                  strip_all=choice("strip_metadata", "StripMetadata"))
 
 
 def flatten_onto(rgba, matte=MATTE):
@@ -362,6 +388,7 @@ def export_frames(doc, path, table=None, loop=0):
     if not images:
         raise ValueError("nothing to export")
 
+    extra = _metadata_out(doc, name, images[0], {}) if name == "WEBP" else {}
     save_image(images[0], path, name, save_all=True, append_images=images[1:],
-               duration=durations, loop=loop, disposal=2)
+               duration=durations, loop=loop, disposal=2, **extra)
     return path

@@ -49,6 +49,11 @@ DEFAULTS = {
         "MaxSide": 300000,             # either side, px
         "MaxTextBytes": 67108864,      # a manifest, stack description or palette
     },
+    "Export": {
+        # What a flat export writes of the source photo's EXIF and XMP.
+        "StripGPS": False,             # drop the location, keep the rest
+        "StripMetadata": False,        # write no EXIF or XMP at all
+    },
     "Frames": {
         "MaxWarmFrames": 8,
         "MaxWarmBytes": 1073741824,

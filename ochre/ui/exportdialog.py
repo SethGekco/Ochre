@@ -76,6 +76,21 @@ class ExportDialog(QDialog):
             if cs == "CMYK":
                 self.cmyk.addItem("CMYK: " + desc, path)
         form.addRow("Colour", self.cmyk)
+        # A photo's EXIF and XMP: camera, date, copyright -- and where it was
+        # taken. Defaults from Preferences > Export.
+        self.meta = QComboBox()
+        self.meta.addItem("Keep all", "keep")
+        self.meta.addItem("Remove location (GPS)", "nogps")
+        self.meta.addItem("Remove all", "none")
+        settings = getattr(ctl, "settings", None)
+        if settings is not None and settings.get("Export", "StripMetadata"):
+            self.meta.setCurrentIndex(2)
+        elif settings is not None and settings.get("Export", "StripGPS"):
+            self.meta.setCurrentIndex(1)
+        has_meta = any(k in ctl.doc.meta for k in ("exif_data", "xmp_data"))
+        self.meta.setEnabled(has_meta)
+        self.meta.setToolTip("" if has_meta else "This image carries no EXIF or XMP metadata")
+        form.addRow("Metadata", self.meta)
         self.dims = QLabel()
         form.addRow("Size", self.dims)
         self.size = QLabel()
@@ -99,13 +114,15 @@ class ExportDialog(QDialog):
         self._timer.timeout.connect(self.refresh)
         for sig in (self.format.currentIndexChanged, self.quality.valueChanged,
                     self.scale.valueChanged, self.lossless.toggled, self.embed.toggled,
-                    self.cmyk.currentIndexChanged):
+                    self.cmyk.currentIndexChanged, self.meta.currentIndexChanged):
             sig.connect(lambda *_: self._timer.start(150))
         self.refresh()
 
     def options(self):
         out = {"quality": self.quality.value(), "scale": self.scale.value() / 100.0,
-               "lossless": self.lossless.isChecked(), "embed_srgb": self.embed.isChecked()}
+               "lossless": self.lossless.isChecked(), "embed_srgb": self.embed.isChecked(),
+               "strip_gps": self.meta.currentData() == "nogps",
+               "strip_metadata": self.meta.currentData() == "none"}
         if self.cmyk.currentData() and self.fmt() in ("JPEG", "TIFF"):
             out["cmyk_profile"] = self.cmyk.currentData()
         return out
