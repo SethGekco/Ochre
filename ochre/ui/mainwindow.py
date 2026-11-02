@@ -846,7 +846,7 @@ class MainWindow(QMainWindow):
         self._act(view_menu, "Proof Set&up...", self.do_proof_setup)
         self.proof_action = self._act(view_menu, "Pr&oof Colors",
                                       self.do_toggle_proof,
-                                      "Ctrl+Y")
+                                      "Ctrl+Shift+Z")
         self.proof_action.setCheckable(True)
         self.gamut_action = self._act(view_menu, "&Gamut Warning",
                                       lambda: self.ctl.set_proof(gamut=self.gamut_action.isChecked()),
@@ -925,6 +925,7 @@ class MainWindow(QMainWindow):
         image_menu.addSeparator()
         self._act(image_menu, "Bind &Grayscale Palette", self.do_bind_palette)
         self._act(image_menu, "Convert Layer to &Indexed...", self.do_convert_indexed)
+        self._act(image_menu, "Convert Layer to &RGB", self.do_convert_rgb)
         image_menu.addSeparator()
         self._act(image_menu, "Add &Frame", lambda: self.ctl.add_frame())
         self._act(image_menu, "&Duplicate Frame", lambda: self.ctl.add_frame(True))
@@ -2015,6 +2016,15 @@ class MainWindow(QMainWindow):
             self, "Converted to indexed",
             "Converted %d cell(s).\nMean channel error %.1f, worst %d."
             % (len(report), mean, worst))
+
+    def do_convert_rgb(self):
+        """Release the active layer from its palette (painting is no longer
+        snapped to palette colours)."""
+        if not self.ctl.convert_to_rgb():
+            return
+        self.canvas.refresh()
+        self.canvas.viewport().update()
+        self._sync_all()
 
     # ---- clipboard -------------------------------------------------------
 

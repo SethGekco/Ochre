@@ -192,8 +192,19 @@ def import_indexed(path, settings=None):
 
     img = Image.open(path)
     img.load()
-    if img.mode != "P":
+    if img.mode != "P" or int(getattr(img, "n_frames", 1)) > 1:
+        # An animation's later frames can carry palettes of their own, and
+        # the full-colour importer already keeps every frame.
         return import_flat(path, settings)
+    transparency = img.info.get("transparency")
+    if isinstance(transparency, (bytes, bytearray)):
+        # PNG-8 alpha per entry. A palette has one transparent index and no
+        # partial alpha, so anything else opens in full colour, unchanged.
+        alphas = bytes(transparency)
+        clear = [i for i, a in enumerate(alphas) if a == 0]
+        if any(a not in (0, 255) for a in alphas) or len(clear) > 1:
+            return import_flat(path, settings)
+        transparency = clear[0] if clear else None
 
     raw = img.getpalette() or []
     entries = np.zeros((LENGTH, 4), dtype=np.uint8)
@@ -202,7 +213,6 @@ def import_indexed(path, settings=None):
     entries[:triples, :3] = np.array(raw[:triples * 3], dtype=np.uint8).reshape(-1, 3)
 
     palette = Palette(entries, os.path.basename(path))
-    transparency = img.info.get("transparency")
     if isinstance(transparency, int):
         palette.set_transparent(transparency)
 

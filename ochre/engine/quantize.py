@@ -271,6 +271,29 @@ def palette_usage(indices):
 
 # ---- document conversion -------------------------------------------------
 
+def convert_layer_to_rgb(doc, layer):
+    """Release an index-locked layer to plain RGBA across every frame.
+
+    Lossless for what is shown: each pixel keeps the colour its index draws
+    as (the transparent index becomes alpha 0). The document keeps its
+    palette, since other layers may still be indexed on it.
+    """
+    from .surface import Surface
+
+    layer.unlock_from_index()
+    for key, surface in list(doc.cells_for_layer(layer).items()):
+        replacement = Surface(doc.width, doc.height, planes=layer.planes,
+                              authoritative=layer.authoritative)
+        for name in layer.planes:
+            source = surface.planes.get(name)
+            if name == "rgba" and surface.planes.get("index") is not None:
+                source = surface.plane("rgba")      # the cache, made coherent
+            if source is not None:
+                replacement.plane(name)[...] = source
+        replacement.content_bbox = surface.content_bbox
+        doc.cells[key] = replacement
+
+
 def convert_layer_to_indexed(doc, layer, palette=None, dither=NONE, bits=5,
                              strength=1.0):
     """Convert a layer to index-locked across every frame.

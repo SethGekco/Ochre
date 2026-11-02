@@ -25,7 +25,7 @@ import numpy as np
 from ..engine import accel
 from ..engine.compositor import Compositor
 from ..engine.document import Document
-from ..engine.fileio import export_flat, import_flat, is_ochre, load, save
+from ..engine.fileio import export_flat, import_flat, import_indexed, is_ochre, load, save
 from ..engine.geometry import Rect
 from ..engine.history import HistoryStack
 from ..engine.ini import IniDB
@@ -279,7 +279,9 @@ class Controller:
             self._adopt(doc, path=path)
         else:
             try:
-                doc = import_flat(path, settings=self.settings)
+                # A paletted PNG or GIF opens index-locked, so its exact
+                # indices survive; anything else comes in as full colour.
+                doc = import_indexed(path, settings=self.settings)
             except Exception as exc:
                 raise self._unopenable(path, exc) from exc
             self._adopt(doc, path=None)   # imported, not "the same file"
@@ -4521,6 +4523,23 @@ class Controller:
         self.invalidate()
         self._after_structure_change()
         return report
+
+    def convert_to_rgb(self, layer=None):
+        """The active index-locked layer back to plain RGBA, keeping every
+        colour it shows. One undo step. False when there is nothing to do."""
+        from ..engine.commands import IndexConvertDelta
+        from ..engine.quantize import convert_layer_to_rgb
+        target = layer or self.active_layer
+        if target is None or target.is_group or not target.index_locked:
+            return False
+        label = "Convert to RGB"
+        before = IndexConvertDelta(self.doc, target, label)
+        convert_layer_to_rgb(self.doc, target)
+        self.history.push(before, label)
+        self.compositor.invalidate()
+        self.invalidate()
+        self._after_structure_change()
+        return True
 
     def straighten(self, line=None):
         """Image > Straighten: rotate so the measured line comes out level."""
