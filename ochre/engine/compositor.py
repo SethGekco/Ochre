@@ -49,13 +49,21 @@ non-interactive events where a full recomposite is acceptable.
 Group semantics are isolated: a group flattens its children into a scratch
 buffer, then blends that result into its parent with the group's own opacity,
 blend mode and visibility.
+
+A large rect is composited in horizontal bands on a thread pool
+(engine/parallel.py) -- every composite here is per-pixel, so the bands give
+the same bytes as the whole -- unless some adjustment layer reads its
+neighbours, which a band edge would cut off. On the development machine a
+full 8000x6000 composite of four layers drops from 1.5 s to 0.2 s on eight
+threads (figures in parallel.py).
 """
 
 import math
+import threading
 
 import numpy as np
 
-from . import accel
+from . import accel, parallel
 from .blend import DEFAULT as DEFAULT_BLENDS
 from .geometry import Rect
 from .layer import ADJUSTMENT, FILL, PASS_THROUGH, SHAPE, SMART, TEXT
@@ -95,7 +103,12 @@ class Compositor:
         self.doc = document
         self.blends = blends or DEFAULT_BLENDS
         self._effects_registry = effects
-        self._effects = {}          # (layer id, params) -> Effect, for adjustment layers
+        # Adjustment layers' Effect objects live per THREAD (see _effects): an
+        # Effect keeps per-render state on itself, so two bands cannot share one.
+        self._tls = threading.local()
+        # Held while filling a cache that bands share. The first band fills
+        # them all alone, so the others only read; this covers the rest.
+        self._lock = threading.RLock()
         self._styles = {}           # layer id -> (key, rect, behind, front)
         self._below = None          # flattened everything under the active layer
         self._above = None          # flattened upper half, when that is legal
@@ -113,6 +126,18 @@ class Compositor:
         self._active_leaf = None
         self._cache_frame = None
         self._cache_active = None
+
+    @property
+    def _effects(self):
+        """(layer id, name, params) -> Effect, for adjustment layers, this thread's."""
+        store = getattr(self._tls, "effects", None)
+        if store is None:
+            store = self._tls.effects = {}
+        return store
+
+    @_effects.setter
+    def _effects(self, value):
+        self._tls.effects = value
 
     @property
     def cache_valid(self):
@@ -282,15 +307,16 @@ class Compositor:
         kind = getattr(layer, "kind", "raster")
         if kind == FILL:
             return fill_pixels(layer.params, r, self.doc.width, self.doc.height)
-        if kind == TEXT:
-            from . import textlayer
-            return textlayer.pixels(layer.params, r)
-        if kind == SMART:
-            return self._smart_image(layer)[r.slice()]
-        if kind == SHAPE:
-            return self._shape_image(layer)[r.slice()]
-        if layer.params and _active_filters(layer.params):
-            return self._filtered(leaf)[r.slice()]
+        with self._lock:
+            if kind == TEXT:
+                from . import textlayer
+                return textlayer.pixels(layer.params, r)
+            if kind == SMART:
+                return self._smart_image(layer)[r.slice()]
+            if kind == SHAPE:
+                return self._shape_image(layer)[r.slice()]
+            if layer.params and _active_filters(layer.params):
+                return self._filtered(leaf)[r.slice()]
         return leaf.surface.view(r, "rgba")
 
     def _shape_image(self, layer):
@@ -346,7 +372,8 @@ class Compositor:
                     out = mask_value(px)
         vm = getattr(layer, "vector_mask", None)
         if vm is not None and getattr(layer, "vector_mask_enabled", True):
-            cov = self._vector_coverage(vm)[r.slice()]
+            with self._lock:
+                cov = self._vector_coverage(vm)[r.slice()]
             out = cov if out is None else accel.spec._mul(
                 out.astype(np.uint32), cov.astype(np.uint32)).astype(np.uint8)
         return out
@@ -408,7 +435,9 @@ class Compositor:
     def _effect(self, layer):
         from .effects import EffectRegistry
         if self._effects_registry is None:
-            self._effects_registry = EffectRegistry()
+            with self._lock:
+                if self._effects_registry is None:
+                    self._effects_registry = EffectRegistry()
         name = layer.params.get("effect")
         settings = {k: v for k, v in layer.params.items() if k != "effect"}
         key = (layer.id, name, repr(sorted(settings.items())))
@@ -422,10 +451,15 @@ class Compositor:
     def _style_images(self, leaf, frame):
         """(rect, behind, front) for a styled layer, cached until it changes."""
         from . import layerstyles
-        layer = leaf.layer
-        styles = getattr(layer, "styles", None)
+        styles = getattr(leaf.layer, "styles", None)
         if not styles or not layerstyles.enabled(styles):
             return None
+        with self._lock:
+            return self._style_images_locked(leaf, frame, styles)
+
+    def _style_images_locked(self, leaf, frame, styles):
+        from . import layerstyles
+        layer = leaf.layer
         surface = leaf.surface
         revision = None if surface is None or getattr(layer, "kind", "raster") != "raster" \
             else (id(surface), surface.revision, surface.content_bbox)
@@ -494,29 +528,58 @@ class Compositor:
 
     # ---- full composites --------------------------------------------------------
 
+    def _extent(self):
+        """(width, height) of the grid this compositor's rects live on."""
+        return self.doc.width, self.doc.height
+
+    def _bandable(self):
+        """May a composite be split into row bands? Not while any adjustment
+        layer reads its neighbours (a blur): at a band edge it would see less
+        image than over the whole rect. Everything else is per-pixel."""
+        for layer in self.doc.layers():
+            if getattr(layer, "kind", "raster") == ADJUSTMENT:
+                effect = Compositor._effect(self, layer)
+                if effect is not None and not getattr(effect, "pointwise", False):
+                    return False
+        return True
+
+    def _banded(self, window, r, work):
+        """work(window band, band rect) over r -- in row bands on the pool
+        when r is large enough and banding is exact, else in one go."""
+        if parallel.bands(r) is None or not self._bandable():
+            work(window, r)
+        else:
+            parallel.banded(window, r, work)
+
+    def _flatten(self, window, r, frame):
+        leaves = self._visible_leaves(self.doc.root, frame)
+
+        def work(win, band):
+            win[...] = 0
+            self._run(win, leaves, band, frame)
+        self._banded(window, r, work)
+        return window
+
     def composite_into(self, dst, rect, frame=None):
         """Flatten the document over rect into dst (an (H,W,4) uint8 array).
 
         dst is indexed in document coordinates, so dst must be canvas-sized.
         """
         frame = self.doc.frame if frame is None else frame
-        r = rect.clipped_to(self.doc.width, self.doc.height)
+        r = rect.clipped_to(*self._extent())
         if r is None:
             return None
-        window = dst[r.slice()]
-        window[...] = 0
-        self._run(window, self._visible_leaves(self.doc.root, frame), r, frame)
+        self._flatten(dst[r.slice()], r, frame)
         return r
 
     def composite(self, rect=None, frame=None):
         """Flatten over rect and return a fresh array of just that region."""
         frame = self.doc.frame if frame is None else frame
-        r = (self.doc.bounds if rect is None else rect).clipped_to(
-            self.doc.width, self.doc.height)
+        w, h = self._extent()
+        r = (Rect(0, 0, w, h) if rect is None else rect).clipped_to(w, h)
         if r is None:
             return None
-        out = np.zeros((r.h, r.w, 4), dtype=np.uint8)
-        return self._run(out, self._visible_leaves(self.doc.root, frame), r, frame)
+        return self._flatten(np.empty((r.h, r.w, 4), dtype=np.uint8), r, frame)
 
     # ---- the stroke cache -------------------------------------------------------
 
@@ -562,9 +625,15 @@ class Compositor:
 
         bounds = self.doc.bounds
         shape = (self.doc.height, self.doc.width, 4)
-        below = np.zeros(shape, dtype=np.uint8)
-        for leaf in lower:
-            self._blend_leaf(below, leaf, bounds, frame)
+
+        def flatten(leaves):
+            def work(win, band):
+                for leaf in leaves:
+                    self._blend_leaf(win, leaf, band, frame)
+            out = np.zeros(shape, dtype=np.uint8)
+            self._banded(out, bounds, work)
+            return out
+        below = flatten(lower)
 
         flattenable = all(leaf.mode == accel.NORMAL
                           and getattr(leaf.layer, "kind", "raster") != ADJUSTMENT
@@ -572,10 +641,7 @@ class Compositor:
                           and (leaf.base is None or leaf.base is not active)
                           for leaf in upper)
         if flattenable:
-            above = np.zeros(shape, dtype=np.uint8)
-            for leaf in upper:
-                self._blend_leaf(above, leaf, bounds, frame)
-            self._above = above
+            self._above = flatten(upper)
             self._above_layers = None
         else:
             self._above = None
@@ -605,9 +671,6 @@ class Compositor:
         if r is None:
             return None
 
-        window = dst[r.slice()]
-        window[...] = self._below[r.slice()]
-
         leaf = self._active_leaf
         if leaf is not None:
             node = self.doc.layer(active_id)
@@ -615,15 +678,22 @@ class Compositor:
                 # The surface may have been created since the cache was built.
                 if leaf.surface is None and getattr(node, "kind", "raster") not in (ADJUSTMENT,) + _GENERATED:
                     leaf.surface = self.doc.cells.get((active_id, frame.id))
-                if leaf.surface is not None or getattr(node, "kind", "raster") in (ADJUSTMENT,) + _GENERATED:
-                    self._blend_leaf(window, leaf, r, frame)
+                if leaf.surface is None and getattr(node, "kind", "raster") not in (ADJUSTMENT,) + _GENERATED:
+                    leaf = None
+            else:
+                leaf = None
 
-        if self._above is not None:
-            accel.blend_rect(window, self._above[r.slice()], accel.NORMAL, 255,
-                             None, out=window)
-        else:
-            for upper in (self._above_layers or ()):
-                self._blend_leaf(window, upper, r, frame)
+        def work(win, band):
+            win[...] = self._below[band.slice()]
+            if leaf is not None:
+                self._blend_leaf(win, leaf, band, frame)
+            if self._above is not None:
+                accel.blend_rect(win, self._above[band.slice()], accel.NORMAL, 255,
+                                 None, out=win)
+            else:
+                for upper in (self._above_layers or ()):
+                    self._blend_leaf(win, upper, band, frame)
+        self._banded(dst[r.slice()], r, work)
         return r
 
 

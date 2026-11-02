@@ -31,6 +31,7 @@ from PySide6.QtGui import (QBrush, QColor, QImage, QPainter, QPainterPath, QPen,
                            QTransform)
 from PySide6.QtWidgets import QAbstractScrollArea
 
+from ..engine import proxy
 from ..engine.geometry import Rect
 from .viewstate import ViewState, format_zoom
 
@@ -138,6 +139,20 @@ class CanvasView(QAbstractScrollArea):
         self._caret_timer.timeout.connect(self._blink)
         self._caret_ms = int(self.cfg.get("Canvas", "CaretBlinkMs") or 530)
 
+        # Reduced-resolution previews (engine/proxy.py). While one is up the
+        # canvas draws `_reduced` -- the document composited at 1/factor --
+        # instead of the display buffer, which stays exactly as it was until
+        # settle() composites at full resolution. `_holding` counts the live
+        # scrubs (a slider held, a dialog open) that keep it from settling.
+        self._reduced = CanvasSurface()
+        self._reduced_factor = 1
+        self._reduced_view = None        # its colour-managed or one-channel copy
+        self._holding = 0
+        self._settle_timer = QTimer(self)
+        self._settle_timer.setSingleShot(True)
+        self._settle_timer.timeout.connect(self.settle)
+        self._settle_ms = int(self.cfg.get("Canvas", "SettleMs") or 200)
+
     # ---- document binding ------------------------------------------------
 
     def bind(self, keep_view=False):
@@ -148,6 +163,7 @@ class CanvasView(QAbstractScrollArea):
         the document size behind it changes.
         """
         doc = self.ctl.doc
+        self._drop_reduced()
         if doc is None:
             self.surface.detach()
             return
@@ -188,7 +204,29 @@ class CanvasView(QAbstractScrollArea):
         self.zoom_changed.emit(format_zoom(self.view.zoom))
 
     def refresh(self):
-        """Composite what is pending and schedule a repaint of those regions."""
+        """Composite what is pending and schedule a repaint of those regions.
+
+        Zoomed out on a big canvas, a large redraw -- or any redraw during a
+        live scrub -- is shown reduced first and composited at full
+        resolution when things settle: at once when the scrub ends, else
+        after SettleMs of stillness.
+        """
+        factor = self.reduction_factor()
+        if factor > 1:
+            area = self.ctl.pending_area()
+            if area and (self._holding or area >= self._reduced_above()):
+                self.show_reduced()
+                if not self._holding:
+                    self._settle_timer.start(self._settle_ms)
+                return
+            if not area and self._holding and self._reduced.is_valid():
+                return
+        if self._reduced.is_valid():
+            self.settle()
+            return
+        self._refresh_full()
+
+    def _refresh_full(self):
         rects = self.ctl.flush()
         if self._cm_update(rects or []):
             self.viewport().update()            # the colour view changed wholesale
@@ -198,6 +236,118 @@ class CanvasView(QAbstractScrollArea):
             self._mark(rect)
         if not self._timer.isActive():
             self._timer.start(self._repaint_ms)
+
+    # ---- reduced-resolution previews -------------------------------------
+
+    def _reduced_above(self):
+        return int(self.cfg.get("Canvas", "ReducedPreviewsAbove") or 0)
+
+    def reduction_factor(self):
+        """How much a live preview is reduced at the current zoom: 1 means
+        full resolution (zoomed in, a small document, or switched off)."""
+        doc = getattr(self.ctl, "doc", None)
+        if doc is None or not self.cfg.get("Canvas", "ReducedPreviews"):
+            return 1
+        if doc.width * doc.height < self._reduced_above():
+            return 1
+        vp = self.viewport()
+        if vp.width() < 64 or vp.height() < 64:      # not laid out yet
+            return 1
+        return proxy.factor_for_zoom(self.view.zoom)
+
+    @property
+    def showing_reduced(self):
+        """True while the canvas shows a reduced preview, not the display buffer."""
+        return self._reduced.is_valid()
+
+    def show_reduced(self, overrides=None):
+        """Draw the visible part of the document reduced to match the zoom.
+
+        `overrides` ({layer id: level-sized RGBA}) stand in for those layers'
+        pixels -- how a filter dialog previews without touching the layer.
+        Nothing is written to the document or to the display buffer; this is
+        a picture of what they would be. False when the zoom calls for full
+        resolution.
+        """
+        factor = self.reduction_factor()
+        if factor <= 1 or self.ctl.doc is None:
+            return False
+        comp = self.ctl.reduced_compositor(factor)
+        buf = self._reduced.array
+        if buf is None:
+            comp.prune()                  # a new preview: forget deleted layers
+        vp = self.viewport()
+        visible = self.view.visible_doc_rect(vp.width(), vp.height()) or self.ctl.doc.bounds
+        rk = proxy.reduce_rect(visible, factor).clipped_to(comp.width, comp.height) \
+            or comp.bounds
+        if buf is None or buf.shape[:2] != (comp.height, comp.width) \
+                or self._reduced_factor != factor:
+            # Around the visible part, the picture as last composited.
+            buf = np.zeros((comp.height, comp.width, 4), np.uint8) if rk == comp.bounds \
+                else proxy.reduce_box(self.ctl.display, factor)
+            self._reduced.attach(buf)
+            self._reduced_factor = factor
+        comp.overrides = dict(overrides or {})
+        try:
+            comp.composite_into(buf, rk)
+        finally:
+            comp.overrides = {}
+        self._reduced_view = self._reduced_shown(buf)
+        self.viewport().update()
+        return True
+
+    def _reduced_shown(self, buf):
+        """The reduced preview as the canvas shows it: through the colour view
+        or as one channel, as the display buffer would be. None: as it is."""
+        c = self.view_channel
+        if c is not None:
+            grey = np.empty(buf.shape, np.uint8)
+            grey[..., 0] = grey[..., 1] = grey[..., 2] = buf[..., c]
+            grey[..., 3] = 255
+            return grey
+        vt = self.ctl.view_transform() if getattr(self.ctl, "doc", None) is not None else None
+        return None if vt is None else vt.apply(buf)
+
+    def _reduced_image(self):
+        """(QImage, its source rect in image pixels) for the reduced preview."""
+        arr = self._reduced_view
+        image = self._reduced.image if arr is None else \
+            QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 4, QImage.Format_RGBA8888)
+        f = self._reduced_factor
+        # The level is ceil(size / f): its last block is short, so the source
+        # rect is the document's own extent on the level, not the whole image.
+        return image, QRectF(0, 0, self.view.doc_w / f, self.view.doc_h / f)
+
+    def begin_reduced(self):
+        """A live scrub starts (a slider pressed, a preview dialog opened):
+        until end_reduced, redraws are shown reduced and never settle."""
+        self._holding += 1
+
+    def end_reduced(self):
+        """The scrub is committed or abandoned: show full resolution now."""
+        self._holding = max(0, self._holding - 1)
+        if not self._holding:
+            self.settle()
+
+    def settle(self):
+        """Leave a reduced preview: composite whatever is pending at full
+        resolution and draw the display buffer again."""
+        self._settle_timer.stop()
+        if not self._reduced.is_valid():
+            self._refresh_full()
+            return
+        self._drop_reduced()
+        # Something may have flushed meanwhile (a panel asking for the merged
+        # image), so the colour-managed copy cannot trust the rects alone.
+        self._cm_vt = None
+        self._refresh_full()
+        self.viewport().update()
+
+    def _drop_reduced(self):
+        self._settle_timer.stop()
+        self._reduced.detach()
+        self._reduced_view = None
+        self._reduced_factor = 1
 
     def _mark(self, doc_rect):
         x, y, w, h = self.view.doc_to_widget_rect(doc_rect)
@@ -315,7 +465,12 @@ class CanvasView(QAbstractScrollArea):
             # interpolation prevents aliasing when minifying.
             painter.setRenderHint(QPainter.SmoothPixmapTransform,
                                   not self.view.use_nearest)
-            painter.drawImage(target, self._channel_image() or self._cm_image() or self.surface.image)
+            if self._reduced.is_valid():
+                image, source = self._reduced_image()
+                painter.drawImage(QRectF(target), image, source)
+            else:
+                painter.drawImage(target, self._channel_image() or self._cm_image()
+                                  or self.surface.image)
 
             if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
                 self._draw_pixel_grid(painter, event.rect(), target)
@@ -916,8 +1071,12 @@ class CanvasView(QAbstractScrollArea):
         painter.drawPolygon(corners)
         painter.setTransform(self._view_transform())
         painter.setRenderHint(QPainter.SmoothPixmapTransform, not self.view.use_nearest)
-        painter.drawImage(QRectF(0, 0, w, h), self._cm_image() or self.surface.image,
-                          QRectF(0, 0, w, h))
+        if self._reduced.is_valid():
+            image, source = self._reduced_image()
+            painter.drawImage(QRectF(0, 0, w, h), image, source)
+        else:
+            painter.drawImage(QRectF(0, 0, w, h), self._cm_image() or self.surface.image,
+                              QRectF(0, 0, w, h))
         if self.view.percent >= (self.cfg.get("Canvas", "PixelGridAbove") or 800):
             pen = QPen(QColor(*self.cfg.get("Canvas", "GridColour")))
             pen.setCosmetic(True)
@@ -1015,6 +1174,9 @@ class CanvasView(QAbstractScrollArea):
         return out
 
     def mousePressEvent(self, event):
+        if self._reduced.is_valid() and not self._holding:
+            # Tools work on the real pixels: see them before touching them.
+            self.settle()
         tool = self._text_tool()
         if tool is not None and event.button() == Qt.LeftButton:
             dx, dy = self._doc_pos(event.position())

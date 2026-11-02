@@ -74,6 +74,11 @@ DEFAULTS = {
         "TileSize": 256,           # small tiles are GIL-bound and scale negatively
         "MaxThreads": 0,           # 0 = os.cpu_count()
     },
+    "Performance": {
+        # Threads that composite a large region in row bands (engine/parallel.py).
+        # 0 = one per core, at most 8; 1 = a single thread.
+        "Threads": 0,
+    },
     "Color": {
         # The monitor's ICC profile (empty = sRGB), and how proofs render.
         "MonitorProfile": "",

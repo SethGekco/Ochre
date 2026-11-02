@@ -6,7 +6,9 @@
 Each previews LIVE by changing the layer itself -- the compositor redraws
 from it -- and on OK records one undo step through the controller (the live
 changes are put back first, so history sees one clean before/after). Cancel
-restores exactly what was there.
+restores exactly what was there. Zoomed out on a big canvas the live redraws
+are reduced (engine/proxy.py) until OK or Cancel, which redraw at full
+resolution.
 """
 
 from PySide6.QtCore import Qt
@@ -27,6 +29,14 @@ def _refresh(ctl, canvas=None):
     if canvas is not None:
         canvas.refresh()
         canvas.viewport().update()
+
+
+def _hold(dialog):
+    """Keep the canvas's redraws reduced while the dialog is open."""
+    canvas = getattr(dialog, "canvas", None)
+    if canvas is not None and hasattr(canvas, "begin_reduced") and canvas.reduction_factor() > 1:
+        canvas.begin_reduced()
+        dialog.finished.connect(lambda _result: canvas.end_reduced())
 
 
 class ColourButton(QPushButton):
@@ -69,6 +79,7 @@ class AdjustmentLayerDialog(QDialog):
         super().__init__(parent)
         self.ctl, self.layer = ctl, layer
         self.canvas = getattr(parent, "canvas", None)
+        _hold(self)
         self.original = dict(layer.params)
         self.effect = effects.create(layer.params.get("effect"))
         self.setWindowTitle("%s (adjustment layer)" % (self.effect.label if self.effect else "?"))
@@ -119,6 +130,7 @@ class FillLayerDialog(QDialog):
         super().__init__(parent)
         self.ctl, self.layer = ctl, layer
         self.canvas = getattr(parent, "canvas", None)
+        _hold(self)
         self.original = dict(layer.params)
         self.setWindowTitle("Fill Layer")
         p = layer.params
@@ -196,6 +208,7 @@ class LayerStyleDialog(QDialog):
         super().__init__(parent)
         self.ctl, self.layer = ctl, layer
         self.canvas = getattr(parent, "canvas", None)
+        _hold(self)
         self.original = {k: dict(v) for k, v in layer.styles.items()}
         self.working = {k: dict(v) for k, v in layer.styles.items()}
         self.setWindowTitle("Layer Style - %s" % layer.name)

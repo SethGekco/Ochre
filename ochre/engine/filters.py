@@ -260,6 +260,7 @@ def _edge_choice(default="clamp"):
 class MotionBlur(_Filter):
     """Blur along a line, as if the camera moved. Centered, as in Paint.NET."""
     name, label, category = "motion_blur", "Motion Blur", "Blurs"
+    proxy_scale = ("distance",)
 
     def declare(self):
         return _props(FloatProperty("angle", 0.0, -180.0, 180.0, decimals=1), IntProperty("distance", 10, 1, 200),
@@ -282,6 +283,7 @@ class MotionBlur(_Filter):
 class RadialBlur(_Filter):
     """Spin blur around a point: Paint.NET's Radial Blur, Photoshop's Spin."""
     name, label, category = "radial_blur", "Radial Blur", "Blurs"
+    proxy_scale = ()
 
     def declare(self):
         return _props(FloatProperty("angle", 10.0, 0.0, 180.0, decimals=1), *_centre(), IntProperty("quality", 3, 1, 5))
@@ -303,6 +305,7 @@ class RadialBlur(_Filter):
 class ZoomBlur(_Filter):
     """Streaks toward a point, as if zooming during the exposure."""
     name, label, category = "zoom_blur", "Zoom Blur", "Blurs"
+    proxy_scale = ()
 
     def declare(self):
         return _props(IntProperty("amount", 20, 0, 100), *_centre())
@@ -321,6 +324,7 @@ class ZoomBlur(_Filter):
 
 class BoxBlur(_Filter):
     name, label, category = "box_blur", "Box Blur", "Blurs"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return _props(IntProperty("radius", 4, 1, 200))
@@ -334,6 +338,7 @@ class LensBlur(_Filter):
     """Disc-shaped (bokeh) blur: bright points become discs, not smudges.
     Paint.NET's Unfocus / Bokeh, Photoshop's Lens Blur (without depth)."""
     name, label, category = "lens_blur", "Lens Blur (Bokeh)", "Blurs"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return _props(IntProperty("radius", 8, 1, 100), IntProperty("highlights", 0, 0, 100,
@@ -359,6 +364,7 @@ class SurfaceBlur(_Filter):
     """Smooths surfaces, keeps edges: an edge-aware (bilateral) blur, done as
     two 1-D passes. Photoshop's Surface Blur, Paint.NET's Surface Blur."""
     name, label, category = "surface_blur", "Surface Blur", "Blurs"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return _props(IntProperty("radius", 6, 1, 50), IntProperty("threshold", 20, 1, 100))
@@ -385,6 +391,7 @@ class TiltShift(_Filter):
     """A sharp horizontal band with blur growing above and below it, which
     makes a scene look like a miniature."""
     name, label, category = "tilt_shift", "Tilt-Shift", "Blurs"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return _props(IntProperty("radius", 10, 1, 60), IntProperty("center_y", 50, 0, 100,
@@ -405,6 +412,7 @@ class TiltShift(_Filter):
 class FragmentBlur(_Filter):
     """Paint.NET's Fragment: copies of the image offset round a circle."""
     name, label, category = "fragment", "Fragment", "Blurs"
+    proxy_scale = ("distance",)
 
     def declare(self):
         return _props(IntProperty("fragments", 4, 2, 50), IntProperty("distance", 8, 0, 100),
@@ -424,6 +432,7 @@ class FragmentBlur(_Filter):
 class Pixelate(_Filter):
     """Big square cells of averaged colour: Pixelate / Mosaic."""
     name, label, category = "pixelate", "Pixelate", "Distort"
+    proxy_scale = ("cell",)
 
     def declare(self):
         return _props(IntProperty("cell", 8, 2, 200, label="Cell size"))
@@ -443,6 +452,7 @@ class Pixelate(_Filter):
 class UnsharpMask(_Filter):
     """Sharpen by adding back what a blur removes; threshold spares noise."""
     name, label, category = "unsharp_mask", "Unsharp Mask", "Photo"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return _props(FloatProperty("radius", 2.0, 0.1, 100.0, decimals=1),
@@ -461,6 +471,7 @@ class UnsharpMask(_Filter):
 class HighPass(_Filter):
     """Keep only fine detail, around mid-grey: blend it Overlay to sharpen."""
     name, label, category = "high_pass", "High Pass", "Photo"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return _props(FloatProperty("radius", 10.0, 0.1, 250.0, decimals=1))
@@ -475,6 +486,7 @@ class HighPass(_Filter):
 class Vignette(_Filter):
     """Darken (or lighten, or tint) toward the edges."""
     name, label, category = "vignette", "Vignette", "Photo"
+    proxy_scale = ()
 
     def declare(self):
         return _props(IntProperty("amount", 60, 0, 100), IntProperty("radius", 70, 10, 150),
@@ -498,6 +510,7 @@ class Vignette(_Filter):
 class Glow(_Filter):
     """Paint.NET's Glow / GIMP's Softglow: a blurred, brightened copy screened on."""
     name, label, category = "glow", "Glow", "Photo"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return _props(IntProperty("radius", 8, 1, 50), IntProperty("brightness", 10, -100, 100),
@@ -538,6 +551,7 @@ class ShadowsHighlights(_Filter):
     """Lift shadows and recover highlights by local brightness, not by level:
     Photoshop's Shadows/Highlights, GIMP's Shadows-Highlights."""
     name, label, category = "shadows_highlights", "Shadows / Highlights", "Photo"
+    proxy_scale = ("radius",)
 
     def declare(self):
         return _props(IntProperty("shadows", 35, 0, 100), IntProperty("highlights", 0, 0, 100),
