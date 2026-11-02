@@ -25,6 +25,7 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
@@ -344,6 +345,174 @@ static PyObject *py_blend_rect(PyObject *self, PyObject *args, PyObject *kwds)
     return (PyObject *)out;
 }
 
+/* ---- PackBits ----------------------------------------------------------- */
+
+/* packbits_decode(data, counts, rowbytes) -> (n, rowbytes) uint8 array.
+ * Mirrors fallback.packbits_decode, malformed rows included: a packet that
+ * would overrun the row is cut, a literal cut off by the row's input keeps
+ * what is present, a run header with nothing after it ends the row, and a
+ * short row stays zero-filled. */
+static PyObject *py_packbits_decode(PyObject *self, PyObject *args)
+{
+    Py_buffer buf;
+    PyObject *countso;
+    Py_ssize_t rowbytes;
+
+    if (!PyArg_ParseTuple(args, "y*On", &buf, &countso, &rowbytes))
+        return NULL;
+    PyArrayObject *counts = (PyArrayObject *)PyArray_FROMANY(
+        countso, NPY_INT64, 0, 1, NPY_ARRAY_IN_ARRAY | NPY_ARRAY_FORCECAST);
+    if (counts == NULL) {
+        PyBuffer_Release(&buf);
+        return NULL;
+    }
+    const npy_intp n = PyArray_SIZE(counts);
+    const int64_t *cv = (const int64_t *)PyArray_DATA(counts);
+    int64_t total = 0;
+    int bad = rowbytes < 0;
+    for (npy_intp r = 0; r < n && !bad; r++) {
+        if (cv[r] < 0)
+            bad = 1;
+        else
+            total += cv[r];
+        if (total > (int64_t)buf.len)
+            bad = 1;
+    }
+    if (bad) {
+        Py_DECREF(counts);
+        PyBuffer_Release(&buf);
+        PyErr_SetString(PyExc_ValueError, "PackBits rows run past the end of the data");
+        return NULL;
+    }
+    npy_intp dims[2] = {n, (npy_intp)rowbytes};
+    PyArrayObject *out = (PyArrayObject *)PyArray_ZEROS(2, dims, NPY_UINT8, 0);
+    if (out == NULL) {
+        Py_DECREF(counts);
+        PyBuffer_Release(&buf);
+        return NULL;
+    }
+    const uint8_t *data = (const uint8_t *)buf.buf;
+    uint8_t *dst = (uint8_t *)PyArray_DATA(out);
+
+    Py_BEGIN_ALLOW_THREADS
+    int64_t src = 0;
+    for (npy_intp r = 0; r < n; r++) {
+        int64_t i = src;
+        const int64_t end = src + cv[r];
+        uint8_t *o = dst + (int64_t)r * rowbytes;
+        int64_t room = rowbytes;
+        while (i < end && room > 0) {
+            const int h = data[i++];
+            if (h < 128) {
+                int64_t k = h + 1;
+                if (k > end - i) k = end - i;
+                if (k > room) k = room;
+                memcpy(o, data + i, (size_t)k);
+                i += h + 1;
+                o += k;
+                room -= k;
+            } else if (h > 128) {
+                if (i >= end)
+                    break;
+                int64_t k = 257 - h;
+                if (k > room) k = room;
+                memset(o, data[i], (size_t)k);
+                i += 1;
+                o += k;
+                room -= k;
+            }
+        }
+        src = end;
+    }
+    Py_END_ALLOW_THREADS
+
+    Py_DECREF(counts);
+    PyBuffer_Release(&buf);
+    return (PyObject *)out;
+}
+
+/* Literal bytes [from, upto) as packets of at most 128. */
+static uint8_t *packbits_literal(uint8_t *o, const uint8_t *row, npy_intp from, npy_intp upto)
+{
+    while (from < upto) {
+        npy_intp take = upto - from < 128 ? upto - from : 128;
+        *o++ = (uint8_t)(take - 1);
+        memcpy(o, row + from, (size_t)take);
+        o += take;
+        from += take;
+    }
+    return o;
+}
+
+/* packbits_encode(plane) -> (counts uint32 (h,), bytes). Mirrors
+ * fallback._packbits_row packet for packet. */
+static PyObject *py_packbits_encode(PyObject *self, PyObject *args)
+{
+    PyObject *planeo;
+
+    if (!PyArg_ParseTuple(args, "O", &planeo))
+        return NULL;
+    PyArrayObject *plane = (PyArrayObject *)PyArray_FROMANY(
+        planeo, NPY_UINT8, 2, 2, NPY_ARRAY_IN_ARRAY);
+    if (plane == NULL)
+        return NULL;
+    const npy_intp h = PyArray_DIM(plane, 0), w = PyArray_DIM(plane, 1);
+    /* Worst case per row: every byte literal, one header per 128. */
+    const size_t cap = (size_t)h * (size_t)(w + w / 128 + 2) + 1;
+    uint8_t *buf = (uint8_t *)malloc(cap);
+    npy_intp dims[1] = {h};
+    PyArrayObject *counts = (PyArrayObject *)PyArray_ZEROS(1, dims, NPY_UINT32, 0);
+    if (buf == NULL || counts == NULL) {
+        free(buf);
+        Py_XDECREF(counts);
+        Py_DECREF(plane);
+        return PyErr_NoMemory();
+    }
+    const uint8_t *px = (const uint8_t *)PyArray_DATA(plane);
+    uint32_t *cv = (uint32_t *)PyArray_DATA(counts);
+    uint8_t *o = buf;
+
+    Py_BEGIN_ALLOW_THREADS
+    for (npy_intp y = 0; y < h; y++) {
+        const uint8_t *row = px + y * w;
+        uint8_t *start = o;
+        npy_intp lit = 0, s = 0;
+        while (s < w) {
+            npy_intp e = s + 1;
+            while (e < w && row[e] == row[s])
+                e++;
+            npy_intp length = e - s;
+            if (length >= 3) {
+                o = packbits_literal(o, row, lit, s);
+                lit = e;
+                while (length > 0) {
+                    npy_intp take = length < 128 ? length : 128;
+                    if (take >= 2) {
+                        *o++ = (uint8_t)(257 - take);
+                        *o++ = row[s];
+                    } else {
+                        lit = e - 1;
+                    }
+                    length -= take;
+                }
+            }
+            s = e;
+        }
+        o = packbits_literal(o, row, lit, w);
+        cv[y] = (uint32_t)(o - start);
+    }
+    Py_END_ALLOW_THREADS
+
+    Py_DECREF(plane);
+    PyObject *data = PyBytes_FromStringAndSize((const char *)buf, (Py_ssize_t)(o - buf));
+    free(buf);
+    if (data == NULL) {
+        Py_DECREF(counts);
+        return NULL;
+    }
+    return Py_BuildValue("(NN)", (PyObject *)counts, data);
+}
+
 /* ---- module ------------------------------------------------------------- */
 
 static PyMethodDef methods[] = {
@@ -352,6 +521,10 @@ static PyMethodDef methods[] = {
     {"blend_rect", (PyCFunction)(void (*)(void))py_blend_rect,
      METH_VARARGS | METH_KEYWORDS,
      "blend_rect(dst, src, mode=0, opacity=255, mask=None, out=None)"},
+    {"packbits_decode", py_packbits_decode, METH_VARARGS,
+     "packbits_decode(data, counts, rowbytes) -> (n, rowbytes) uint8 array"},
+    {"packbits_encode", py_packbits_encode, METH_VARARGS,
+     "packbits_encode(plane) -> (counts, bytes)"},
     {NULL, NULL, 0, NULL}
 };
 

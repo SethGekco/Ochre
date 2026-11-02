@@ -408,3 +408,112 @@ def flood_fill(plane, x, y, tolerance, connectivity=4, mask=None):
             if run is not None:
                 stack.append((run, right, nrow))
     return out
+
+
+# ---- PackBits (the RLE of PSD, TIFF and Mac PICT) ---------------------------
+
+def packbits_decode(data, counts, rowbytes):
+    """Decode PackBits rows into an (len(counts), rowbytes) uint8 array.
+
+    `data` holds the encoded rows back to back and counts[i] is row i's
+    encoded length, as a PSD's RLE byte-count table gives them. Per row, a
+    header byte h < 128 copies the next h + 1 bytes literally, h > 128
+    repeats the next byte 257 - h times, and 128 is a no-op. Malformed rows
+    decode the same way everywhere: a packet that would write past the end
+    of the row is cut there, a literal cut off by the end of the row's input
+    keeps the bytes that are present, a run header with no byte after it
+    ends the row, and a row that decodes short is zero-filled. Row lengths
+    adding up to more than len(data) are refused (ValueError).
+    """
+    counts = np.asarray(counts, dtype=np.int64).ravel()
+    rowbytes = int(rowbytes)
+    data = bytes(data)
+    if rowbytes < 0 or (counts.size and (int(counts.min()) < 0
+                                         or int(counts.sum()) > len(data))):
+        raise ValueError("PackBits rows run past the end of the data")
+    out = bytearray(counts.size * rowbytes)
+    src = 0
+    for row, count in enumerate(counts.tolist()):
+        seg = data[src:src + count]
+        src += count
+        # Decoding on past a full row only adds bytes the cut below drops,
+        # so the loop needs no per-packet check of the output length.
+        buf = bytearray()
+        i = 0
+        while i < count:
+            h = seg[i]
+            if h < 128:
+                buf += seg[i + 1:i + h + 2]
+                i += h + 2
+            elif h > 128:
+                if i + 1 >= count:
+                    break
+                buf += seg[i + 1:i + 2] * (257 - h)
+                i += 2
+            else:
+                i += 1
+        n = min(len(buf), rowbytes)
+        out[row * rowbytes:row * rowbytes + n] = buf[:n]
+    return np.frombuffer(out, dtype=np.uint8).reshape(counts.size, rowbytes)
+
+
+def _packbits_row(row, out):
+    """Append one row's PackBits encoding to `out` (a bytearray).
+
+    The row is cut into maximal runs of equal bytes. A run of three or more
+    becomes repeat packets of up to 128 bytes; a remainder of one joins the
+    literal bytes that follow, a remainder of two is a repeat packet of its
+    own. Runs of one or two bytes are gathered into literal packets of up
+    to 128 bytes. This exact packet choice is the contract the C encoder
+    matches byte for byte.
+    """
+    n = len(row)
+    if n == 0:
+        return
+    arr = np.frombuffer(row, np.uint8)
+    starts = np.concatenate(([0], np.nonzero(np.diff(arr))[0] + 1)).tolist()
+    ends = starts[1:] + [n]
+    lit = 0                    # where the pending literal bytes begin
+
+    def flush(upto):
+        k = lit
+        while k < upto:
+            take = min(128, upto - k)
+            out.append(take - 1)
+            out.extend(row[k:k + take])
+            k += take
+    for s, e in zip(starts, ends):
+        length = e - s
+        if length < 3:
+            continue           # stays in the pending literal
+        flush(s)
+        lit = e
+        while length > 0:
+            take = min(128, length)
+            if take >= 2:
+                out.append(257 - take)
+                out.append(row[s])
+            else:
+                lit = e - 1    # one byte left over: it opens the next literal
+            length -= take
+    flush(n)
+
+
+def packbits_encode(plane):
+    """PackBits-encode every row of a 2-D uint8 plane.
+
+    Returns (counts, data): counts an (h,) uint32 array of each row's
+    encoded length, data the encoded rows back to back -- the RLE byte-count
+    table and the stream that follows it in a PSD. See _packbits_row for
+    the exact packets chosen.
+    """
+    plane = np.ascontiguousarray(plane, dtype=np.uint8)
+    if plane.ndim != 2:
+        raise ValueError("packbits_encode wants a 2-D plane")
+    out = bytearray()
+    counts = np.zeros(plane.shape[0], dtype=np.uint32)
+    for y in range(plane.shape[0]):
+        before = len(out)
+        _packbits_row(plane[y].tobytes(), out)
+        counts[y] = len(out) - before
+    return counts, bytes(out)

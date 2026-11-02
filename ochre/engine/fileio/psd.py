@@ -26,7 +26,7 @@ import struct
 
 import numpy as np
 
-from .. import budget
+from .. import accel, budget
 from ..atomic import write_bytes
 
 # Photoshop blend keys <-> Ochre blend modes. "pass" is a group's Pass
@@ -47,64 +47,28 @@ MAX_CHANNELS = 56
 
 
 # ---- PackBits ------------------------------------------------------------------------
+#
+# The RLE most PSDs use. Decoding and encoding run in the C accelerator when
+# it is built (whole channels at a time, no Python per packet); the numpy
+# backend's versions are the specification (accel/fallback.py).
 
 def packbits_decode(data, expected):
     """Decode one PackBits-compressed row to `expected` bytes."""
-    out = bytearray()
-    i, n = 0, len(data)
-    while i < n and len(out) < expected:
-        h = data[i]
-        i += 1
-        if h < 128:
-            out += data[i:i + h + 1]
-            i += h + 1
-        elif h > 128:
-            out += bytes((data[i],)) * (257 - h)
-            i += 1
-        # 128 is a no-op by the spec.
-    if len(out) < expected:
-        out += bytes(expected - len(out))
-    return bytes(out[:expected])
+    return accel.packbits_decode(data, [len(data)], expected).tobytes()
 
 
 def packbits_encode(row):
     """Encode one row (bytes) with PackBits; runs of 3+ become repeat packets."""
-    row = bytes(row)
-    n = len(row)
-    if n == 0:
-        return b""
-    arr = np.frombuffer(row, np.uint8)
-    # Boundaries between runs of equal bytes.
-    change = np.nonzero(np.diff(arr))[0] + 1
-    starts = np.concatenate(([0], change))
-    lengths = np.diff(np.concatenate((starts, [n])))
-    out = bytearray()
-    lit = bytearray()
+    row = np.frombuffer(bytes(row), np.uint8)
+    return accel.packbits_encode(row.reshape(1, -1))[1]
 
-    def flush_lit():
-        k = 0
-        while k < len(lit):
-            chunk = lit[k:k + 128]
-            out.append(len(chunk) - 1)
-            out.extend(chunk)      # extend, not +=: += would make `out` local here
-            k += 128
-        lit.clear()
-    for s, length in zip(starts.tolist(), lengths.tolist()):
-        if length >= 3:
-            flush_lit()
-            v = row[s]
-            while length > 0:
-                take = min(128, length)
-                if take >= 2:
-                    out.append(257 - take)
-                    out.append(v)
-                else:
-                    lit.append(v)
-                length -= take
-        else:
-            lit += row[s:s + length]
-    flush_lit()
-    return bytes(out)
+
+def _rle_rows(r, rows, rowbytes, psb):
+    """`rows` PackBits rows read from `r`: the byte-count table, then the
+    data. Returns (rows, rowbytes) uint8."""
+    width = 4 if psb else 2
+    counts = np.frombuffer(r.take(rows * width), ">u4" if psb else ">u2")
+    return accel.packbits_decode(r.take(int(counts.sum(dtype=np.int64))), counts, rowbytes)
 
 
 # ---- reading ---------------------------------------------------------------------------
@@ -152,8 +116,7 @@ def _channel(r, w, h, depth, psb, length):
     if comp == 0:
         raw = r.take(rowbytes * h)
     elif comp == 1:
-        counts = [r.u32() if psb else r.u16() for _ in range(h)]
-        raw = b"".join(packbits_decode(r.take(c), rowbytes) for c in counts)
+        raw = _rle_rows(r, h, rowbytes, psb).tobytes()
     elif comp in (2, 3):
         # Bounded by what the channel can hold: a zip bomb in a channel
         # stops at rowbytes * h instead of at the end of memory.
@@ -339,10 +302,9 @@ def _read_composite(r, w, h, nchan, depth, mode, psb):
     rowbytes = w * bpp
     chans = []
     if comp == 1:
-        counts = [r.u32() if psb else r.u16() for _ in range(h * nchan)]
+        rows = _rle_rows(r, h * nchan, rowbytes, psb)
         for c in range(nchan):
-            raw = b"".join(packbits_decode(r.take(n), rowbytes) for n in counts[c * h:(c + 1) * h])
-            chans.append(raw)
+            chans.append(rows[c * h:(c + 1) * h].tobytes())
     elif comp == 0:
         for c in range(nchan):
             chans.append(r.take(rowbytes * h))
@@ -506,9 +468,8 @@ def _load(path, settings=None):
 
 def _rle_channel(plane):
     """(compression=1) + row byte counts + PackBits rows, for one channel."""
-    h = plane.shape[0]
-    rows = [packbits_encode(plane[y].tobytes()) for y in range(h)]
-    return struct.pack(">H", 1) + b"".join(struct.pack(">H", len(x)) for x in rows) + b"".join(rows)
+    counts, data = accel.packbits_encode(plane)
+    return struct.pack(">H", 1) + counts.astype(">u2").tobytes() + data
 
 
 def _pascal_bytes(name, pad=4):
@@ -665,11 +626,9 @@ def save(doc, path, compositor=None):
     lm = layer_info + struct.pack(">I", 0)                    # no global mask info
     body += struct.pack(">I", len(lm)) + lm
     merged = _matte(comp.composite(doc.bounds, frame))
-    planes = [merged[..., c] for c in (0, 1, 2, 3)]
-    rows = [[packbits_encode(p[y].tobytes()) for y in range(height)] for p in planes]
-    body += struct.pack(">H", 1)
-    body += b"".join(struct.pack(">H", len(x)) for chan in rows for x in chan)
-    body += b"".join(x for chan in rows for x in chan)
+    # All four channels' rows in one table, then all their data.
+    counts, data = accel.packbits_encode(np.moveaxis(merged, 2, 0).reshape(4 * height, width))
+    body += struct.pack(">H", 1) + counts.astype(">u2").tobytes() + data
     write_bytes(path, head + body)
     return warnings
 
