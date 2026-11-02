@@ -78,7 +78,7 @@ class PreferencesDialog(QDialog):
         if self.ctl.state_dir:
             path = os.path.join(self.ctl.state_dir, "preferences.ini")
             Settings.save_user(path, changed)
-            self.ctl.settings.apply_user(path)
+            self.ctl.settings.reapply_user(path)
         super().accept()
 
 

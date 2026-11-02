@@ -114,6 +114,9 @@ class Controller:
         # Painting goes to the active layer's MASK rather than its pixels.
         self.editing_mask = False
         self.recording = None           # an Action being recorded
+        # Autosave and crash recovery (ui/recovery.py). The window opens it;
+        # a bare controller -- a script, most tests -- has none.
+        self.recovery = None
 
     # ---- events ----------------------------------------------------------
 
@@ -384,6 +387,7 @@ class Controller:
                 self.path = target
                 self.dirty_since_save = False
                 self._saved_marker = self.history.marker()
+                self._drop_recovery()
                 self.emit("document.saved", path=target)
                 return target
             if guard.failed:
@@ -404,6 +408,7 @@ class Controller:
             export_flat(self.doc, target)
         self.dirty_since_save = False
         self._saved_marker = self.history.marker()
+        self._drop_recovery()
         self.emit("document.saved", path=target)
         return target
 
@@ -412,7 +417,7 @@ class Controller:
                 "path", "dirty_since_save", "_saved_marker", "active_layer",
                 "_pending", "quick_mask", "last_measure", "_history_src",
                 "editing_mask", "smart_link", "snapshots", "guides_locked", "save_convert",
-                "save_cache")
+                "save_cache", "recovery_token", "display_name", "recovered_from")
 
     def _capture(self):
         return {k: getattr(self, k, None) for k in self._PER_DOC}
@@ -433,7 +438,8 @@ class Controller:
             if i == self.current_doc:
                 out.append(self.title)
                 continue
-            name = self._doc_name(state.get("path"), state.get("smart_link"))
+            name = self._doc_name(state.get("path"), state.get("smart_link"),
+                                  state.get("display_name"))
             out.append(("*" if self._state_modified(state) else "") + name)
         return out
 
@@ -486,6 +492,9 @@ class Controller:
         index = self.current_doc if index is None else index
         if not (0 <= index < len(self.documents)):
             return False
+        # Closing is the user's decision about the work; its recovery copy
+        # must not outlive the tab and come back after the next crash.
+        self._drop_recovery(None if index == self.current_doc else self.documents[index])
         if index == self.current_doc:
             if self.tool is not None and self.tool.active:
                 self.tool.cancel(self._context())
@@ -539,6 +548,12 @@ class Controller:
         # autosave) encodes only the planes that changed since.
         from ..engine.fileio.ochre_format import EncodeCache
         self.save_cache = EncodeCache()
+        # Autosave: the name of this document's recovery copy (made on its
+        # first snapshot), and for a recovered document its tab name and the
+        # file it was recovered from.
+        self.recovery_token = None
+        self.display_name = None
+        self.recovered_from = None
         self.snapshots = []            # History snapshots: [(name, document copy)]
         self.guides_locked = False
         if self.session is not None and link is None:
@@ -575,16 +590,171 @@ class Controller:
 
     @property
     def title(self):
-        return ("*" if self.is_modified() else "") + self._doc_name(self.path, getattr(self, "smart_link", None))
+        return ("*" if self.is_modified() else "") + self.document_name
+
+    @property
+    def document_name(self):
+        return self._doc_name(self.path, getattr(self, "smart_link", None),
+                              getattr(self, "display_name", None))
 
     @staticmethod
-    def _doc_name(path, link):
+    def _doc_name(path, link, name=None):
         if path:
             return os.path.basename(path)
         if link is not None:
             layer = link[0].layer(link[1])
             return "%s (contents)" % (layer.name if layer is not None else "Smart Object")
-        return "Untitled"
+        return name or "Untitled"
+
+    # ---- autosave and crash recovery -------------------------------------
+
+    def enable_recovery(self):
+        """Open this instance's recovery session (ui/recovery.py). True when
+        there is one: it needs a state dir and a platform with flock."""
+        if self.recovery is None and self.state_dir:
+            from .recovery import RecoveryStore
+            store = RecoveryStore(self.state_dir)
+            if store.open():
+                self.recovery = store
+        return self.recovery is not None
+
+    def shutdown_recovery(self):
+        """A clean exit: let snapshots in flight land, then delete them all."""
+        if self.recovery is not None:
+            self.recovery.close()
+            self.recovery = None
+
+    def autosave_enabled(self):
+        return self.recovery is not None and bool(self.settings.get("Recovery", "Autosave"))
+
+    def _doc_state(self, index):
+        """A document's per-document state; the current one's read live."""
+        return self._capture() if index == self.current_doc else self.documents[index]
+
+    def _set_doc_state(self, index, key, value):
+        if index == self.current_doc:
+            setattr(self, key, value)
+        else:
+            self.documents[index][key] = value
+
+    def autosave(self):
+        """One autosave tick: snapshot every document whose unsaved work
+        changed since its last snapshot. Returns how many were started.
+
+        Cheap where it runs: taking a snapshot reads the manifest and the
+        save cache, and the planes that changed are encoded and written on
+        the recovery worker thread. A document mid-stroke is skipped -- half
+        a stroke is not a state anyone wants back -- and caught next tick.
+        """
+        if not self.autosave_enabled():
+            return 0
+        store = self.recovery
+        started = 0
+        for index in range(len(self.documents)):
+            state = self._doc_state(index)
+            if state is None or state.get("doc") is None or state.get("history") is None:
+                continue
+            token = state.get("recovery_token")
+            current = index == self.current_doc
+            if not (self.is_modified() if current else self._state_modified(state)):
+                # Saved, or undone back to the saved state: nothing to keep.
+                if token and store.has(token):
+                    store.remove(token)
+                continue
+            if current and self.tool is not None and self.tool.active:
+                continue
+            if token and store.busy(token):
+                continue                       # its last snapshot is still being written
+            marker = state["history"].marker()
+            last = store.written(token) if token else None
+            if last is not None and last[1] is marker[1] and last[2] == marker[2] \
+                    and not store.was_torn(token):
+                continue                       # unchanged since its last snapshot
+            if self._autosave_one(index, state) is not None:
+                started += 1
+        return started
+
+    def _autosave_one(self, index, state):
+        """Queue one document's snapshot. Returns the write's Future."""
+        from ..engine.fileio.ochre_format import Snapshot
+        import uuid
+        store = self.recovery
+        token = state.get("recovery_token")
+        if token is None:
+            token = uuid.uuid4().hex[:12]
+            self._set_doc_state(index, "recovery_token", token)
+        # After a torn write the planes that kept moving are copied, so the
+        # retry cannot be torn again; otherwise they are read live.
+        snap = Snapshot(state["doc"], state.get("selection"), 0, state.get("save_cache"),
+                        verify=False, copy=store.was_torn(token))
+        name = self._doc_name(state.get("path"), state.get("smart_link"),
+                              state.get("display_name"))
+        return store.write(token, snap, name, state.get("path") or state.get("recovered_from"),
+                           what=state["history"].marker(), tab=index)
+
+    def _drop_recovery(self, state=None):
+        """Delete a document's recovery copy (the current one by default)."""
+        token = (state or {}).get("recovery_token") if state is not None \
+            else getattr(self, "recovery_token", None)
+        if self.recovery is not None and token:
+            self.recovery.remove(token)
+
+    def drop_all_recovery(self):
+        """Autosave was turned off: keep no snapshots at all."""
+        for index in range(len(self.documents)):
+            state = self._doc_state(index)
+            if state is not None:
+                self._drop_recovery(state)
+
+    def recover_documents(self, orphans):
+        """Open what crashed sessions left (recovery.OrphanSession, as
+        RecoveryStore.orphans() returns them) as unsaved "<name>-Recovered"
+        documents. Returns (recovered names, names that would not open).
+
+        A recovered document is untitled -- Save asks where, so the original
+        file is never overwritten by accident -- and counts as modified from
+        the start. Each is snapshotted into THIS session before its orphan is
+        deleted, so a second crash straight after loses nothing; a session
+        any of whose copies did not land, or would not open and could not be
+        moved aside, is kept for next time instead.
+        """
+        from .recovery import recovered_name
+        recovered, failed, keep, opened = [], [], set(), []
+        for orphan in orphans:
+            for rd in orphan.documents:
+                try:
+                    doc, mask = load(rd.snapshot, settings=self.settings)
+                except Exception:                           # noqa: BLE001
+                    failed.append(rd.name)
+                    if not orphan.quarantine(rd):
+                        keep.add(orphan.directory)
+                    continue
+                self._adopt(doc, path=None)
+                if mask is not None:
+                    self.selection.mask = mask
+                    self.selection._bbox = None
+                self.display_name = recovered_name(rd.name)
+                self.recovered_from = rd.path or None
+                # Never saved: no history marker can equal this one.
+                self._saved_marker = (None, object(), -1)
+                self.dirty_since_save = True
+                self.documents[self.current_doc] = self._capture()
+                recovered.append(self.display_name)
+                opened.append((orphan, self.current_doc))
+        writes = [(orphan, self._autosave_one(index, self._doc_state(index))
+                   if self.recovery is not None else None) for orphan, index in opened]
+        for orphan, future in writes:
+            if future is None or not future.result():
+                keep.add(orphan.directory)
+        for orphan in orphans:
+            if orphan.directory in keep:
+                orphan.release()
+            else:
+                orphan.discard()
+        if opened:
+            self.emit("document.opened", document=self.doc, path=self.path)
+            self.emit("documents.changed")
+        return recovered, failed
 
     def addons_host(self, addon_id):
         """A Host bound to one addon, for calls made after registration."""

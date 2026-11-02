@@ -67,6 +67,13 @@ DEFAULTS = {
         "MonitorProfile": "",
         "ProofIntent": "perceptual",   # perceptual | relative | saturation | absolute
     },
+    "Recovery": {
+        # Autosave: every few minutes each document with unsaved work is
+        # snapshotted into the recovery folder of the state directory, and a
+        # start after a crash offers it back. Off keeps no snapshots at all.
+        "Autosave": True,
+        "AutosaveMinutes": 5,
+    },
     "Planes": {
         # Plane names the core recognises. Addons append to this list, so a
         # typo'd plane name is an error rather than a silently orphaned array.
@@ -149,6 +156,14 @@ class Settings:
                 self._cache[(section, key)] = _coerce(default, raw)
                 n += 1
         return n
+
+    def reapply_user(self, path):
+        """Resolve afresh from the shipped configuration, then apply the
+        user's preferences. apply_user alone only ever adds: a preference
+        put back to its default is left out of the file, and its old value
+        would stay in force until a restart."""
+        self._resolve()
+        return self.apply_user(path)
 
     @staticmethod
     def save_user(path, values):
