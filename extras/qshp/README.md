@@ -36,9 +36,13 @@ Copy `libqshp.so` (`qshp.dll` on Windows) into the program's Qt
 
 | Program / package | Folder |
 | --- | --- |
-| Kooka Pictura `.deb` / `.rpm` | `/opt/kooka-pictura/plugins/imageformats/` (needs root) |
+| Kooka Pictura `.deb` / `.rpm` | `/opt/kooka-pictura/plugins/imageformats/` (needs root; checked against the 0.3.0 `.deb`) |
 | Programs using the system Qt 6 (Debian/Ubuntu) | `/usr/lib/x86_64-linux-gnu/qt6/plugins/imageformats/` |
 | Read-only bundles (AppImage, Flatpak) | any folder `X/imageformats/`, then start the program with `QT_PLUGIN_PATH=X` |
+
+In Kooka Pictura, choose **All files (\*)** in the Open dialog's type list
+to see `.shp` files (its "All Formats" list names only the formats it knows),
+or drag the file onto the window.
 
 A plugin built against Qt 6.N loads in any Qt 6.M where M >= N, so the
 release build uses an old Qt 6 on purpose.
@@ -106,6 +110,11 @@ Needs CMake, a C++17 compiler and the Qt development package
   holds through a full-colour RGBA PNG, which is what an editor exports, for
   120 of 120 sampled files.
 
+- **In Kooka Pictura 0.3.0:** with the plugin and `unittem.pal` dropped into
+  the unpacked `.deb`'s `imageformats` folder, Kooka opened a 32-frame turret
+  SHP as a 544x256 sheet whose pixels match `qshp-convert`'s exactly. Kooka's
+  own PNG export of that document, converted back with `qshp-convert`, gave
+  all 32 frames back unchanged.
 - **Qt versions:** built against Qt 6.4 (Ubuntu's `qt6-base-dev`), the plugin
   loads in a separately bundled Qt 6.11.2, the same minor version Kooka
   Pictura ships. It decodes the same as the Qt 5 build there.
