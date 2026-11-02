@@ -9,7 +9,9 @@ of them plus a way of saying where the hole is:
   harmonic_fill    The smoothest surface through the hole's border (Laplace's
                    equation). No texture at all, but instant, and exactly
                    right for small blemishes on smooth surfaces. Also the
-                   engine of seamless blending below.
+                   engine of seamless blending below. With matched_grain
+                   on top -- noise as strong, and as coloured, as the grain
+                   around the hole -- it is Photoshop's Create Texture.
 
   seamless_blend   Poisson image editing (Perez et al., 2003), solved the
                    membrane way: paste the source, then add the harmonic
@@ -159,6 +161,66 @@ def _dilate(mask, r):
 
 def _erode(mask, r):
     return ~_dilate(~mask, r)
+
+
+# ---- matched grain ------------------------------------------------------------------
+# Spot Healing's "Create Texture" (Kooka Pictura's healing/mod.rs,
+# add_matched_noise): a harmonic fill is perfectly smooth, which on a grainy
+# photo reads as a plastic patch. Grain matched to the ring around the hole
+# hides it.
+
+GRAIN_RING = 6          # px of known pixels around the hole that set the grain
+GRAIN_SEED = 0          # fixed: the same stroke heals the same way every time
+
+
+def _residual(work):
+    """Each pixel minus the mean of its four neighbours (edges clamped):
+    the fine grain, with smooth shading and gradients taken out."""
+    p = np.pad(work, ((1, 1), (1, 1), (0, 0)), mode="edge")
+    return work - (p[:-2, 1:-1] + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]) * 0.25
+
+
+def matched_grain(work, hole, seed=GRAIN_SEED, ring=GRAIN_RING):
+    """Add noise inside `hole` with the colour statistics of the grain in the
+    ring of known pixels around it. work: float premultiplied (H, W, 4),
+    modified in place and returned.
+
+    The ring's grain is measured as the residual against the 4-neighbour
+    mean, whose variance is 1.25 times the noise's for uncorrelated noise,
+    so the added noise has the ring's own strength. Its three channels keep
+    the ring's correlation (a 3x3 covariance), so luminance grain stays
+    grey and colour noise stays coloured. Outliers -- an edge running
+    through the ring -- are trimmed before measuring, so an object's
+    outline does not read as grain. Kooka draws flat noise with the plain
+    RMS; this is the same idea measured more carefully.
+    """
+    hole = np.asarray(hole, dtype=bool)
+    if not hole.any():
+        return work
+    # Ring pixels whose neighbours are all known, so the residual is the
+    # picture's grain and not the hole's.
+    near = _dilate(hole, 1)
+    band = _dilate(hole, ring) & ~near
+    if band.sum() < 16:
+        return work
+    r = _residual(work[..., :3].astype(np.float64))[band]
+    mad = np.median(np.abs(r - np.median(r, axis=0)), axis=0) * 1.4826
+    keep = (np.abs(r) <= 3.0 * np.maximum(mad, 1e-6)).all(axis=1)
+    if keep.sum() < 16:
+        return work
+    cov = np.cov(r[keep].T) / 1.25
+    # Trimming at 3 sigma removes about 0.3 % of a normal sample's tails and
+    # shrinks its variance by about 2.7 %: put that back.
+    cov = cov / 0.973
+    vals, vecs = np.linalg.eigh(cov)
+    root = vecs * np.sqrt(np.maximum(vals, 0.0))
+    rng = np.random.default_rng(seed)
+    noise = rng.standard_normal((int(hole.sum()), 3)) @ root.T
+    inside = work[hole]
+    alpha = inside[:, 3:4]
+    inside[:, :3] = np.clip(inside[:, :3] + noise, 0.0, alpha)
+    work[hole] = inside
+    return work
 
 
 # ---- content-aware fill ------------------------------------------------------------
@@ -527,18 +589,24 @@ def content_aware_fill(rgba, hole, source=None, patch=7, seed=0, quality=1.0,
 
 
 def fill_hole(rgba, hole, method="content_aware", **kw):
-    """Dispatch by name: 'content_aware' or 'smooth'. Returns new uint8 RGBA."""
+    """Dispatch by name: 'content_aware', 'smooth', or 'texture' (smooth plus
+    grain matched to the surroundings, Photoshop's Create Texture).
+    Returns new uint8 RGBA."""
     hole = np.asarray(hole, dtype=bool)
-    if method == "smooth":
+    if method in ("smooth", "texture"):
         bb = _bbox(hole)
         if bb is None:
             return rgba.copy()
         y0, x0, y1, x1 = bb
         H, W = hole.shape
-        pad = 4
+        # The grain is measured on a ring around the hole, so texture needs
+        # that much of the picture in the window.
+        pad = 4 if method == "smooth" else GRAIN_RING + 2
         ya, xa, yb, xb = max(0, y0 - pad), max(0, x0 - pad), min(H, y1 + pad), min(W, x1 + pad)
         work = to_work(rgba[ya:yb, xa:xb])
         harmonic_fill(work, hole[ya:yb, xa:xb])
+        if method == "texture":
+            matched_grain(work, hole[ya:yb, xa:xb], seed=kw.get("seed", GRAIN_SEED))
         out = rgba.copy()
         res = from_work(work)
         sub = out[ya:yb, xa:xb]

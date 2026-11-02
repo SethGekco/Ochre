@@ -195,6 +195,57 @@ def main():
           close_fraction(cell.plane("rgba"), truth, inside) > 0.8,
           "(%.3f)" % close_fraction(cell.plane("rgba"), truth, inside))
 
+    # ---- Spot Healing, Create Texture: matched grain ---------------------------
+    # A grainy photo: soft shading plus luminance grain (the same in all
+    # three channels, as a sensor's mostly is). A smooth fill over it is a
+    # plastic patch; Create Texture puts grain back, as strong as around it.
+    def grainy():
+        rng = np.random.default_rng(7)
+        img = np.zeros((100, 120, 4), np.uint8)
+        img[..., 3] = 255
+        shade = np.linspace(90, 150, 120)[None, :, None]
+        grain = rng.normal(0, 12, (100, 120, 1))
+        img[..., :3] = np.clip(shade * np.array([1.0, 0.9, 0.7]) + grain, 0, 255)
+        img[45:55, 55:65, :3] = BLEMISH[:3]
+        return img
+
+    def local_std(a, mask):
+        """Mean per-channel standard deviation of 4x4 windows inside mask."""
+        out = []
+        for y in range(0, a.shape[0] - 3, 4):
+            for x in range(0, a.shape[1] - 3, 4):
+                if mask[y:y + 4, x:x + 4].all():
+                    out.append(a[y:y + 4, x:x + 4, :3].astype(float).std(axis=(0, 1)).mean())
+        return float(np.mean(out))
+
+    def heal(kind):
+        ctl = Controller(Settings(DATA), DATA, addon_dirs=[], state_dir=tempfile.mkdtemp())
+        ctl.new_document(120, 100, background=None)
+        cell = ctl.doc.cell(ctl.active_layer)
+        cell.plane("rgba")[...] = grainy()
+        cell._touched(ctl.doc.bounds)
+        ctl.set_tool("spot_heal", size=22, type=kind)
+        drag(ctl, [(56, 50), (60, 50), (64, 50)])
+        return cell.plane("rgba").copy()
+
+    textured = heal("texture")
+    before = grainy()
+    healed = np.any(textured != before, axis=-1)
+    core = inpaint._erode(healed, 2)
+    ring = inpaint._dilate(healed, 8) & ~inpaint._dilate(healed, 1)
+    want, got = local_std(before, ring), local_std(textured, core)
+    plastic = local_std(heal("smooth"), core)
+    check("Create Texture heals the blemish",
+          not (textured[45:55, 55:65, :3] == np.array(BLEMISH[:3], np.uint8)).all(-1).any())
+    check("...with grain as strong as the ring's (local std %.1f vs %.1f; smooth %.1f)"
+          % (got, want, plastic), core.sum() > 150 and abs(got - want) < 0.2 * want
+          and plastic < 0.4 * want)
+    hue = textured[core][:, :3].astype(float)
+    check("...grey grain stays grey: the channels move together",
+          np.corrcoef(hue[:, 0] - hue[:, 0].mean(), hue[:, 2] - hue[:, 2].mean())[0, 1] > 0.8)
+    check("...and the same stroke heals the same way every time (fixed seed)",
+          np.array_equal(textured, heal("texture")))
+
     # ---- Remove tool ----------------------------------------------------------
     ctl, cell, truth = fresh(160, 120)
     cell.fill(Rect(70, 50, 18, 18), BLEMISH)

@@ -8,7 +8,7 @@ import numpy as np
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+from PySide6.QtWidgets import (QFileDialog, QLabel, QMainWindow, QMessageBox,
                                QStatusBar)
 
 from ..engine import accel
@@ -484,34 +484,6 @@ class MainWindow(QMainWindow):
         if ok:
             self._sel(self.ctl.load_selection, names.index(name))
 
-    def _slider_dialog(self, title, fields, on_change=None):
-        """A small dialog of labelled integer sliders. Returns values or None."""
-        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QSlider
-        dlg = QDialog(self)
-        dlg.setWindowTitle(title)
-        form = QFormLayout(dlg)
-        sliders = {}
-        for key, label, lo, hi, val in fields:
-            sl = QSlider(Qt.Horizontal)
-            sl.setRange(lo, hi)
-            sl.setValue(val)
-            lab = QLabel(str(val))
-            sl.valueChanged.connect(lambda v, l=lab: l.setText(str(v)))
-            if on_change is not None:
-                sl.valueChanged.connect(lambda _v: on_change({k: x.value() for k, x in sliders.items()}))
-            row = QHBoxLayout()
-            row.addWidget(sl, 1)
-            row.addWidget(lab)
-            form.addRow(label, row)
-            sliders[key] = sl
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        form.addRow(buttons)
-        if not dlg.exec():
-            return None
-        return {k: x.value() for k, x in sliders.items()}
-
     def do_refine_edge(self):
         """Select > Refine Edge, previewed on the marching ants as you drag."""
         if self.ctl.selection.mask is None:
@@ -526,15 +498,18 @@ class MainWindow(QMainWindow):
                                                          v["feather"], v["contrast"], v["shift"])
             self.ctl.selection._bbox = None
             self.canvas.viewport().update()
-        values = self._slider_dialog("Refine Edge", (
-            ("radius", "Edge detection radius", 0, 50, 4), ("smooth", "Smooth", 0, 100, 0),
-            ("feather", "Feather", 0, 50, 0), ("contrast", "Contrast", 0, 100, 0),
-            ("shift", "Shift edge", -100, 100, 0)), preview)
+        from .dialogs import RefineEdgeDialog
+        dlg = RefineEdgeDialog(self, preview)
+        ok = dlg.exec()
+        values = dlg.values()
         self.ctl.selection.mask = original
         self.ctl.selection._bbox = None
-        if values is not None:
+        if ok:
             self._sel(self.ctl.refine_selection, values["radius"], values["smooth"],
-                      values["feather"], values["contrast"], values["shift"])
+                      values["feather"], values["contrast"], values["shift"],
+                      values["decontaminate"], values["amount"], values["output"])
+            if values["output"] != "selection" or values["decontaminate"]:
+                self.layers_dock.sync()
         self.canvas.viewport().update()
 
     def do_sky_replacement(self):

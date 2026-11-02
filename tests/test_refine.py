@@ -51,6 +51,58 @@ def fresh(img):
     return ctl
 
 
+def _refine_edge_dialog(shot, rough, m, edge, tint):
+    """Select > Refine Edge as the user drives it: the dialog's Output
+    section, ticked and set, then OK."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError:
+        print("ok: Refine Edge dialog not checked (PySide6 unavailable)")
+        return
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from ochre.ui.bus import EventBus
+    from ochre.ui.config import UiSettings
+    from ochre.ui.dialogs import RefineEdgeDialog
+    from ochre.ui.mainwindow import MainWindow
+    app = QApplication.instance() or QApplication([])
+    ctl = Controller(Settings(DATA), DATA, EventBus(), addon_dirs=[],
+                     state_dir=tempfile.mkdtemp(prefix="ochre-refine-"))
+    win = MainWindow(ctl, UiSettings(DATA))
+    ctl.new_document(100, 100, background=None)
+    cell = ctl.doc.cell(ctl.active_layer)
+    cell.plane("rgba")[...] = shot
+    cell._touched(ctl.doc.bounds)
+    ctl.selection.mask = rough.copy()
+
+    seen = {}
+
+    def run(dlg):
+        dlg.sliders["radius"].setValue(6)
+        out = dlg.output
+        seen["before"] = out.currentData()
+        dlg.decontaminate.setChecked(True)
+        seen["switched"] = out.currentData()
+        seen["locked"] = not out.model().item(0).isEnabled() and dlg.amount.isEnabled()
+        dlg.amount.setValue(100)
+        return 1
+    real = RefineEdgeDialog.exec
+    RefineEdgeDialog.exec = run
+    try:
+        win.do_refine_edge()
+    finally:
+        RefineEdgeDialog.exec = real
+    check("the Refine Edge dialog: ticking Decontaminate Colors moves Output To from "
+          "Selection to New Layer with Layer Mask and locks the in-place outputs",
+          seen == {"before": "selection", "switched": "new_layer_mask", "locked": True})
+    layer = ctl.active_layer
+    px = ctl.doc.cell(layer).plane("rgba")
+    check("...and OK makes the cleaned, masked copy",
+          layer.mask is not None and len(ctl.doc.layers()) == 2
+          and np.array_equal(ctl.doc.cell(layer.mask).plane("rgba")[..., 0], m)
+          and tint(px)[edge].mean() < 0.5 * tint(shot)[edge].mean())
+    app.processEvents()
+
+
 def main():
     # ---- guided filter / refine edge ---------------------------------------------
     yy, xx = np.mgrid[:100, :100]
@@ -75,6 +127,64 @@ def main():
     check("Select > Refine Edge refines the real selection, undoably",
           int(((ctl.selection.mask >= 128) != disc).sum()) < err_rough * 0.75
           and ctl.history_labels()[-1] == "Refine Edge")
+
+    # ---- Refine Edge: Decontaminate Colors and Output To ----------------------------
+    # A subject with a soft 6 px edge, photographed on a green screen: the
+    # edge pixels are part subject, part green.
+    d = np.hypot(xx - 50, yy - 50)
+    cover = np.clip((28 - d) / 6.0, 0, 1)[..., None]
+    skin, green_bg = np.array([230, 200, 170.0]), np.array([0, 170, 0.0])
+    shot = np.full((100, 100, 4), 255, np.uint8)
+    shot[..., :3] = np.rint(cover * skin + (1 - cover) * green_bg)
+    rough = (d < 25).astype(np.uint8) * 255
+    tint = lambda a: a[..., 1].astype(float) - (a[..., 0].astype(float) + a[..., 2]) / 2
+    m = refine.refine_mask(shot, rough, radius=6)
+    edge = (m > 20) & (m < 235)
+    clean = refine.decontaminate(shot, m, 100)
+    check("Decontaminate Colors takes the green out of the soft edge (tint %.0f -> %.0f)"
+          % (tint(shot)[edge].mean(), tint(clean)[edge].mean()),
+          edge.sum() > 200 and tint(clean)[edge].mean() < 0.5 * tint(shot)[edge].mean())
+    half = refine.decontaminate(shot, m, 50)
+    check("...Amount scales it", tint(clean)[edge].mean() < tint(half)[edge].mean()
+          < tint(shot)[edge].mean())
+    check("...and leaves solid subject, background and alpha alone",
+          np.array_equal(clean[m == 255], shot[m == 255])
+          and np.array_equal(clean[m == 0], shot[m == 0])
+          and np.array_equal(clean[..., 3], shot[..., 3]))
+
+    ctl = fresh(shot)
+    source = ctl.active_layer
+    ctl.selection.mask = rough.copy()
+    n0 = len(ctl.history_labels())
+    ctl.refine_selection(radius=6, decontaminate=True, amount=100, output="selection")
+    layer = ctl.active_layer
+    check("Decontaminate with Output To Selection becomes New Layer with Layer Mask",
+          layer is not source and layer.mask is not None and not source.visible
+          and ctl.selection.mask is None)
+    px = ctl.doc.cell(layer).plane("rgba")
+    mpx = ctl.doc.cell(layer.mask).plane("rgba")[..., 0]
+    check("...the copy is cleaned and masked by the refined edge",
+          np.array_equal(mpx, m) and tint(px)[edge].mean() < 0.5 * tint(shot)[edge].mean())
+    check("...as ONE undo step", ctl.history_labels()[n0:] == ["Refine Edge"])
+    ctl.undo()
+    check("...which undoes it all",
+          ctl.doc.layer(layer.id) is None and source.visible
+          and np.array_equal(ctl.selection.mask, rough))
+
+    ctl.selection.mask = rough.copy()
+    ctl.refine_selection(radius=6, output="new_layer")
+    cut = ctl.doc.cell(ctl.active_layer).plane("rgba")
+    check("Output To New Layer bakes the edge into the copy's alpha, colours untouched",
+          ctl.active_layer.mask is None and np.array_equal(cut[..., 3], m)
+          and np.array_equal(cut[..., :3], shot[..., :3]))
+    ctl = fresh(shot)
+    ctl.selection.mask = rough.copy()
+    ctl.refine_selection(radius=6, output="layer_mask")
+    check("Output To Layer Mask masks the active layer itself",
+          len(ctl.doc.layers()) == 1 and ctl.active_layer.mask is not None
+          and np.array_equal(ctl.doc.cell(ctl.active_layer.mask).plane("rgba")[..., 0], m))
+
+    _refine_edge_dialog(shot, rough, m, edge, tint)
 
     # ---- sky ------------------------------------------------------------------------
     land = landscape()

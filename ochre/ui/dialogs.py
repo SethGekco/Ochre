@@ -1,7 +1,7 @@
 # Ochre - a layered image editor.
 # Copyright (C) 2026 Ochre contributors.
 # Licensed under the GNU General Public License v3 or later. See LICENSE.
-"""Small modal dialogs: resize, canvas size, layer properties.
+"""Small modal dialogs: resize, canvas size, layer properties, Refine Edge.
 
 Each one is a thin form over a controller method that is itself tested
 headlessly, so what is here is layout and validation and nothing that can
@@ -11,7 +11,7 @@ test can drive the form without exec().
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QFormLayout, QGridLayout, QHBoxLayout, QLabel,
+                               QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QRadioButton, QSlider, QSpinBox,
                                QVBoxLayout, QWidget)
 
@@ -263,3 +263,85 @@ class NewImageDialog(QDialog):
 
     def result(self):
         return (self.width.value(), self.height.value(), self.background.currentData())
+
+
+class RefineEdgeDialog(QDialog):
+    """Select > Refine Edge: the edge sliders, then CS6's Output section --
+    Decontaminate Colors with its Amount, and Output To.
+
+    Decontaminate Colors writes pixels, so while it is on the two outputs
+    that hold no pixels (Selection, Layer Mask) are disabled and the choice
+    moves to New Layer with Layer Mask, as Photoshop does. `on_change`
+    gets values() whenever an edge slider moves, for a live preview.
+    """
+
+    EDGE = (("radius", "Edge detection radius", 0, 50, 4), ("smooth", "Smooth", 0, 100, 0),
+            ("feather", "Feather", 0, 50, 0), ("contrast", "Contrast", 0, 100, 0),
+            ("shift", "Shift edge", -100, 100, 0))
+    OUTPUT_LABELS = (("selection", "Selection"), ("layer_mask", "Layer Mask"),
+                     ("new_layer", "New Layer"),
+                     ("new_layer_mask", "New Layer with Layer Mask"))
+
+    def __init__(self, parent=None, on_change=None):
+        super().__init__(parent)
+        self.setWindowTitle("Refine Edge")
+        self.on_change = on_change
+        form = QFormLayout()
+        self.sliders = {}
+        for key, label, lo, hi, val in self.EDGE:
+            self.sliders[key] = self._slider_row(form, label, lo, hi, val)
+            self.sliders[key].valueChanged.connect(self._edge_changed)
+
+        out = QGroupBox("Output")
+        oform = QFormLayout(out)
+        self.decontaminate = QCheckBox("Decontaminate Colors")
+        oform.addRow("", self.decontaminate)
+        self.amount = self._slider_row(oform, "Amount", 0, 100, 50)
+        self.output = QComboBox()
+        for value, label in self.OUTPUT_LABELS:
+            self.output.addItem(label, value)
+        oform.addRow("Output To", self.output)
+        self.decontaminate.toggled.connect(self._refresh_enabled)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(out)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._refresh_enabled()
+
+    @staticmethod
+    def _slider_row(form, label, lo, hi, val):
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(lo, hi)
+        slider.setValue(val)
+        shown = QLabel(str(val))
+        slider.valueChanged.connect(lambda v, l=shown: l.setText(str(v)))
+        row = QHBoxLayout()
+        row.addWidget(slider, 1)
+        row.addWidget(shown)
+        form.addRow(label, row)
+        return slider
+
+    def _edge_changed(self, _value):
+        if self.on_change is not None:
+            self.on_change(self.values())
+
+    def _refresh_enabled(self, *_):
+        decon = self.decontaminate.isChecked()
+        self.amount.setEnabled(decon)
+        model = self.output.model()
+        for i in range(2):
+            item = model.item(i)
+            if item is not None:
+                item.setEnabled(not decon)
+        if decon and self.output.currentIndex() <= 1:
+            self.output.setCurrentIndex(self.output.findData("new_layer_mask"))
+
+    def values(self):
+        out = {k: s.value() for k, s in self.sliders.items()}
+        out.update(decontaminate=self.decontaminate.isChecked(),
+                   amount=self.amount.value(), output=self.output.currentData())
+        return out

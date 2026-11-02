@@ -20,6 +20,9 @@ through .ochre. Export writes them back where Pillow can: EXIF to JPEG,
 PNG, WebP, TIFF and AVIF; XMP to all five. Pixel dimensions recorded in
 EXIF are updated to the exported size.
 
+LENS. `lens_exif` reads back the camera, lens and shot settings, which is
+how Lens Correction picks a lens profile for the photo.
+
 PRIVACY. `strip_gps` removes the GPS block from EXIF and every GPS property
 from XMP; `strip_metadata` writes neither. Both are export options and
 [Export] settings, so a Save can honor them as well as Export As.
@@ -135,6 +138,51 @@ def _xmp_of(img):
         value = tags.get(700)
         return value.encode("utf-8") if isinstance(value, str) else bytes(value)
     return None
+
+
+# ---- reading the camera and lens -------------------------------------------
+
+MAKE, MODEL = 0x010F, 0x0110
+F_NUMBER, FOCAL_LENGTH, SUBJECT_DISTANCE = 0x829D, 0x920A, 0x9206
+FOCAL_35MM, LENS_MAKE, LENS_MODEL = 0xA405, 0xA433, 0xA434
+
+
+def lens_exif(meta):
+    """What the kept EXIF says about the camera and lens, for Lens
+    Correction's profile match: {make, model, lens_make, lens} (text, ""
+    when absent) and {focal, focal35, aperture, distance} (mm, mm, f-number,
+    metres; None when absent or unusable)."""
+    out = {"make": "", "model": "", "lens_make": "", "lens": "",
+           "focal": None, "focal35": None, "aperture": None, "distance": None}
+    raw = _decode((meta or {}).get("exif_data"))
+    if not raw:
+        return out
+    from PIL import Image
+    try:
+        exif = Image.Exif()
+        exif.load(raw)
+        sub = exif.get_ifd(EXIF_IFD) if EXIF_IFD in exif else {}
+    except Exception:                                       # noqa: BLE001
+        return out
+
+    def text(tags, key):
+        value = tags.get(key)
+        if isinstance(value, bytes):
+            value = value.decode("latin-1", "replace")
+        return str(value).strip("\x00 ") if value is not None else ""
+
+    def number(key):
+        try:
+            value = float(sub.get(key))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+        return value if value == value and 0 < value < 1e6 else None
+
+    out.update(make=text(exif, MAKE), model=text(exif, MODEL),
+               lens_make=text(sub, LENS_MAKE), lens=text(sub, LENS_MODEL),
+               focal=number(FOCAL_LENGTH), focal35=number(FOCAL_35MM),
+               aperture=number(F_NUMBER), distance=number(SUBJECT_DISTANCE))
+    return out
 
 
 # ---- XMP surgery ----------------------------------------------------------

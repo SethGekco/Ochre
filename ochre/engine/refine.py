@@ -11,6 +11,11 @@ machine learning.
                  every small window, as a linear function of the image's
                  brightness, so it follows hair and leaves where the image
                  does. Then smooth / feather / contrast / shift edge.
+  decontaminate  Refine Edge's Decontaminate Colors: the colour a soft edge
+                 picked up from the old background is pulled toward the
+                 subject's own colour nearby, so a cut-out does not carry a
+                 green (or blue, or whatever it stood on) halo onto its new
+                 background.
   sky_mask       Photoshop's Sky Replacement's selection: a colour model
                  learned from the top of the frame, kept only where it is
                  connected to the top, refined with the guided filter.
@@ -92,6 +97,67 @@ def refine_mask(rgba, mask, radius=4, smooth=0, feather=0.0, contrast=0, shift=0
     if feather:
         m = _gauss(m, feather)
     return np.clip(np.rint(m * 255), 0, 255).astype(np.uint8)
+
+
+# Where Refine Edge puts its result, as Photoshop CS6's Output To lists
+# them. Decontaminate Colors changes pixels, so it needs one of the last two:
+# a selection or a mask has no colour to clean.
+OUTPUTS = ("selection", "layer_mask", "new_layer", "new_layer_mask")
+COLOR_OUTPUTS = ("new_layer", "new_layer_mask")
+
+# Decontaminate's search for solid subject colour: from a 5x5 window outward,
+# doubling, until every soft edge pixel has found some (a wide feathered edge
+# needs the far reach; a hard one is done at the first ring).
+_DECON_RADII = (2, 4, 8, 16, 32, 64)
+
+
+def decontaminate(rgba, mask, amount=50):
+    """Edge colours with the background's tint removed (uint8 RGBA).
+
+    For every pixel the mask covers only partly, the subject's own colour
+    is estimated as the mean of the nearest fully selected pixels, and the
+    pixel is moved toward it by (1 - coverage) * amount / 100 -- so a pixel
+    that is mostly background, and so mostly background colour, moves most.
+    Pixels with no solid subject anywhere near are left alone rather than
+    given an invented colour. Alpha is not touched: the mask still says how
+    much of the pixel is subject.
+
+    The rule is Kooka Pictura's (crates/pictura-select/src/refine.rs,
+    `decontaminate`), with its fixed 5x5 search widened step by step so a
+    wide feathered edge is cleaned all the way out.
+    """
+    out = np.array(rgba, np.uint8, copy=True)
+    a = np.asarray(mask, np.float64) / 255.0
+    soft = (a > 0) & (a < 1)
+    k = max(0, min(100, int(amount))) / 100.0
+    if not soft.any() or k == 0:
+        return out
+    # Work in the soft edge's box, grown by the widest search: the rest of
+    # the picture cannot change, and a big photo's float copies are large.
+    ys, xs = np.nonzero(soft)
+    pad = _DECON_RADII[-1] + 1
+    y0, x0 = max(0, ys.min() - pad), max(0, xs.min() - pad)
+    y1, x1 = min(soft.shape[0], ys.max() + 1 + pad), min(soft.shape[1], xs.max() + 1 + pad)
+    win = out[y0:y1, x0:x1]
+    a, soft = a[y0:y1, x0:x1], soft[y0:y1, x0:x1]
+    rgb = win[..., :3].astype(np.float64)
+    solid = (np.asarray(mask)[y0:y1, x0:x1] == 255).astype(np.float64)
+    fg = np.zeros_like(rgb)
+    found = np.zeros(soft.shape, bool)
+    for r in _DECON_RADII:
+        # Normalized convolution: the mean colour of the solid pixels in the
+        # window, wherever the window holds any.
+        count = _box(solid, r)
+        here = soft & ~found & (count > 1e-9)
+        if here.any():
+            mean = _box(rgb * solid[..., None], r)
+            fg[here] = mean[here] / count[here][:, None]
+            found |= here
+        if found[soft].all():
+            break
+    t = ((1.0 - a) * k * found)[..., None]
+    win[..., :3] = np.clip(np.rint(rgb + (fg - rgb) * t), 0, 255).astype(np.uint8)
+    return out
 
 
 # ---- sky ---------------------------------------------------------------------------
