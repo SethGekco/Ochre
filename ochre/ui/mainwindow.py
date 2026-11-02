@@ -122,11 +122,13 @@ class MainWindow(QMainWindow):
         self._addon_holders = {}
 
         self._build_menus()
-        # The user's menu keys (Edit > Keyboard Shortcuts), over the built-in ones.
+        self._build_window_menu()
+        self._build_help_menu()
+        # The user's menu keys (Edit > Keyboard Shortcuts), over the built-in
+        # ones -- after every menu exists, Window and Help included.
         from . import keymap
         from .prefsdialog import apply_menu_keys
         apply_menu_keys(self.menuBar(), keymap.load(getattr(self.ctl, "state_dir", None)))
-        self._build_window_menu()
         self._scrollable_menus()
         self._build_status()
         self._subscribe()
@@ -143,7 +145,8 @@ class MainWindow(QMainWindow):
         bus = self.ctl.bus
         if bus is None:
             return
-        bus.subscribe("addons.changed", lambda **k: self._sync_addon_panels())
+        bus.subscribe("addons.changed", lambda **k: (self._sync_addon_panels(),
+                                                     self._rebuild_addon_commands()))
         bus.subscribe("layers.changed", self._on_layers)
         bus.subscribe("layer.active", lambda **k: self.layers_dock.sync())
         bus.subscribe("history.changed", lambda **k: (self.history_dock.sync(),
@@ -288,12 +291,27 @@ class MainWindow(QMainWindow):
 
     def _build_window_menu(self):
         menu = self.menuBar().addMenu("&Window")
-        for dock in (self.tools_dock, self.layers_dock, self.colors_dock, self.palette_dock,
-                     self.history_dock, self.paths_dock, self.navigator_dock, self.info_dock,
-                     self.histogram_dock, self.actions_dock, self.channels_dock,
-                     self.comps_dock, self.brushes_dock, self.frames_dock):
+        self.panel_docks = (self.tools_dock, self.layers_dock, self.colors_dock,
+                            self.palette_dock, self.history_dock, self.paths_dock,
+                            self.navigator_dock, self.info_dock, self.histogram_dock,
+                            self.actions_dock, self.channels_dock, self.comps_dock,
+                            self.brushes_dock, self.frames_dock)
+        for dock in self.panel_docks:
             menu.addAction(dock.toggleViewAction())
         return menu
+
+    def _build_help_menu(self):
+        menu = self.menuBar().addMenu("&Help")
+        self.search_action = self._act(menu, "&Search...", self.do_search, "Shift+Space")
+        return menu
+
+    def do_search(self):
+        """Help > Search: the command search popup (ui/commandsearch.py)."""
+        if getattr(self, "command_search", None) is None:
+            from .commandsearch import CommandSearch
+            self.command_search = CommandSearch(self)
+        self.command_search.open()
+        return self.command_search
 
     # ---- documents (tabs) -------------------------------------------------
 
@@ -916,6 +934,7 @@ class MainWindow(QMainWindow):
             for name in members:
                 act = self._act(target, self.ctl.tools.label(name),
                                 lambda _c=False, n=name: self.ctl.set_tool(n))
+                act.setData("tool:" + name)     # Help > Search lists tools itself
                 act.setIcon(_icons.tool_icon(self.ctl.tools.icon(name)))
                 key = self.ctl.tools.shortcut(name)
                 if key:
@@ -1673,9 +1692,9 @@ class MainWindow(QMainWindow):
             self.ctl.relink(path)
             self._after_pixels()
 
-    def do_preferences(self):
+    def do_preferences(self, page=None):
         from .prefsdialog import PreferencesDialog
-        PreferencesDialog(self.ctl, self).exec()
+        PreferencesDialog(self.ctl, self, page=page).exec()
 
     def do_shortcuts(self):
         from .prefsdialog import ShortcutsDialog
