@@ -9,7 +9,8 @@ editor drives it, plus the properties each must keep.
 For each filter:
   * the registry knows it, under its family, and the Filter Gallery's tree
     and the Effects menu (hence the command search) list it;
-  * it is deterministic, keeps the shape, and keeps alpha;
+  * it is deterministic, keeps the shape, and keeps alpha (unless, like
+    the blurs and Glass, it moves pixels: then alpha moves with them);
   * every slider at its minimum and at its maximum, and every choice,
     renders without a numeric warning (the suite runs with RuntimeWarning
     as an error) and still keeps alpha;
@@ -103,25 +104,32 @@ def extremes(fx):
 def main():
     img = picture()
     fams = families()
-    names = []
+    names, in_gallery = [], []
 
     # ---- each filter on its own -------------------------------------------
     for family, classes in fams:
         for cls in classes:
             n = cls.name
             names.append(n)
+            if family or REG.category(n) in ("Distort", "Stylize"):
+                in_gallery.append(n)
             check("%s is registered%s" % (n, " under " + family if family else ""),
                   n in REG and (family is None or REG.category(n) == family))
             a = REG.create(n).apply(img)
             b = REG.create(n).apply(img)
+            moves = getattr(cls, "moves_alpha", False)
             check("%s: shape, determinism, alpha kept" % n,
                   a.shape == img.shape and a.dtype == np.uint8 and np.array_equal(a, b)
-                  and np.array_equal(a[..., 3], img[..., 3]))
-            check("%s changes the picture" % n, not np.array_equal(a[..., :3], img[..., :3]))
+                  and (moves or np.array_equal(a[..., 3], img[..., 3])))
+            # Spin Blur's default ellipse is too small to turn anything at
+            # 40x40; with every slider at its top it must.
+            changed = not np.array_equal(a[..., :3], img[..., :3]) or not np.array_equal(
+                REG.create(n, **extremes(REG.create(n))[1]).apply(img), img)
+            check("%s changes the picture" % n, changed)
             bad = []
             for over in extremes(REG.create(n)):
                 out = REG.create(n, **over).apply(img)
-                if out.shape != img.shape or not np.array_equal(out[..., 3], img[..., 3]):
+                if out.shape != img.shape or not (moves or np.array_equal(out[..., 3], img[..., 3])):
                     bad.append(over)
             check("%s: every slider end and every choice renders" % n, not bad, str(bad))
             if "seed" in REG.create(n).props:
@@ -139,8 +147,8 @@ def main():
     from ochre.ui import gallery
     check("the Filter Gallery shows every family",
           all(f in gallery.CATEGORIES for f, _ in fams if f))
-    check("...and every new filter sits in a family it shows",
-          all(REG.category(n) in gallery.CATEGORIES for n in names))
+    check("...and every new gallery filter sits in a family it shows",
+          all(REG.category(n) in gallery.CATEGORIES for n in in_gallery))
 
     # ---- through the controller, as the menu does ---------------------------
     ctl = Controller(Settings(DATA), DATA, addon_dirs=[], state_dir=tempfile.mkdtemp())
@@ -189,6 +197,21 @@ def main():
     check("on a smart object they become smart filters",
           [f["name"] for f in smart.params["filters"]] == names[:3])
 
+    # ---- Embed Watermark, then Read Watermark finds it ---------------------------
+    if "embed_watermark" in REG:
+        ctl.new_document(96, 96, background=None)
+        ctl.doc.cell(ctl.active_layer).plane("rgba")[...] = np.dstack(
+            [np.random.default_rng(5).integers(30, 220, (96, 96, 3)),
+             np.full((96, 96), 255)]).astype(np.uint8)
+        ctl.doc.cell(ctl.active_layer)._touched(ctl.doc.bounds)
+        check("an unmarked image reads as none", ctl.read_watermark() is None)
+        ctl.apply_effect("embed_watermark", {"creator_id": 4242, "image_id": 99,
+                                             "durability": "medium"})
+        found = ctl.read_watermark() or {}
+        check("Read Watermark finds what Embed Watermark hid",
+              (found.get("creator_id"), found.get("image_id"), found.get("durability"))
+              == (4242, 99, "medium"), str(found))
+
     # ---- the Effects menu and the command search ----------------------------------
     from PySide6.QtWidgets import QApplication
     from ochre.ui.bus import EventBus
@@ -204,6 +227,9 @@ def main():
                if ("Effects", REG.category(n), REG.label(n)) not in paths]
     check("the Effects menu, and so the command search, lists every one", not missing,
           str(missing))
+    if "embed_watermark" in REG:
+        check("...and Read Watermark beside Embed Watermark",
+              ("Effects", "Watermark", "Read Watermark") in paths)
     win.close()
     del app
     print("\nall %d gallery filters checked" % len(names))

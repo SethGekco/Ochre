@@ -266,8 +266,8 @@ def widest_nearby(field, radius):
 
 
 def median_by_luma(rgb, offsets):
-    """Each pixel takes the colour of the sample, among `offsets`, whose
-    brightness is the median: a median that never invents a colour. Edges
+    """Each pixel takes the color of the sample, among `offsets`, whose
+    brightness is the median: a median that never invents a color. Edges
     clamp. Worked in bands of rows so the sample stack stays small."""
     h, w = rgb.shape[:2]
     r = rgb.astype(np.int32)
@@ -406,7 +406,7 @@ def height_map(texture, h, w, scaling, seed=0):
                       np.float32)
 
 
-SHADE_BY_COLOUR = 0.8
+SHADE_BY_COLOR = 0.8
 SHADE_BY_LIGHT = 150.0
 
 
@@ -442,19 +442,19 @@ def relief(rgb, texture, scaling, amount, light, invert=False, seed=0, dark_bias
     patch = patchiness(h, w, patchy, seed)
     shade = slope * amount * weight * patch * gain
     groove = np.maximum(0.5 - field, 0) * 2 * occlusion * amount * weight * patch
-    out = rgb * (1 + shade[..., None] * SHADE_BY_COLOUR) + (shade * SHADE_BY_LIGHT - groove)[..., None]
+    out = rgb * (1 + shade[..., None] * SHADE_BY_COLOR) + (shade * SHADE_BY_LIGHT - groove)[..., None]
     return np.clip(out, 0, 255)
 
 
 def put_rgb(src, rgb):
-    """The source with its colour replaced and its alpha kept."""
+    """The source with its color replaced and its alpha kept."""
     out = src.copy()
     out[..., :3] = np.clip(np.floor(np.asarray(rgb, np.float32) + 0.5), 0, 255).astype(np.uint8)
     return out
 
 
 def swatches(ink, paper, amount):
-    """Mix two colours by a 0..1 field: 0 is `paper`, 1 is `ink`."""
+    """Mix two colors by a 0..1 field: 0 is `paper`, 1 is `ink`."""
     ink = np.asarray(ink[:3], np.float32)
     paper = np.asarray(paper[:3], np.float32)
     return paper + (ink - paper) * np.asarray(amount, np.float32)[..., None]

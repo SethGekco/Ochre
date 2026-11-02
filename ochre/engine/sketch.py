@@ -4,9 +4,9 @@
 """Photoshop's Filter Gallery > Sketch family, all fourteen.
 
 What binds the family together is that it paints in TWO SWATCHES, not in
-the picture's own colours: every one of these but Chrome and Water Paper
+the picture's own colors: every one of these but Chrome and Water Paper
 throws the hue away, works on brightness alone, and maps the answer
-between a foreground and a background colour (black and white by default).
+between a foreground and a background color (black and white by default).
 
 Algorithms, constants and slider ranges are ported from Kooka Pictura's
 photorust engine (crates/pictura-filters/src/photorust/sketch, GPL-3.0),
@@ -86,7 +86,7 @@ class BasRelief(_Sketch):
 
 class ChalkCharcoal(_Sketch):
     """Shadows in charcoal strokes one way, highlights in chalk strokes the
-    other, mid-grey paper between."""
+    other, mid-gray paper between."""
     name, label = "chalk_charcoal", "Chalk & Charcoal"
 
     def declare(self):
@@ -305,7 +305,7 @@ class NotePaper(_Sketch):
 
 
 def _central(field):
-    """Half the difference of the two neighbours, clamped at the border."""
+    """Half the difference of the two neighbors, clamped at the border."""
     p = np.pad(field, 1, mode="edge")
     return (p[1:-1, 2:] - p[1:-1, :-2]) * 0.5, (p[2:, 1:-1] - p[:-2, 1:-1]) * 0.5
 
@@ -455,7 +455,7 @@ class TornEdges(_Sketch):
 
 
 class WaterPaper(_Sketch):
-    """Blotchy daubs on damp fibrous paper: colour bleeds along the fibres,
+    """Blotchy daubs on damp fibrous paper: color bleeds along the fibres,
     which show darker where the paint is thin."""
     name, label = "water_paper", "Water Paper"
 

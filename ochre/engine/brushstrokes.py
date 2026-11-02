@@ -7,7 +7,7 @@ Sprayed Strokes and Sumi-e.
 
 The common move is LAYING STROKES: each pixel is dragged a little along a
 direction by streaked noise, then the picture is median-filtered along
-that direction, by brightness, so it settles into runs of one colour about
+that direction, by brightness, so it settles into runs of one color about
 a stroke long (lay_strokes). The Artistic family reuses it.
 
 Algorithms, constants and slider ranges are ported from Kooka Pictura's
@@ -81,9 +81,9 @@ class AccentedEdges(_Strokes):
         edges = F.blur(F.widest_nearby(edges, F.rnd(width * 0.3)), 0.6)
         tint = (t["edge_brightness"] - 25.0) / 25.0
         accent = (edges * abs(tint))[..., None]
-        grey = F.luma(base)[..., None]
+        gray = F.luma(base)[..., None]
         if tint >= 0:
-            v = grey + (base - grey) * (1 + 0.9 * accent)
+            v = gray + (base - gray) * (1 + 0.9 * accent)
             v = v * (1 + 1.6 * accent) + 25.0 * accent
         else:
             v = base * (1 - accent)
@@ -247,7 +247,7 @@ def _dark_mask(tone, start):
 
 class InkOutlines(_Strokes):
     """A pen-and-ink drawing: dark shapes filled solid, their rims and the
-    main edges inked, chalky marks on the light side, over stroked colour."""
+    main edges inked, chalky marks on the light side, over stroked color."""
     name, label = "ink_outlines", "Ink Outlines"
 
     def declare(self):
@@ -357,7 +357,7 @@ SUMI_INK = np.array([28.0, 30.0, 36.0], np.float32)
 
 class SumiE(_Strokes):
     """Japanese ink-wash: the picture flattened into a few washes of ink on
-    warm paper, bleeding at the edges, strong colours kept a little."""
+    warm paper, bleeding at the edges, strong colors kept a little."""
     name, label = "sumi_e", "Sumi-e"
 
     def declare(self):

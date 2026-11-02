@@ -8,7 +8,7 @@ Underpainting and Watercolor. (Ochre's own Neon, Oil Painting, Pencil and
 Ink Sketch, Cartoon and the rest share the Artistic menu with them.)
 
 Most are a few recurring moves: paint laid in dabs (each pixel takes the
-colour of whichever diagonal neighbour's blurred paint is calmest and
+color of whichever diagonal neighbor's blurred paint is calmest and
 closest in tone), raised into relief, posterized with a canvas tooth;
 medians that cut a picture into flat patches; motion-blurred strokes.
 
@@ -178,7 +178,7 @@ def _lightness(rgb, inverted=False):
 
 
 def _roughness(rgb, reach):
-    """How far brightness strays from its neighbourhood mean, averaged."""
+    """How far brightness strays from its neighborhood mean, averaged."""
     lum = _lightness(rgb).astype(np.float32)
     mean = np.floor(_box(_box(lum, reach, 0), reach, 1) + 0.5)
     strays = np.abs(lum - mean)
@@ -330,10 +330,10 @@ class Cutout(_Artistic):
         n = h * w
         counts = np.maximum(np.bincount(lab, minlength=n), 1)
         flat_rgb = rgb.reshape(-1, 3).astype(np.int64)
-        colours = np.stack([np.bincount(lab, weights=flat_rgb[:, c], minlength=n)
+        colors = np.stack([np.bincount(lab, weights=flat_rgb[:, c], minlength=n)
                             for c in range(3)], -1)
-        colours = np.floor(colours / counts[:, None])
-        return F.put_rgb(src, colours[lab].reshape(h, w, 3))
+        colors = np.floor(colors / counts[:, None])
+        return F.put_rgb(src, colors[lab].reshape(h, w, 3))
 
 
 def _tidy(key, radius):
@@ -810,9 +810,9 @@ class Watercolor(_Artistic):
         paint = depth[wash] * line[..., None]
         pale = around / 255.0
         lift = (tone - around) * 7.0 * pale * pale
-        grey = F.luma(paint)
-        lifted = np.maximum(grey + lift, 0)
-        ratio = (lifted / np.maximum(grey, 1.0))[..., None]
+        gray = F.luma(paint)
+        lifted = np.maximum(gray + lift, 0)
+        ratio = (lifted / np.maximum(gray, 1.0))[..., None]
         paint = np.clip(lifted[..., None] + (paint * ratio - lifted[..., None]) * 1.25, 0, 255)
         g = np.minimum(lifted, 255.0)
         kept = F.smooth((g / 255.0 - (start - 0.1)) / 0.2)[..., None]

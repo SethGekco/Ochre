@@ -55,7 +55,7 @@ def _cast_shadow(surface, direction, reach, fall=0.0):
 
 
 def _shade(rgb, shade):
-    return rgb * (1 + shade[..., None] * F.SHADE_BY_COLOUR) + (shade * F.SHADE_BY_LIGHT)[..., None]
+    return rgb * (1 + shade[..., None] * F.SHADE_BY_COLOR) + (shade * F.SHADE_BY_LIGHT)[..., None]
 
 
 class _Texture(_Filter):
@@ -160,7 +160,7 @@ class Craquelure(_Texture):
 GRAIN_TYPES = ("regular", "soft", "sprinkles", "clumped", "contrasty", "enlarged", "stippled",
                "horizontal", "vertical", "speckle")
 # clump, strength, contrast, boost
-_COLOUR_GRAIN = {"regular": (0.0, 1.0, 1.0, 1.0), "soft": (0.7, 0.6, 1.0, 1.0),
+_COLOR_GRAIN = {"regular": (0.0, 1.0, 1.0, 1.0), "soft": (0.7, 0.6, 1.0, 1.0),
                  "clumped": (2.0, 0.5, 1.6, 1.4), "contrasty": (1.6, 0.4, 2.0, 1.65),
                  "enlarged": (2.4, 0.55, 1.3, 1.15)}
 
@@ -170,7 +170,7 @@ def _grain_noise(xs, ys, salt, seed):
 
 
 class Grain(_Texture):
-    """Ten kinds of grain: colour noise of several clump sizes, sprinkles,
+    """Ten kinds of grain: color noise of several clump sizes, sprinkles,
     stipple, horizontal or vertical streaks, or speckle."""
     name, label = "grain", "Grain"
 
@@ -189,9 +189,9 @@ class Grain(_Texture):
         h, w = src.shape[:2]
         spread = intensity * 0.8
         share = intensity / 100.0
-        colour = _COLOUR_GRAIN.get(kind)
-        push = colour[2] if colour else 1.0
-        boost = 1.25 if kind in ("horizontal", "vertical") else (colour[3] if colour else 1.0)
+        color = _COLOR_GRAIN.get(kind)
+        push = color[2] if color else 1.0
+        boost = 1.25 if kind in ("horizontal", "vertical") else (color[3] if color else 1.0)
         gain = boost * 2.0 ** ((contrast - 50.0) / 40.0 * push)
 
         def stretch(v):
@@ -201,8 +201,8 @@ class Grain(_Texture):
         lum = F.luma(px)
         ink = np.asarray(t["foreground"][:3], np.float32)
         paper = np.asarray(t["background"][:3], np.float32)
-        if colour:
-            clump, strength = colour[0], colour[1]
+        if color:
+            clump, strength = color[0], color[1]
             out = np.empty_like(px)
             for c in range(3):
                 field = 0.55 * _grain_noise(xs, ys, 10, seed) \
@@ -275,16 +275,16 @@ class MosaicTiles(_Texture):
         shade = -(dx * lx + dy * ly) * 1.3
         shadow = 1 - 0.45 * np.clip(_cast_shadow(surface, (lx, ly), 3), 0, 1)
         tile = F.smooth(inside + 0.5)[..., None]
-        grey = 90.0 + lighten * 14.0
+        gray = 90.0 + lighten * 14.0
         cover = 0.25 + lighten * 0.05
         own = src[..., :3].astype(np.float32)
-        grouted = own + (grey - own) * cover
+        grouted = own + (gray - own) * cover
         base = grouted + (own - grouted) * tile
         return F.put_rgb(src, _shade(base, shade) * shadow[..., None])
 
 
 class Patchwork(_Texture):
-    """The picture as raised squares, each its own average colour, set at
+    """The picture as raised squares, each its own average color, set at
     heights by brightness and lit from above."""
     name, label = "patchwork", "Patchwork"
 
@@ -347,13 +347,13 @@ class Patchwork(_Texture):
         slope = 2.0 * relief / size
         light_flat = 0.38 + 0.62 * ((-slope * light[1] + light[2]) / math.sqrt(slope * slope + 1))
         k = (light_here / light_flat)[..., None]
-        colour = face[ys // n, xs // n]
-        return F.put_rgb(src, colour * k)
+        color = face[ys // n, xs // n]
+        return F.put_rgb(src, color * k)
 
 
 class StainedGlass(_Texture):
-    """Single-colour panes of a jittered hexagonal Voronoi, leaded in the
-    foreground colour, lit from the middle by Light Intensity."""
+    """Single-color panes of a jittered hexagonal Voronoi, leaded in the
+    foreground color, lit from the middle by Light Intensity."""
     name, label = "stained_glass", "Stained Glass"
 
     def declare(self):
