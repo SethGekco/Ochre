@@ -619,11 +619,11 @@ def _more_builtins():
         out += tuple(MORE)
     except ImportError:
         pass
-    # The Filter Gallery families ported from Kooka Pictura, one module each.
+    # The filters ported from Kooka Pictura, one module each.
     import importlib
     for module, attr in (("sketch", "SKETCH"), ("brushstrokes", "BRUSH_STROKES"),
                          ("texture", "TEXTURE"), ("artistic", "ARTISTIC"),
-                         ("galleryextra", "EXTRA")):
+                         ("galleryextra", "EXTRA"), ("pictureframe", "FRAME")):
         try:
             out += tuple(getattr(importlib.import_module("." + module, __package__), attr))
         except (ImportError, AttributeError):
