@@ -16,13 +16,20 @@ spread-spectrum code and does not read or write Digimarc's.
 
 Where Kooka moves pixels (Glass, Ocean Ripple, the blurs) it moves alpha
 with them, and so does this port -- premultiplied here, so the hidden
-color of transparent pixels never bleeds in. Two simplifications: Ocean
+color of transparent pixels never bleeds in. One simplification: Ocean
 Ripple's lattice comes from Ochre's seeded hash, not Kooka's ChaCha8
-stream (same look, different ripples per seed), and Spin and Path Blur
-take one spin / one straight path from sliders, without the Blur Gallery's
-bokeh and noise panels (Ochre's other Blur Gallery filters have none).
+stream (same look, different ripples per seed).
+
+Spin and Path Blur are Kooka's whole effects: any number of spins (largest
+mask wins) with the strobe's flash duration, any number of curved paths
+(Catmull-Rom through their points, a blended motion field, trails that
+bend along its streamlines), and the Blur Gallery's Noise pass (field.rs,
+Gaussian / Uniform / Grain). The sliders make one spin / one straight path;
+the `spins` / `paths` JSON, which the Blur Gallery tool writes, holds more.
+Kooka's bokeh pass is off for both effects there too.
 """
 
+import json
 import math
 
 import numpy as np
@@ -30,7 +37,7 @@ import numpy as np
 from . import fields as F
 from .filters import _Filter, _centre
 from .props import BoolProperty, ChoiceProperty, ColorProperty, FloatProperty, IntProperty, \
-    PropertyCollection
+    PropertyCollection, TextProperty
 from .sketch import WHITE
 
 
@@ -479,9 +486,225 @@ def _gather(src, chunk_taps, n_max, chunk=1 << 14):
     return _unpremul(out.reshape(h, w, 4), src)
 
 
+# ---- Spin Blur and Path Blur ---------------------------------------------------------
+#
+# Kooka's blur/spin.rs and blur/path.rs with the Blur Gallery's Noise pass
+# (blur/field.rs). Both take any number of spins / curved paths as JSON, the
+# way the Blur Gallery tool places them; without it, the sliders' one.
+
+MAX_BLUR_PINS = 16                # spins or paths, as Kooka's MAX_FIELD_PINS
+MAX_PATH_POINTS = 32
+MAX_SPIN_TAPS = 128
+MAX_PATH_TAPS = 64
+_SPAN_SEGMENTS = 16               # curve samples per span between two path points
+_FIELD_CELLS = 512                # the motion field's grid, cells on the long edge
+NOISE_KINDS = ("gaussian", "uniform", "grain")
+
+
+def _noise_props():
+    """The Blur Gallery's Noise tab. Amount 0 adds nothing."""
+    return (IntProperty("noise_amount", 0, 0, 100, label="Noise Amount"),
+            ChoiceProperty("noise_kind", "gaussian", list(NOISE_KINDS),
+                           labels={k: k.title() for k in NOISE_KINDS}, label="Noise"),
+            IntProperty("noise_size", 50, 0, 100, label="Grain Size"),
+            IntProperty("noise_roughness", 50, 0, 100, label="Grain Roughness"),
+            IntProperty("noise_color", 0, 0, 100, label="Noise Color"),
+            IntProperty("noise_highlights", 0, 0, 100, label="Noise Highlights"),
+            IntProperty("noise_seed", 1, 0, 9999, label="Noise Seed"))
+
+
+def _noise_of(t):
+    return {k: t[k] for k in ("noise_amount", "noise_kind", "noise_size", "noise_roughness",
+                              "noise_color", "noise_highlights", "noise_seed")}
+
+
+_U64 = np.uint64
+
+
+def _unit64(x, y, salt):
+    """Kooka's 64-bit coordinate hash (field.rs `unit`): 0..1 (53 bits)."""
+    x = np.atleast_1d(np.asarray(x, np.int64)).astype(_U64)
+    y = np.atleast_1d(np.asarray(y, np.int64)).astype(_U64)
+    h = (x * _U64(0x9E3779B97F4A7C15)) ^ (y * _U64(0xC2B2AE3D27D4EB4F)) ^ _U64(int(salt))
+    h ^= h >> _U64(30)
+    h = h * _U64(0xBF58476D1CE4E5B9)
+    h ^= h >> _U64(27)
+    h = h * _U64(0x94D049BB133111EB)
+    h ^= h >> _U64(31)
+    return (h >> _U64(11)).astype(np.float64) * (1.0 / float(1 << 53))
+
+
+def _noise_value(noise, x, y, channel):
+    """One noise sample in [-1, 1) per pixel; `channel` separates the color draws."""
+    seed = int(noise["noise_seed"])
+    rot = ((seed >> 32) & 0xFFFFFFFF)
+    rot = ((rot << 13) | (rot >> 19)) & 0xFFFFFFFF
+    salt = (seed & 0xFFFFFFFF) ^ rot ^ ((channel * 0x9E3779B1) & 0xFFFFFFFF)
+    kind = noise["noise_kind"]
+    if kind == "uniform":
+        return _unit64(x, y, salt) * 2.0 - 1.0
+    if kind == "grain":
+        cell = 1.0 + noise["noise_size"] / 100.0 * 15.0
+        fx, fy = x / cell, y / cell
+        x0, y0 = np.floor(fx), np.floor(fy)
+        tx, ty = fx - x0, fy - y0
+        x0, y0 = x0.astype(np.int64), y0.astype(np.int64)
+        top = _unit64(x0, y0, salt) * (1 - tx) + _unit64(x0 + 1, y0, salt) * tx
+        bottom = _unit64(x0, y0 + 1, salt) * (1 - tx) + _unit64(x0 + 1, y0 + 1, salt) * tx
+        smooth = top * (1 - ty) + bottom * ty
+        r = noise["noise_roughness"] / 100.0
+        return (smooth * (1 - r) + _unit64(x, y, salt) * r) * 2.0 - 1.0
+    # Three uniform draws summed: a near-Gaussian bell, 1.732 restoring the
+    # uniform draw's variance.
+    bell = (_unit64(x, y, salt) + _unit64(x, y, salt ^ 0x9E3779B1)
+            + _unit64(x, y, salt ^ 0x85EBCA77)) / 3.0
+    return np.clip((bell * 2.0 - 1.0) * 1.732, -1.0, 1.0)
+
+
+def _blur_noise(out, weights, noise):
+    """The Noise pass over the blurred pixels (field.rs `apply_effects`
+    without bokeh): grain gated by each pixel's blur weight (0..255), so
+    sharp pixels never change. Color only; alpha is left as it is."""
+    if not noise or noise["noise_amount"] <= 0:
+        return out
+    h, w = out.shape[:2]
+    flat = np.flatnonzero(weights.reshape(-1) > 0)
+    if not len(flat):
+        return out
+    rgb = out.reshape(-1, 4)[flat, :3].astype(np.float64)
+    weight = weights.reshape(-1)[flat] / 255.0
+    luma = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
+    gate = np.clip(1.0 - noise["noise_highlights"] / 100.0 * luma / 255.0, 0.0, 1.0)
+    amplitude = noise["noise_amount"] / 100.0 * 127.5 * weight * gate
+    x, y = flat % w, flat // w
+    mono = _noise_value(noise, x, y, 0)
+    mix = noise["noise_color"] / 100.0
+    for c in range(3):
+        draw = mono * (1 - mix) + _noise_value(noise, x, y, c) * mix if mix > 0 else mono
+        rgb[:, c] += np.where(amplitude > 0, draw * amplitude, 0.0)
+    res = out.reshape(-1, 4).copy()
+    res[flat, :3] = _rnd8(rgb)
+    return res.reshape(out.shape)
+
+
+def _finite(values):
+    return all(math.isfinite(v) for v in values)
+
+
+def parse_spins(text):
+    """The `spins` JSON -- [[x, y, radius_x, radius_y, angle, feather,
+    blur_angle, pivot_x, pivot_y], ...], Kooka's nine slots: the centre as
+    fractions of the image, the radii as fractions of its width, the
+    pivot's offset as fractions of the image -- or None when there is none
+    (or it does not parse). Bad rows are skipped, values clamped."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        rows = json.loads(text)
+        spins = []
+        for row in list(rows)[:MAX_BLUR_PINS]:
+            v = [float(x) for x in row]
+            if len(v) != 9 or not _finite(v):
+                continue
+            v[2], v[3] = (min(max(r, 1e-4), 10.0) for r in v[2:4])
+            v[5] = min(max(v[5], 0.0), 1.0)
+            v[6] = min(max(v[6], 0.0), 360.0)
+            spins.append(v)
+        return spins
+    except (ValueError, TypeError):
+        return None
+
+
+def spin_blur(src, spins, strength=0.0, flashes=4, duration=1.0, noise=None):
+    """Kooka's Spin Blur: each spin an ellipse with a feather ring and a
+    rotation centre; a pixel takes the spin whose mask is largest and
+    averages taps along the circle through it round that spin's centre,
+    the strobe flashes mixed in (`strength` 0..100, `flashes` over the arc,
+    each lighting `duration` degrees of it). An empty list changes nothing."""
+    h, w = src.shape[:2]
+    if not spins or all(s[6] <= 0 for s in spins):
+        return src.copy()
+    flat = np.arange(h * w)
+    x, y = flat % w + 0.5, flat // w + 0.5
+    best = np.full(h * w, -1, np.int64)
+    best_mask = np.zeros(h * w)
+    best_rho = np.zeros(h * w)
+    for i, (sx, sy, rx, ry, angle, feather, _blur, _px, _py) in enumerate(spins):
+        a = math.radians(angle)
+        cos, sin = math.cos(a), math.sin(a)
+        cx, cy = sx * w, sy * h
+        u = ((x - cx) * cos + (y - cy) * sin) / (rx * w)
+        v = ((y - cy) * cos - (x - cx) * sin) / (ry * w)
+        rho = np.hypot(u, v)
+        tt = np.clip((rho - feather) / max(1 - feather, 1e-12), 0, 1)
+        mask = np.where(rho >= 1, 0.0, np.where(rho <= feather, 1.0, 1 - tt * tt * (3 - 2 * tt)))
+        better = mask > best_mask
+        best = np.where(better, i, best)
+        best_mask = np.where(better, mask, best_mask)
+        best_rho = np.where(better, rho, best_rho)
+    table = np.array([[s[0] * w + s[7] * w, s[1] * h + s[8] * h, s[5], math.radians(s[6])]
+                      for s in spins])
+    pick = np.maximum(best, 0)
+    px, py, feather, full = (table[pick, k] for k in range(4))
+    ring = np.where(best_rho <= feather, 1.0, feather / np.maximum(best_rho, 1e-12))
+    sweep = np.where(best >= 0, full * best_mask * ring, 0.0)
+    dx, dy = x - px, y - py
+    length = np.hypot(dx, dy) * sweep
+    moving = (best >= 0) & (length >= 1)
+    if not moving.any():
+        return src.copy()
+    count = np.clip(np.ceil(length) + 1, 2, MAX_SPIN_TAPS).astype(np.int64)
+    step = sweep / (count - 1)
+    strength = strength / 100.0
+    flashes = int(flashes)
+    half = math.radians(duration) / 2.0
+    ks = np.arange(MAX_SPIN_TAPS)[:, None]
+
+    def chunk_taps(idx):
+        m = idx[moving[idx]]
+        n, sw, st = count[m], sweep[m], step[m]
+        cols = np.arange(len(m))
+        phase = -sw / 2.0 + st * ks
+        weights = np.where(ks < n, 1.0 / n, 0.0)
+        if strength > 0 and len(m):
+            # Each flash lights the taps within half its duration, and at
+            # least the nearest one, so a short flash on a coarse arc lands.
+            lit = np.zeros(phase.shape, bool)
+            if flashes == 1:
+                lit |= np.abs(phase - 0.0) <= half
+            else:
+                gap = sw / (flashes - 1)
+                near = np.floor(st * ks / gap + 0.5)
+                for d in (-1, 0, 1):
+                    j = np.clip(near + d, 0, flashes - 1)
+                    lit |= np.abs(phase - (-sw / 2.0 + sw * j / (flashes - 1))) <= half
+            for j in range(flashes):
+                at = 0.0 if flashes == 1 else -sw / 2.0 + sw * j / (flashes - 1)
+                nearest = np.floor((at + sw / 2.0) / st + 0.5).astype(np.int64)
+                lit[np.minimum(nearest, n - 1), cols] = True
+            lit &= ks < n
+            flash = np.where(lit, 1.0 / np.maximum(lit.sum(0), 1), 0.0)
+            weights = weights * (1 - strength) + flash * strength
+        mdx, mdy, mpx, mpy = dx[m], dy[m], px[m], py[m]
+
+        def tap(k):
+            sub = k < n
+            sel = moving[idx] & (k < count[idx])
+            c, s = np.cos(phase[k, sub]), np.sin(phase[k, sub])
+            return (sel, mpx[sub] + mdx[sub] * c - mdy[sub] * s,
+                    mpy[sub] + mdx[sub] * s + mdy[sub] * c, weights[k, sub])
+        return moving[idx], tap
+    out = _gather(src, chunk_taps, MAX_SPIN_TAPS)
+    weight = np.where(moving, np.floor(best_mask * 255.0 + 0.5), 0).reshape(h, w)
+    return _blur_noise(out, weight, noise)
+
+
 class SpinBlur(_Filter):
-    """Rotational blur inside an ellipse, as a spinning wheel photographed:
-    full strength inside Feather, fading to nothing at the rim."""
+    """Rotational blur inside ellipses, as a spinning wheel photographed:
+    full strength inside Feather, fading to nothing at the rim. `spins`
+    (JSON, placed with the Blur Gallery tool) holds any number; without it
+    the sliders make one."""
     name, label, category = "spin_blur", "Spin Blur", "Blurs"
     moves_alpha = True
 
@@ -493,47 +716,213 @@ class SpinBlur(_Filter):
                       FloatProperty("feather", 0.5, 0.0, 1.0),
                       FloatProperty("blur_angle", 15.0, 0.0, 360.0, decimals=0),
                       FloatProperty("rotation_x", 0.0, -10.0, 10.0, label="Rotation Center X"),
-                      FloatProperty("rotation_y", 0.0, -10.0, 10.0, label="Rotation Center Y"))
+                      FloatProperty("rotation_y", 0.0, -10.0, 10.0, label="Rotation Center Y"),
+                      IntProperty("strobe_strength", 0, 0, 100),
+                      IntProperty("strobe_flashes", 4, 1, 100),
+                      FloatProperty("strobe_duration", 1.0, 0.0, 360.0, decimals=0,
+                                    label="Strobe Flash Duration"),
+                      *_noise_props(),
+                      TextProperty("spins", "", label="Spins (from the Blur Gallery tool)"))
 
     def compute(self, t, src):
-        h, w = src.shape[:2]
-        if t["blur_angle"] <= 0:
-            return src.copy()
-        cx, cy = t["center_x"] / 100.0 * w, t["center_y"] / 100.0 * h
-        px, py = cx + t["rotation_x"] * w, cy + t["rotation_y"] * h
-        a = math.radians(t["angle"])
-        cos, sin = math.cos(a), math.sin(a)
-        rx, ry = t["radius_x"] * w, t["radius_y"] * w
-        feather = t["feather"]
-        flat = np.arange(h * w)
-        x, y = flat % w + 0.5, flat // w + 0.5
-        u = ((x - cx) * cos + (y - cy) * sin) / rx
-        v = ((y - cy) * cos - (x - cx) * sin) / ry
-        rho = np.hypot(u, v)
-        tt = np.clip((rho - feather) / max(1 - feather, 1e-12), 0, 1)
-        mask = np.where(rho >= 1, 0.0, np.where(rho <= feather, 1.0, 1 - tt * tt * (3 - 2 * tt)))
-        ring = np.where(rho <= feather, 1.0, feather / np.maximum(rho, 1e-12))
-        sweep = math.radians(t["blur_angle"]) * mask * ring
-        dx, dy = x - px, y - py
-        length = np.hypot(dx, dy) * sweep
-        count = np.clip(np.ceil(length) + 1, 2, 128).astype(np.int64)
-        moving = (mask > 0) & (length >= 1)
-        step = sweep / (count - 1)
+        spins = parse_spins(t.get("spins"))
+        if spins is None:
+            spins = [[t["center_x"] / 100.0, t["center_y"] / 100.0, t["radius_x"], t["radius_y"],
+                      t["angle"], t["feather"], t["blur_angle"], t["rotation_x"], t["rotation_y"]]]
+        return spin_blur(src, spins, t["strobe_strength"], t["strobe_flashes"],
+                         t["strobe_duration"], _noise_of(t))
 
-        def chunk_taps(idx):
-            def tap(k):
-                sel = moving[idx] & (k < count[idx])
-                i = idx[sel]
-                phase = -sweep[i] / 2 + step[i] * k
-                c, s = np.cos(phase), np.sin(phase)
-                return sel, px + dx[i] * c - dy[i] * s, py + dx[i] * s + dy[i] * c, 1.0 / count[i]
-            return moving[idx], tap
-        return _gather(src, chunk_taps, 128)
+
+def parse_paths(text):
+    """The `paths` JSON -- [{"points": [[x, y], ...], "start_speed": s,
+    "end_speed": e}, ...], points as fractions of the image (2 to 32 of
+    them), speeds in pixels (0..500) -- or None when there is none."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        out = []
+        for item in list(json.loads(text))[:MAX_BLUR_PINS]:
+            pts = [(float(px), float(py)) for px, py in item["points"]]
+            speeds = [float(item.get("start_speed", 0)), float(item.get("end_speed", 0))]
+            if not 2 <= len(pts) <= MAX_PATH_POINTS or not _finite(
+                    [c for p in pts for c in p] + speeds):
+                continue
+            out.append({"points": pts, "start_speed": min(max(speeds[0], 0.0), 500.0),
+                        "end_speed": min(max(speeds[1], 0.0), 500.0)})
+        return out
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def catmull_rom(points):
+    """The uniform Catmull-Rom curve through `points` (N, 2), the ends' outer
+    control points mirrored, 16 samples a span: (M, 2)."""
+    p = np.asarray(points, np.float64)
+    ext = np.concatenate([2 * p[:1] - p[1:2], p, 2 * p[-1:] - p[-2:-1]])
+    t = (np.arange(_SPAN_SEGMENTS) / float(_SPAN_SEGMENTS))[None, :, None]
+    t2, t3 = t * t, t * t * t
+    a, b, c, d = (ext[k:k + len(p) - 1][:, None, :] for k in range(4))
+    s = 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2
+               + (3 * b - a - 3 * c + d) * t3)
+    return np.concatenate([s.reshape(-1, 2), p[-1:]])
+
+
+class _MotionField:
+    """Kooka's motion vector field: every path's nearest-point tangent times
+    its interpolated speed, blended by inverse-square distance, on a grid of
+    at most 512 cells on the long edge, read back bilinearly."""
+
+    def __init__(self, paths, scale, w, h):
+        cell = max(-(-max(w, h) // _FIELD_CELLS), 1)
+        self.cols, self.rows = -(-w // cell) + 1, -(-h // cell) + 1
+        self.cell = float(cell)
+        gy, gx = np.mgrid[0:self.rows, 0:self.cols].astype(np.float64) * self.cell
+        gx, gy = gx.ravel(), gy.ravel()
+        sx, sy, wsum = np.zeros(len(gx)), np.zeros(len(gx)), np.zeros(len(gx))
+        for path in paths:
+            d2, vx, vy = self._nearest(path, gx, gy, w, h)
+            wgt = 1.0 / (d2 / (float(w) * w) + 1e-6)
+            sx += wgt * vx
+            sy += wgt * vy
+            wsum += wgt
+        self.vx = (sx / wsum * scale).reshape(self.rows, self.cols)
+        self.vy = (sy / wsum * scale).reshape(self.rows, self.cols)
+
+    @staticmethod
+    def _nearest(path, x, y, w, h):
+        pts = np.asarray(path["points"], np.float64) * (w, h)
+        samples = catmull_rom(pts)
+        seg = np.diff(samples, axis=0)
+        arc = np.concatenate([[0.0], np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))])
+        if arc[-1] > 0:
+            arc = arc / arc[-1]
+        len2 = (seg ** 2).sum(1)
+        live = len2 > 0
+        d2 = np.full(len(x), np.inf)
+        vx, vy = np.zeros(len(x)), np.zeros(len(x))
+        if live.any():
+            a, s, l2, arc0 = samples[:-1][live], seg[live], len2[live], arc[:-1][live]
+            arc1 = arc[1:][live]
+            step = max(1, (1 << 21) // len(a))
+            for i0 in range(0, len(x), step):
+                px, py = x[i0:i0 + step, None], y[i0:i0 + step, None]
+                t = np.clip(((px - a[:, 0]) * s[:, 0] + (py - a[:, 1]) * s[:, 1]) / l2, 0, 1)
+                qx, qy = a[:, 0] + s[:, 0] * t - px, a[:, 1] + s[:, 1] * t - py
+                dist = qx * qx + qy * qy
+                j = np.argmin(dist, axis=1)
+                rows = np.arange(len(j))
+                tj = t[rows, j]
+                frac = arc0[j] + (arc1[j] - arc0[j]) * tj
+                speed = path["start_speed"] + (path["end_speed"] - path["start_speed"]) * frac
+                n = np.sqrt(l2[j])
+                d2[i0:i0 + step] = dist[rows, j]
+                vx[i0:i0 + step] = s[j, 0] / n * speed
+                vy[i0:i0 + step] = s[j, 1] / n * speed
+        else:
+            # Every point coincides: the path has no direction.
+            d2 = (samples[0, 0] - x) ** 2 + (samples[0, 1] - y) ** 2
+        return d2, vx, vy
+
+    def longest(self):
+        return float(np.hypot(self.vx, self.vy).max())
+
+    def at(self, x, y):
+        gx = np.clip(x / self.cell, 0, self.cols - 1)
+        gy = np.clip(y / self.cell, 0, self.rows - 1)
+        x0, y0 = np.floor(gx).astype(np.intp), np.floor(gy).astype(np.intp)
+        x1, y1 = np.minimum(x0 + 1, self.cols - 1), np.minimum(y0 + 1, self.rows - 1)
+        tx, ty = gx - x0, gy - y0
+        out = []
+        for f in (self.vx, self.vy):
+            top = f[y0, x0] + (f[y0, x1] - f[y0, x0]) * tx
+            bottom = f[y1, x0] + (f[y1, x1] - f[y1, x0]) * tx
+            out.append(top + (bottom - top) * ty)
+        return out
+
+
+def path_blur(src, paths, speed=50, taper=0, centered=True, rear_sync=False,
+              strobe_strength=0, strobe_flashes=4, noise=None):
+    """Kooka's Path Blur: motion blur along the streamlines of the field the
+    paths make (each the Catmull-Rom curve through its points, speeds eased
+    from its start to its end, all scaled by `speed` %), half behind and
+    half ahead of a pixel with `centered`, weighted by taper, strobe flashes
+    and Rear Sync Flash. An empty list changes nothing."""
+    h, w = src.shape[:2]
+    if not paths:
+        return src.copy()
+    field = _MotionField(paths, speed / 100.0, w, h)
+    longest = field.longest()
+    if longest < 1:
+        return src.copy()
+    flat = np.arange(h * w)
+    x, y = flat % w + 0.5, flat // w + 0.5
+    vx, vy = field.at(x, y)
+    length = np.hypot(vx, vy)
+    moving = length >= 1
+    if not moving.any():
+        return src.copy()
+    count = np.clip(np.ceil(length) + 1, 2, MAX_PATH_TAPS).astype(np.int64)
+    step = length / (count - 1)
+    behind = (count - 1) // 2 if centered else count - 1
+    taper = taper / 100.0
+    strength = strobe_strength / 100.0
+    flashes = int(strobe_flashes)
+    ks = np.arange(MAX_PATH_TAPS)[:, None]
+
+    def chunk_taps(idx):
+        m = idx[moving[idx]]
+        n, be, st = count[m], behind[m], step[m]
+        ah = n - 1 - be
+        cols = np.arange(len(m))
+        # Walk the streamline each way, re-reading the direction at every
+        # step, so a curved path's trail bends with it.
+        tx = np.zeros((MAX_PATH_TAPS, len(m)))
+        ty = np.zeros((MAX_PATH_TAPS, len(m)))
+        tx[be, cols], ty[be, cols] = x[m], y[m]
+        ux, uy = vx[m] / length[m], vy[m] / length[m]
+        for sign, steps in ((-1.0, be), (1.0, ah)):
+            px, py, dx, dy = x[m].copy(), y[m].copy(), ux.copy(), uy.copy()
+            for k in range(1, int(steps.max(initial=0)) + 1):
+                act = np.flatnonzero(k <= steps)
+                px[act] += sign * dx[act] * st[act]
+                py[act] += sign * dy[act] * st[act]
+                at = be[act] - k if sign < 0 else be[act] + k
+                tx[at, act], ty[at, act] = px[act], py[act]
+                fx, fy = field.at(px[act], py[act])
+                norm = np.hypot(fx, fy)
+                ok = norm > 1e-9
+                dx[act[ok]], dy[act[ok]] = fx[ok] / norm[ok], fy[ok] / norm[ok]
+        reach = np.maximum(np.maximum(be, ah), 1).astype(np.float64)
+        base = np.where(ks < n, 1 - taper * np.abs(ks - be) / reach, 0.0)
+        weights = base / base.sum(0)
+        if strength > 0:
+            strobe = np.zeros_like(base)
+            for j in range(flashes):
+                at = be if flashes == 1 else np.floor(j * (n - 1) / (flashes - 1.0) + 0.5).astype(
+                    np.int64)
+                np.add.at(strobe, (at, cols), base[at, cols])
+            total = strobe.sum(0)
+            weights = np.where(total > 0, weights * (1 - strength)
+                               + strobe / np.where(total > 0, total, 1) * strength, weights)
+        if rear_sync:
+            weights[be, cols] += 1.0
+            weights = weights / 2.0
+
+        def tap(k):
+            sub = k < n
+            sel = moving[idx] & (k < count[idx])
+            return sel, tx[k, sub], ty[k, sub], weights[k, sub]
+        return moving[idx], tap
+    out = _gather(src, chunk_taps, MAX_PATH_TAPS)
+    weight = np.where(moving, np.clip(np.floor(length / longest * 255.0 + 0.5), 0, 255), 0)
+    return _blur_noise(out, weight.reshape(h, w), noise)
 
 
 class PathBlur(_Filter):
-    """Motion blur along a path (here one straight path, Start to End),
-    its speed eased from Start Speed to End Speed along the way."""
+    """Motion blur along paths, each speeding from its Start Speed to its End
+    Speed. `paths` (JSON, drawn with the Blur Gallery tool) holds any number
+    of curved paths; without it the sliders make one straight one."""
     name, label, category = "path_blur", "Path Blur", "Blurs"
     moves_alpha = True
 
@@ -547,57 +936,18 @@ class PathBlur(_Filter):
                       BoolProperty("centered", True, label="Centered Blur"),
                       BoolProperty("rear_sync", False, label="Rear Sync Flash"),
                       IntProperty("strobe_strength", 0, 0, 100),
-                      IntProperty("strobe_flashes", 4, 1, 100))
+                      IntProperty("strobe_flashes", 4, 1, 100),
+                      *_noise_props(),
+                      TextProperty("paths", "", label="Paths (from the Blur Gallery tool)"))
 
     def compute(self, t, src):
-        h, w = src.shape[:2]
-        ax, ay = t["start_x"] / 100.0 * w, t["start_y"] / 100.0 * h
-        bx, by = t["end_x"] / 100.0 * w, t["end_y"] / 100.0 * h
-        ex, ey = bx - ax, by - ay
-        span = math.hypot(ex, ey)
-        if span <= 0:
-            return src.copy()
-        ux, uy = ex / span, ey / span
-        flat = np.arange(h * w)
-        x, y = flat % w + 0.5, flat // w + 0.5
-        s = np.clip(((x - ax) * ex + (y - ay) * ey) / (span * span), 0, 1)
-        length = (t["start_speed"] + (t["end_speed"] - t["start_speed"]) * s) * t["speed"] / 100.0
-        moving = length >= 1
-        if not moving.any():
-            return src.copy()
-        count = np.clip(np.ceil(length) + 1, 2, 64).astype(np.int64)
-        step = length / (count - 1)
-        behind = (count - 1) // 2 if t["centered"] else count - 1
-        taper = t["taper"] / 100.0
-        strength = t["strobe_strength"] / 100.0
-        flashes = int(t["strobe_flashes"])
-        ks = np.arange(64)[:, None]
-
-        def chunk_taps(idx):
-            n, be = count[idx], behind[idx]
-            reach = np.maximum(np.maximum(be, n - 1 - be), 1).astype(np.float64)
-            base = np.where(ks < n, 1 - taper * np.abs(ks - be) / reach, 0.0)
-            weights = base / base.sum(0)
-            cols = np.arange(len(idx))
-            if strength > 0:
-                strobe = np.zeros_like(base)
-                for j in range(flashes):
-                    at = be if flashes == 1 else F.rnd(j * (n - 1) / (flashes - 1)).astype(np.int64)
-                    np.add.at(strobe, (at, cols), base[at, cols])
-                total = strobe.sum(0)
-                weights = np.where(total > 0, weights * (1 - strength)
-                                   + strobe / np.where(total > 0, total, 1) * strength, weights)
-            if t["rear_sync"]:
-                weights[be, cols] += 1.0
-                weights = weights / 2.0
-
-            def tap(k):
-                sel = moving[idx] & (k < n)
-                i = idx[sel]
-                offset = (k - behind[i]) * step[i]
-                return sel, x[i] + ux * offset, y[i] + uy * offset, weights[k, sel]
-            return moving[idx], tap
-        return _gather(src, chunk_taps, 64)
+        paths = parse_paths(t.get("paths"))
+        if paths is None:
+            paths = [{"points": [(t["start_x"] / 100.0, t["start_y"] / 100.0),
+                                 (t["end_x"] / 100.0, t["end_y"] / 100.0)],
+                      "start_speed": float(t["start_speed"]), "end_speed": float(t["end_speed"])}]
+        return path_blur(src, paths, t["speed"], t["taper"], t["centered"], t["rear_sync"],
+                         t["strobe_strength"], t["strobe_flashes"], _noise_of(t))
 
 
 # ==== Sharpen ==========================================================================

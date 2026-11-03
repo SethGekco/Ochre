@@ -9,6 +9,13 @@
   Iris        drag out an ellipse: sharp inside, blurring outside.
   Tilt-Shift  drag along the line that should stay sharp; blur grows away
               from it on both sides.
+  Spin        click to drop a spin (drag out to size it), click its centre
+              to select or drag it, Alt-click to remove it. Blur Angle and
+              Feather set the selected spin.
+  Path        click to pin stop points; the path is the curve through
+              them. Shift-click starts another path; drag a point to move
+              it, Alt-click to remove it. Amount sets the selected path's
+              end point speeds.
 
 The layer previews as you go; Enter applies (one undo step), Escape puts
 it back.
@@ -19,10 +26,11 @@ import math
 
 import numpy as np
 
+from .. import galleryextra as GE
 from .. import morefilters as MF
 from ..stroke import StrokeSession
 from . import options as O
-from .base import MOD_ALT, Tool
+from .base import MOD_ALT, MOD_SHIFT, Tool
 
 
 class BlurGalleryTool(Tool):
@@ -32,12 +40,16 @@ class BlurGalleryTool(Tool):
     multi_click = True
     commit_on_switch = True
     options_spec = (
-        O.Opt("mode", O.CHOICE, "field", "Blur", choices=("field", "iris", "tilt_shift"),
-              labels={"field": "Field", "iris": "Iris", "tilt_shift": "Tilt-Shift"}),
+        O.Opt("mode", O.CHOICE, "field", "Blur",
+              choices=("field", "iris", "tilt_shift", "spin", "path"),
+              labels={"field": "Field", "iris": "Iris", "tilt_shift": "Tilt-Shift",
+                      "spin": "Spin", "path": "Path"}),
         O.Opt("blur", O.INT, 15, "Amount", 0, 200, suffix=" px"),
         O.Opt("feather", O.INT, 40, "Feather", 0, 100, suffix=" %"),
         O.Opt("band", O.INT, 40, "Sharp band", 0, 2000, suffix=" px",
               tip="Tilt-Shift: how wide the sharp band is."),
+        O.Opt("blur_angle", O.INT, 15, "Blur Angle", 0, 360, suffix=" deg",
+              tip="Spin: how far the selected spin turns."),
     )
 
     def __init__(self, **options):
@@ -46,6 +58,8 @@ class BlurGalleryTool(Tool):
 
     def _reset(self):
         self.pins = []            # field: [[x, y, blur], ...]
+        self.spins = []           # spin: [[x, y, rx, ry, angle, feather, blur_angle, 0, 0], ...]
+        self.paths = []           # path: [{"points": [[x, y], ...], "speed": px}, ...]
         self.selected = None
         self.shape = None         # iris (x0, y0, x1, y1) / tilt-shift (x0, y0, x1, y1)
         self._drag = None
@@ -82,6 +96,10 @@ class BlurGalleryTool(Tool):
             self.selected = len(self.pins) - 1
             self._drag = ("pin", self.selected)
             return None
+        if mode == "spin":
+            return self._begin_spin(ctx, event)
+        if mode == "path":
+            return self._begin_path(ctx, event)
         self._drag = ("shape", (event.x, event.y))
         self.shape = (event.x, event.y, event.x, event.y)
         return None
@@ -92,6 +110,17 @@ class BlurGalleryTool(Tool):
         if self._drag[0] == "pin":
             p = self.pins[self._drag[1]]
             p[0], p[1] = float(event.x), float(event.y)
+        elif self._drag[0] == "spin":
+            s = self.spins[self._drag[1]]
+            s[0], s[1] = float(event.x), float(event.y)
+        elif self._drag[0] == "spin_size":
+            _, i, x0, y0 = self._drag
+            r = math.hypot(event.x - x0, event.y - y0)
+            if r >= 3:
+                self.spins[i][2] = self.spins[i][3] = r
+        elif self._drag[0] == "point":
+            _, i, k = self._drag
+            self.paths[i]["points"][k] = [float(event.x), float(event.y)]
         elif self._drag[0] == "shape":
             x0, y0 = self._drag[1]
             self.shape = (x0, y0, event.x, event.y)
@@ -103,11 +132,68 @@ class BlurGalleryTool(Tool):
         self.active = True
         return self._render(ctx)
 
+    def _begin_spin(self, ctx, event):
+        r = self._radius(ctx)
+        for i, s in enumerate(self.spins):
+            if math.hypot(s[0] - event.x, s[1] - event.y) <= r:
+                if event.has(MOD_ALT):
+                    del self.spins[i]
+                    self.selected = None
+                    self._drag = ("render",)
+                else:
+                    self.selected = i
+                    self._drag = ("spin", i)
+                return None
+        if len(self.spins) >= GE.MAX_BLUR_PINS:
+            return None
+        # Kooka's opening spin: a circle 0.13 of the width across.
+        radius = 0.13 * ctx.doc.bounds.w
+        self.spins.append([float(event.x), float(event.y), radius, radius, 0.0,
+                           float(self.option("feather", 40)) / 100.0,
+                           float(self.option("blur_angle", 15)), 0.0, 0.0])
+        self.selected = len(self.spins) - 1
+        self._drag = ("spin_size", self.selected, float(event.x), float(event.y))
+        return None
+
+    def _begin_path(self, ctx, event):
+        r = self._radius(ctx)
+        for i, path in enumerate(self.paths):
+            for k, (x, y) in enumerate(path["points"]):
+                if math.hypot(x - event.x, y - event.y) <= r:
+                    if event.has(MOD_ALT):
+                        del path["points"][k]
+                        if not path["points"]:
+                            del self.paths[i]
+                        self.selected = None if not path["points"] else i
+                        self._drag = ("render",)
+                    else:
+                        self.selected = i
+                        self._drag = ("point", i, k)
+                    return None
+        point = [float(event.x), float(event.y)]
+        if (event.has(MOD_SHIFT) or self.selected is None or self.selected >= len(self.paths)
+                or len(self.paths[self.selected]["points"]) >= GE.MAX_PATH_POINTS):
+            if len(self.paths) >= GE.MAX_BLUR_PINS:
+                return None
+            self.paths.append({"points": [], "speed": float(self.option("blur", 15))})
+            self.selected = len(self.paths) - 1
+        pts = self.paths[self.selected]["points"]
+        pts.append(point)
+        self._drag = ("point", self.selected, len(pts) - 1)
+        return None
+
     def options_changed(self, ctx):
-        """A new Amount sets the selected pin; Feather and Band re-render."""
-        if self.option("mode", "field") == "field" and self.selected is not None \
-                and self.selected < len(self.pins):
-            self.pins[self.selected][2] = float(self.option("blur", 15))
+        """A new Amount sets the selected pin (Field) or path's end speeds
+        (Path), Blur Angle and Feather the selected spin; the rest re-render."""
+        mode = self.option("mode", "field")
+        sel = self.selected
+        if mode == "field" and sel is not None and sel < len(self.pins):
+            self.pins[sel][2] = float(self.option("blur", 15))
+        elif mode == "spin" and sel is not None and sel < len(self.spins):
+            self.spins[sel][5] = float(self.option("feather", 40)) / 100.0
+            self.spins[sel][6] = float(self.option("blur_angle", 15))
+        elif mode == "path" and sel is not None and sel < len(self.paths):
+            self.paths[sel]["speed"] = float(self.option("blur", 15))
         return self._render(ctx)
 
     # ---- rendering ------------------------------------------------------------------
@@ -119,6 +205,10 @@ class BlurGalleryTool(Tool):
         amount = float(self.option("blur", 15))
         if mode == "field":
             return MF.field_blur(src, self.pins) if self.pins else src.copy()
+        if mode == "spin":
+            return GE.spin_blur(src, self.spins_fractions(w, h))
+        if mode == "path":
+            return GE.path_blur(src, self.paths_fractions(w, h), speed=100)
         if self.shape is None:
             return src.copy()
         x0, y0, x1, y1 = self.shape
@@ -175,6 +265,18 @@ class BlurGalleryTool(Tool):
     def pins_json(self):
         return json.dumps(self.pins)
 
+    def spins_fractions(self, w, h):
+        """The spins as Spin Blur's `spins` JSON takes them (fractions)."""
+        return [[x / w, y / h, rx / w, ry / w, a, f, b, px / w, py / h]
+                for x, y, rx, ry, a, f, b, px, py in self.spins]
+
+    def paths_fractions(self, w, h):
+        """The paths with two points or more, as Path Blur's `paths` JSON
+        takes them (fractions; the speed at both ends)."""
+        return [{"points": [[x / w, y / h] for x, y in p["points"]],
+                 "start_speed": p["speed"], "end_speed": p["speed"]}
+                for p in self.paths if len(p["points"]) >= 2]
+
     # ---- drawing ------------------------------------------------------------------------
 
     def overlay(self):
@@ -186,6 +288,30 @@ class BlurGalleryTool(Tool):
                 out.append(("poly", [(x + r * math.cos(t), y + r * math.sin(t))
                                      for t in np.linspace(0, 2 * math.pi, 16, endpoint=False)], True))
                 out.append(("text", (x + 10, y - 10), "%d px" % int(b)))
+            return out
+        ring = np.linspace(0, 2 * math.pi, 48, endpoint=False)
+        if mode == "spin":
+            for i, (x, y, rx, ry, _a, f, b, _px, _py) in enumerate(self.spins):
+                out.append(("poly", [(x + rx * math.cos(t), y + ry * math.sin(t)) for t in ring], True))
+                if f > 0:
+                    out.append(("poly", [(x + rx * f * math.cos(t), y + ry * f * math.sin(t))
+                                         for t in ring[::2]], True))
+                r = 8 if i == self.selected else 6
+                out.append(("poly", [(x + r * math.cos(t), y + r * math.sin(t))
+                                     for t in ring[::3]], True))
+                out.append(("text", (x + 10, y - 10), "%d deg" % int(b)))
+            return out
+        if mode == "path":
+            for i, p in enumerate(self.paths):
+                pts = p["points"]
+                if len(pts) >= 2:
+                    out.append(("poly", [tuple(q) for q in GE.catmull_rom(pts)], False))
+                r = 6 if i == self.selected else 4
+                for x, y in pts:
+                    out.append(("poly", [(x + r * math.cos(t), y + r * math.sin(t))
+                                         for t in ring[::3]], True))
+                if pts:
+                    out.append(("text", (pts[-1][0] + 10, pts[-1][1] - 10), "%d px" % int(p["speed"])))
             return out
         if self.shape is None:
             return out
